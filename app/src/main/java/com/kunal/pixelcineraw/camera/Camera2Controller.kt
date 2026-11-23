@@ -13,8 +13,10 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.TonemapCurve
+import android.hardware.display.DisplayManager
 import android.media.Image
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -23,6 +25,7 @@ import android.util.Range
 import android.util.Size
 import android.view.PixelCopy
 import android.view.Surface
+import android.view.WindowManager
 import com.kunal.pixelcineraw.gl.HlgGlRenderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -261,11 +264,29 @@ class Camera2Controller(
         }
     }
 
+    fun getDisplayRotation(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                context.display?.rotation ?: Surface.ROTATION_90
+            } catch (e: Exception) {
+                Surface.ROTATION_90
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay?.rotation ?: Surface.ROTATION_90
+        }
+    }
+
+    fun setDisplayRotation(rotation: Int) {
+        hlgGlRenderer?.setDisplayRotation(rotation)
+    }
+
     /**
      * Attaches the preview surface and starts the camera stream.
      */
     fun attachPreviewSurface(surface: Surface) {
         previewSurface = surface
+        hlgGlRenderer?.setDisplayRotation(getDisplayRotation())
         val currentSpec = _state.value.currentSensorSpec
         if (currentSpec != null) {
             openCamera(currentSpec.cameraId)
@@ -419,6 +440,7 @@ class Camera2Controller(
                 return
             }
 
+            renderer.setDisplayRotation(getDisplayRotation())
             renderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
             renderer.setColorMode(_state.value.colorProfile)
 

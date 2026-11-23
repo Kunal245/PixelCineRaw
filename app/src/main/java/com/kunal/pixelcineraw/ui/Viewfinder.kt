@@ -84,6 +84,23 @@ fun Viewfinder(
         surfaceViewRef?.setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
     }
 
+    val context = LocalContext.current
+    DisposableEffect(context) {
+        val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                val rotation = viewModel.cameraController.getDisplayRotation()
+                viewModel.cameraController.setDisplayRotation(rotation)
+            }
+        }
+        displayManager?.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+        onDispose {
+            displayManager?.unregisterDisplayListener(listener)
+        }
+    }
+
     var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
 
     Box(
@@ -138,6 +155,7 @@ fun Viewfinder(
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             surfaceViewRef = this@apply
                             setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                            display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                             val surface = holder.surface
                             if (surface.isValid) {
                                 viewModel.attachPreviewSurface(surface)
@@ -148,6 +166,7 @@ fun Viewfinder(
                             val pSize = viewModel.cameraController.optimalPreviewSize
                             setAspectRatio(pSize.width, pSize.height)
                             setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                            display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -162,6 +181,7 @@ fun Viewfinder(
                 view.holder.setFixedSize(currentSize.width, currentSize.height)
                 view.setAspectRatio(currentSize.width, currentSize.height)
                 view.setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
             }
         )
 

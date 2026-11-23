@@ -158,6 +158,32 @@ void main() {
     var currentColorMode: Int = 0
         private set
 
+    @Volatile
+    var displayRotation: Int = Surface.ROTATION_90
+        private set
+
+    fun setDisplayRotation(rotation: Int) {
+        displayRotation = rotation
+    }
+
+    private val previewMatrix = FloatArray(16)
+
+    private fun computePreviewMatrix(stMatrix: FloatArray, rotation: Int): FloatArray {
+        System.arraycopy(stMatrix, 0, previewMatrix, 0, 16)
+        val rotationDeg = when (rotation) {
+            Surface.ROTATION_90 -> -90f
+            Surface.ROTATION_270 -> 90f
+            Surface.ROTATION_180 -> 180f
+            else -> -90f // Default landscape
+        }
+        if (rotationDeg != 0f) {
+            Matrix.translateM(previewMatrix, 0, 0.5f, 0.5f, 0.0f)
+            Matrix.rotateM(previewMatrix, 0, rotationDeg, 0.0f, 0.0f, 1.0f)
+            Matrix.translateM(previewMatrix, 0, -0.5f, -0.5f, 0.0f)
+        }
+        return previewMatrix
+    }
+
     init {
         vertexBuffer = ByteBuffer.allocateDirect(VERTICES.size * 4)
             .order(ByteOrder.nativeOrder())
@@ -527,18 +553,19 @@ void main() {
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-            drawQuad()
+            val pMatrix = computePreviewMatrix(texMatrix, displayRotation)
+            drawQuad(pMatrix)
             checkGlError("drawQuad preview")
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
 
-            // 4. Render to MediaCodec HEVC Encoder if recording
+            // 4. Render to MediaCodec HEVC Encoder if recording (clean sensor landscape matrix)
             if (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE) {
                 if (EGL14.eglMakeCurrent(eglDisplay, eSurf, eSurf, eglContext)) {
                     GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
                     GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                    drawQuad()
+                    drawQuad(texMatrix)
                     checkGlError("drawQuad encoder")
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, timestampNs)
                     EGL14.eglSwapBuffers(eglDisplay, eSurf)
@@ -549,10 +576,10 @@ void main() {
         }
     }
 
-    private fun drawQuad() {
+    private fun drawQuad(matrix: FloatArray) {
         GLES20.glUseProgram(programId)
 
-        GLES20.glUniformMatrix4fv(uSTMatrixLoc, 1, false, texMatrix, 0)
+        GLES20.glUniformMatrix4fv(uSTMatrixLoc, 1, false, matrix, 0)
         GLES20.glUniform1i(uColorModeLoc, currentColorMode)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
