@@ -258,46 +258,6 @@ fun CinemaScreen(
             )
         }
 
-        // 7b. 120Hz Sleek Apple/Blackmagic Canvas Rotary Zoom Wheel (Floats directly above lens hub)
-        var zoomAutoHideJob by remember { mutableStateOf<Job?>(null) }
-        fun scheduleZoomAutoHide() {
-            zoomAutoHideJob?.cancel()
-            zoomAutoHideJob = coroutineScope.launch {
-                delay(1500L)
-                viewModel.cameraController.setZoomSliderVisibility(false)
-            }
-        }
-
-        LaunchedEffect(state.isZoomSliderVisible) {
-            if (state.isZoomSliderVisible) {
-                scheduleZoomAutoHide()
-            }
-        }
-
-        AnimatedVisibility(
-            visible = state.isZoomSliderVisible && !state.isCleanViewfinder,
-            enter = slideInVertically { it / 2 } + fadeIn(tween(150)),
-            exit = slideOutVertically { it / 2 } + fadeOut(tween(150)),
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 68.dp, bottom = 58.dp)
-        ) {
-            ZoomWheel(
-                currentZoom = state.zoomRatio,
-                minZoom = state.minZoomRatio,
-                maxZoom = state.maxZoomRatio,
-                onZoomChanged = { zoom ->
-                    viewModel.cameraController.setZoomRatio(zoom)
-                },
-                onUserInteraction = {
-                    scheduleZoomAutoHide()
-                },
-                modifier = Modifier
-                    .width(300.dp)
-                    .height(44.dp)
-            )
-        }
-
         // 8. Shared Expandable Rotary Dial Wheel (Pops up directly above the bottom deck)
         AnimatedVisibility(
             visible = activeDial != ActiveDial.NONE && !state.isCleanViewfinder,

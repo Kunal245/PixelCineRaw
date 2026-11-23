@@ -1,15 +1,18 @@
 package com.kunal.pixelcineraw.ui
 
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,12 +40,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
+
+private const val TAG = "CinemaZoomHub"
 
 /**
  * Logarithmic zoom math conversions:
@@ -71,8 +80,17 @@ object ZoomMath {
 }
 
 /**
- * Sleek Quick-Tap Lens Hub (0.5x, 1x, 2x, 5x).
- * Pure non-resizing horizontal pill bar with 300ms cubic ease-out.
+ * Unified iPhone Pro Camera-style Zoom Wheel & Quick-Tap Hub.
+ *
+ * - Resting State (Compact Frosted Pill): 40dp height, Color(0xB8101216), 1dp border Color(0x24FFFFFF),
+ *   housing circular preset badges (0.5, 1x, 2, 5), where the active lens sits in a clean circular highlight
+ *   Color(0x2EFFFFFF) with golden-yellow tabular text (#FFD60A).
+ *
+ * - Unified Gesture (Zero Touch Conflict):
+ *   - Tap: Detects which preset zone was tapped and smoothly glides to that exact ratio in 320ms.
+ *   - Slide: Drag past touchSlop immediately morphs the bar into the 280dp cylindrical perspective tick wheel
+ *     without requiring finger lift, tracking logarithmic zoom 1:1 with inertial fling decay on release.
+ *   - Auto-collapses back to compact pill 1.2s after finger release.
  */
 @Composable
 fun CinemaZoomHub(
@@ -81,115 +99,457 @@ fun CinemaZoomHub(
     onSliderVisibilityChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+
     val minZoom = state.minZoomRatio
     val maxZoom = state.maxZoomRatio
+    val currentZoom = state.zoomRatio
 
-    val animatableNorm = remember {
-        Animatable(ZoomMath.zoomToNormalized(state.zoomRatio, minZoom, maxZoom)).apply {
-            updateBounds(0f, 1f)
+    val currentZoomState = rememberUpdatedState(currentZoom)
+    val minZoomState = rememberUpdatedState(minZoom)
+    val maxZoomState = rememberUpdatedState(maxZoom)
+    val onZoomChangedState = rememberUpdatedState(onZoomChanged)
+
+    var isUserInteracting by remember { mutableStateOf(false) }
+    val isExpanded = isUserInteracting || state.isZoomSliderVisible
+    val isExpandedState = rememberUpdatedState(isExpanded)
+
+    var autoCollapseJob by remember { mutableStateOf<Job?>(null) }
+    var flingJob by remember { mutableStateOf<Job?>(null) }
+    var presetGlideJob by remember { mutableStateOf<Job?>(null) }
+    var lastHapticMilestone by remember { mutableIntStateOf(-1) }
+
+    fun checkHaptics(zoom: Float) {
+        val milestone = when {
+            abs(zoom - 0.5f) < 0.04f -> 0
+            abs(zoom - 1.0f) < 0.04f -> 1
+            abs(zoom - 2.0f) < 0.04f -> 2
+            abs(zoom - 3.0f) < 0.04f -> 3
+            abs(zoom - 5.0f) < 0.05f -> 5
+            abs(zoom - 8.0f) < 0.06f -> 8
+            else -> -1
+        }
+        if (milestone != -1 && milestone != lastHapticMilestone) {
+            lastHapticMilestone = milestone
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        } else if (milestone == -1) {
+            lastHapticMilestone = -1
         }
     }
-    var isAnimatingPreset by remember { mutableStateOf(false) }
+
+    fun scheduleAutoCollapse() {
+        autoCollapseJob?.cancel()
+        autoCollapseJob = coroutineScope.launch {
+            delay(1200L)
+            isUserInteracting = false
+            onSliderVisibilityChanged(false)
+        }
+    }
+
+    // Auto-collapse when pinch-to-zoom finishes externally
+    LaunchedEffect(state.isZoomSliderVisible) {
+        if (state.isZoomSliderVisible && !isUserInteracting) {
+            scheduleAutoCollapse()
+        }
+    }
+
+    val containerWidth by animateDpAsState(
+        targetValue = if (isExpanded) 280.dp else 192.dp,
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "zoomWidth"
+    )
+    val containerHeight by animateDpAsState(
+        targetValue = if (isExpanded) 54.dp else 40.dp,
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "zoomHeight"
+    )
+    val containerRadius by animateDpAsState(
+        targetValue = if (isExpanded) 16.dp else 20.dp,
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "zoomRadius"
+    )
+    val expandProgress by animateFloatAsState(
+        targetValue = if (isExpanded) 1f else 0f,
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "zoomExpandProgress"
+    )
+
+    // Sweep calibration: 280dp sweeps the entire normalized [0, 1] range
+    val sweepPx = with(density) { 280.dp.toPx() }
 
     fun animateToZoom(targetZoom: Float) {
-        val targetNorm = ZoomMath.zoomToNormalized(targetZoom, minZoom, maxZoom)
-        onSliderVisibilityChanged(true)
-
-        coroutineScope.launch {
-            isAnimatingPreset = true
-            try {
-                animatableNorm.animateTo(
-                    targetValue = targetNorm,
-                    animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)
-                ) {
-                    val computedZoom = ZoomMath.normalizedToZoom(value, minZoom, maxZoom)
-                    onZoomChanged(computedZoom)
-                }
-                onZoomChanged(targetZoom)
-            } finally {
-                isAnimatingPreset = false
+        presetGlideJob?.cancel()
+        presetGlideJob = coroutineScope.launch {
+            val cZoom = currentZoomState.value
+            val mMin = minZoomState.value
+            val mMax = maxZoomState.value
+            val startNorm = ZoomMath.zoomToNormalized(cZoom, mMin, mMax)
+            val targetNorm = ZoomMath.zoomToNormalized(targetZoom, mMin, mMax)
+            val anim = Animatable(startNorm).apply { updateBounds(0f, 1f) }
+            anim.animateTo(
+                targetValue = targetNorm,
+                animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing)
+            ) {
+                val z = ZoomMath.normalizedToZoom(value, mMin, mMax)
+                onZoomChangedState.value(z)
             }
+            onZoomChangedState.value(targetZoom)
         }
     }
 
-    // Sync external zoom updates into animatableNorm
-    LaunchedEffect(state.zoomRatio) {
-        if (!isAnimatingPreset) {
-            val targetNorm = ZoomMath.zoomToNormalized(state.zoomRatio, minZoom, maxZoom)
-            if (abs(animatableNorm.value - targetNorm) > 0.002f) {
-                animatableNorm.snapTo(targetNorm)
-            }
+    // Pre-measure tick labels for major stops
+    val majorStops = remember {
+        listOf(
+            0.5f to "0.5x",
+            1.0f to "1x",
+            2.0f to "2x",
+            3.0f to "3x",
+            5.0f to "5x",
+            8.0f to "8x"
+        )
+    }
+
+    val measuredLabels = remember(textMeasurer) {
+        majorStops.map { (stopZoom, label) ->
+            val layout = textMeasurer.measure(
+                text = label,
+                style = TextStyle(
+                    color = Color.White,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            )
+            Triple(stopZoom, label, layout)
         }
     }
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = modifier
-            .background(Color(0xD9101216), RoundedCornerShape(20.dp))
-            .border(0.6.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
-            .padding(horizontal = 6.dp, vertical = 4.dp)
+    val mediumStopZooms = remember {
+        listOf(0.7f, 1.5f, 2.5f, 4.0f, 6.5f)
+    }
+
+    Box(
+        modifier = modifier.wrapContentSize(),
+        contentAlignment = Alignment.Center
     ) {
-        listOf(0.5f, 1.0f, 2.0f, 5.0f).forEach { preset ->
-            val isSelected = abs(state.zoomRatio - preset) < 0.12f
-            val label = if (isSelected) {
-                String.format(Locale.US, "%.1fx", state.zoomRatio)
-            } else {
-                "${if (preset == 0.5f) "0.5" else preset.toInt()}x"
-            }
-
+        // Floating Readout Badge (Anchored above center needle when expanded)
+        if (expandProgress > 0.05f) {
             Box(
-                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(width = if (isSelected) 52.dp else 36.dp, height = 30.dp)
-                    .background(
-                        color = if (isSelected) Color(0xFFFFCC00) else Color.Transparent,
-                        shape = CircleShape
-                    )
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() }
-                    ) {
-                        animateToZoom(preset)
+                    .align(Alignment.TopCenter)
+                    .offset(y = (-32).dp)
+                    .graphicsLayer {
+                        alpha = expandProgress
+                        translationY = (1f - expandProgress) * 8f
                     }
+                    .background(Color(0xE6101216), RoundedCornerShape(8.dp))
+                    .border(0.8.dp, Color(0x33FFFFFF), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 9.dp, vertical = 3.dp)
             ) {
                 Text(
-                    text = label,
-                    color = if (isSelected) Color.Black else Color.White,
+                    text = String.format(Locale.US, "%.1fx · %s", currentZoom, ZoomMath.formatFocalLength(currentZoom)),
+                    color = Color(0xFFFFD60A),
                     fontSize = 11.sp,
-                    fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
+                    fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
             }
         }
 
-        // Live 35mm Focal Length readout & Slider Expander
+        // Morphing Capsule
         Box(
             modifier = Modifier
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() }
-                ) {
-                    onSliderVisibilityChanged(!state.isZoomSliderVisible)
-                }
-                .padding(horizontal = 6.dp, vertical = 4.dp),
+                .width(containerWidth)
+                .height(containerHeight)
+                .background(Color(0xB8101216), RoundedCornerShape(containerRadius))
+                .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(containerRadius))
+                .pointerInput(Unit) {
+                    val touchSlop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downX = down.position.x
+                        val totalWidth = size.width.toFloat()
+
+                        autoCollapseJob?.cancel()
+                        flingJob?.cancel()
+                        presetGlideJob?.cancel()
+
+                        val velocityTracker = VelocityTracker()
+                        velocityTracker.addPosition(down.uptimeMillis, down.position)
+
+                        var isDrag = isExpandedState.value
+                        if (isDrag) {
+                            isUserInteracting = true
+                            down.consume()
+                        }
+
+                        var prevX = down.position.x
+                        var dragDispatched = false
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+
+                            if (!change.pressed) {
+                                change.consume()
+                                if (!dragDispatched) {
+                                    // Tap on preset badge
+                                    val quadrantWidth = totalWidth / 4f
+                                    val quadrantIndex = (downX / quadrantWidth).toInt().coerceIn(0, 3)
+                                    val targetPreset = when (quadrantIndex) {
+                                        0 -> 0.5f
+                                        1 -> 1.0f
+                                        2 -> 2.0f
+                                        3 -> 5.0f
+                                        else -> 1.0f
+                                    }
+                                    Log.d(TAG, "Tap preset: downX=$downX, quadrant=$quadrantIndex -> $targetPreset")
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    animateToZoom(targetPreset)
+                                } else {
+                                    // Drag released: apply inertial fling decay
+                                    val velocity = velocityTracker.calculateVelocity().x
+                                    if (abs(velocity) > 80f) {
+                                        flingJob = coroutineScope.launch {
+                                            val cZoom = currentZoomState.value
+                                            val mMin = minZoomState.value
+                                            val mMax = maxZoomState.value
+                                            val curNorm = ZoomMath.zoomToNormalized(cZoom, mMin, mMax)
+                                            val anim = Animatable(curNorm).apply { updateBounds(0f, 1f) }
+                                            val initialNormVel = -velocity / sweepPx
+                                            anim.animateDecay(
+                                                initialVelocity = initialNormVel,
+                                                animationSpec = exponentialDecay(frictionMultiplier = 1.35f)
+                                            ) {
+                                                val z = ZoomMath.normalizedToZoom(value, mMin, mMax)
+                                                onZoomChangedState.value(z)
+                                                checkHaptics(z)
+                                            }
+                                            scheduleAutoCollapse()
+                                        }
+                                    } else {
+                                        scheduleAutoCollapse()
+                                    }
+                                }
+                                break
+                            }
+
+                            velocityTracker.addPosition(change.uptimeMillis, change.position)
+                            val currentX = change.position.x
+                            val deltaFromDown = currentX - downX
+
+                            if (!dragDispatched) {
+                                if (abs(deltaFromDown) > touchSlop || isDrag) {
+                                    dragDispatched = true
+                                    isUserInteracting = true
+                                    onSliderVisibilityChanged(true)
+                                    change.consume()
+                                    prevX = currentX
+                                    Log.d(TAG, "Drag started: deltaFromDown=$deltaFromDown")
+                                }
+                            } else {
+                                change.consume()
+                                val deltaX = currentX - prevX
+                                prevX = currentX
+
+                                val deltaNorm = -deltaX / sweepPx
+                                val cZoom = currentZoomState.value
+                                val mMin = minZoomState.value
+                                val mMax = maxZoomState.value
+                                val curNorm = ZoomMath.zoomToNormalized(cZoom, mMin, mMax)
+                                val newNorm = (curNorm + deltaNorm).coerceIn(0f, 1f)
+                                val newZoom = ZoomMath.normalizedToZoom(newNorm, mMin, mMax)
+                                onZoomChangedState.value(newZoom)
+                                checkHaptics(newZoom)
+                            }
+                        }
+                    }
+                },
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = ZoomMath.formatFocalLength(state.zoomRatio),
-                color = Color(0xCCFFFFFF),
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
+            // LAYER 1: Resting State Preset Pills (0.5, 1x, 2, 5)
+            if (expandProgress < 0.95f) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            alpha = (1f - expandProgress * 2f).coerceIn(0f, 1f)
+                        },
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val presets = listOf(
+                        0.5f to "0.5",
+                        1.0f to "1x",
+                        2.0f to "2",
+                        5.0f to "5"
+                    )
+                    val activeIndex = when {
+                        currentZoom < 0.75f -> 0
+                        currentZoom < 1.5f -> 1
+                        currentZoom < 3.5f -> 2
+                        else -> 3
+                    }
+                    presets.forEachIndexed { index, (presetVal, label) ->
+                        val isSelected = (index == activeIndex)
+                        val displayLabel = if (isSelected && abs(currentZoom - presetVal) > 0.15f) {
+                            String.format(Locale.US, "%.1f", currentZoom)
+                        } else {
+                            label
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(
+                                    color = if (isSelected) Color(0x2EFFFFFF) else Color.Transparent,
+                                    shape = CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = displayLabel,
+                                color = if (isSelected) Color(0xFFFFD60A) else Color(0xCCFFFFFF),
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+
+            // LAYER 2: Expanded Cylindrical Perspective Tick Wheel (Canvas)
+            if (expandProgress > 0.05f) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            alpha = ((expandProgress - 0.15f) / 0.85f).coerceIn(0f, 1f)
+                        }
+                ) {
+                    val w = size.width
+                    val h = size.height
+                    val cx = w / 2f
+                    val cylinderRadius = w / 2.3f
+
+                    val currentNorm = ZoomMath.zoomToNormalized(currentZoom, minZoom, maxZoom)
+
+                    // 1. Minor logarithmic ticks (~55 ticks across [0, 1])
+                    val minorTickCount = 55
+                    for (i in 0..minorTickCount) {
+                        val tickNorm = i / minorTickCount.toFloat()
+                        val deltaNorm = tickNorm - currentNorm
+                        val arcDist = deltaNorm * sweepPx
+                        val theta = arcDist / cylinderRadius
+                        if (theta > -PI / 2.0 && theta < PI / 2.0) {
+                            val xProjected = cx + cylinderRadius * sin(theta.toDouble()).toFloat()
+                            val kappa = cos(theta.toDouble()).toFloat()
+                            val tickH = 9.dp.toPx() * kappa
+                            val startY = 8.dp.toPx()
+                            drawLine(
+                                color = Color.White.copy(alpha = 0.28f * (kappa * kappa)),
+                                start = Offset(xProjected, startY),
+                                end = Offset(xProjected, startY + tickH),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+                    }
+
+                    // 2. Medium intermediate ticks (0.7x, 1.5x, 2.5x, 4.0x, 6.5x)
+                    for (mZoom in mediumStopZooms) {
+                        val mNorm = ZoomMath.zoomToNormalized(mZoom, minZoom, maxZoom)
+                        val deltaNorm = mNorm - currentNorm
+                        val arcDist = deltaNorm * sweepPx
+                        val theta = arcDist / cylinderRadius
+                        if (theta > -PI / 2.0 && theta < PI / 2.0) {
+                            val xProjected = cx + cylinderRadius * sin(theta.toDouble()).toFloat()
+                            val kappa = cos(theta.toDouble()).toFloat()
+                            val tickH = 15.dp.toPx() * kappa
+                            val startY = 6.dp.toPx()
+                            drawLine(
+                                color = Color.White.copy(alpha = 0.60f * (kappa * kappa)),
+                                start = Offset(xProjected, startY),
+                                end = Offset(xProjected, startY + tickH),
+                                strokeWidth = 1.2.dp.toPx()
+                            )
+                        }
+                    }
+
+                    // 3. Major stops with measured text labels (0.5x, 1x, 2x, 3x, 5x, 8x)
+                    for ((stopZoom, _, layout) in measuredLabels) {
+                        val sNorm = ZoomMath.zoomToNormalized(stopZoom, minZoom, maxZoom)
+                        val deltaNorm = sNorm - currentNorm
+                        val arcDist = deltaNorm * sweepPx
+                        val theta = arcDist / cylinderRadius
+                        if (theta > -PI / 2.0 && theta < PI / 2.0) {
+                            val xProjected = cx + cylinderRadius * sin(theta.toDouble()).toFloat()
+                            val kappa = cos(theta.toDouble()).toFloat()
+                            val tickH = 20.dp.toPx() * kappa
+                            val startY = 4.dp.toPx()
+                            drawLine(
+                                color = Color.White.copy(alpha = (kappa * kappa).coerceIn(0f, 1f)),
+                                start = Offset(xProjected, startY),
+                                end = Offset(xProjected, startY + tickH),
+                                strokeWidth = 1.8.dp.toPx() * kappa
+                            )
+                            if (kappa > 0.45f) {
+                                val textAlpha = ((kappa - 0.45f) / 0.55f).coerceIn(0f, 1f)
+                                drawText(
+                                    textLayoutResult = layout,
+                                    topLeft = Offset(xProjected - layout.size.width / 2f, 27.dp.toPx()),
+                                    alpha = textAlpha
+                                )
+                            }
+                        }
+                    }
+
+                    // 4. Center indicator needle (#FFD60A)
+                    drawLine(
+                        color = Color(0xFFFFD60A),
+                        start = Offset(cx, 0f),
+                        end = Offset(cx, h),
+                        strokeWidth = 2.dp.toPx()
+                    )
+
+                    val notchPath = Path().apply {
+                        moveTo(cx - 3.5.dp.toPx(), 0f)
+                        lineTo(cx + 3.5.dp.toPx(), 0f)
+                        lineTo(cx, 4.dp.toPx())
+                        close()
+                    }
+                    drawPath(notchPath, Color(0xFFFFD60A))
+
+                    // 5. Cylindrical edge vignettes
+                    val fadeWidth = 40.dp.toPx()
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(Color(0xF2101216), Color.Transparent),
+                            startX = 0f,
+                            endX = fadeWidth
+                        ),
+                        size = Size(fadeWidth, h)
+                    )
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(Color.Transparent, Color(0xF2101216)),
+                            startX = w - fadeWidth,
+                            endX = w
+                        ),
+                        topLeft = Offset(w - fadeWidth, 0f),
+                        size = Size(fadeWidth, h)
+                    )
+                }
+            }
         }
     }
 }
 
 /**
- * Sleek, lightweight Apple/Blackmagic-style Canvas Rotary Wheel.
- * Rendered strictly in Canvas draw phase (zero Compose layout recompositions at 120Hz).
+ * Reusable standalone ZoomWheel for backward compatibility.
  */
 @Composable
 fun ZoomWheel(
@@ -205,10 +565,7 @@ fun ZoomWheel(
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
 
-    // Drag sweep calibration: 260dp sweeps full range 0.5x -> 8.0x in ln(zoom) space
-    val sweepDistanceDp = 260.dp
-    val sweepPx = with(density) { sweepDistanceDp.toPx() }
-
+    val sweepPx = with(density) { 280.dp.toPx() }
     val animatableNorm = remember {
         Animatable(ZoomMath.zoomToNormalized(currentZoom, minZoom, maxZoom)).apply {
             updateBounds(0f, 1f)
@@ -233,7 +590,6 @@ fun ZoomWheel(
         }
     }
 
-    // Pre-measure tick labels once to avoid allocations during 120Hz draw loop
     val majorStops = remember {
         listOf(
             0.5f to "0.5x",
@@ -250,8 +606,8 @@ fun ZoomWheel(
             val layout = textMeasurer.measure(
                 text = label,
                 style = TextStyle(
-                    color = Color(0xCCFFFFFF),
-                    fontSize = 8.5.sp,
+                    color = Color.White,
+                    fontSize = 8.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
@@ -268,8 +624,8 @@ fun ZoomWheel(
 
     Box(
         modifier = modifier
-            .background(Color(0xE60A0C10), RoundedCornerShape(12.dp))
-            .border(0.8.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
+            .background(Color(0xB8101216), RoundedCornerShape(16.dp))
+            .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(16.dp))
             .pointerInput(minZoom, maxZoom, sweepPx) {
                 detectHorizontalDragGestures(
                     onDragStart = {
@@ -282,7 +638,6 @@ fun ZoomWheel(
                         change.consume()
                         onUserInteraction()
 
-                        // Direct 1:1 responsive drag in logarithmic space (zero spring lag)
                         val deltaNorm = -dragAmount / sweepPx
                         val currentNorm = ZoomMath.zoomToNormalized(currentZoom, minZoom, maxZoom)
                         val newNorm = (currentNorm + deltaNorm).coerceIn(0f, 1f)
@@ -295,15 +650,13 @@ fun ZoomWheel(
                         onUserInteraction()
                         val velocity = velocityTracker.calculateVelocity().x
                         if (abs(velocity) > 80f) {
-                            // Inertial decay glide: flick coasts smoothly like physical mechanical wheel
                             flingJob = coroutineScope.launch {
                                 val currentNorm = ZoomMath.zoomToNormalized(currentZoom, minZoom, maxZoom)
                                 val initialNormVelocity = -velocity / sweepPx
-                                val decaySpec = exponentialDecay<Float>(frictionMultiplier = 1.35f)
                                 animatableNorm.snapTo(currentNorm)
                                 animatableNorm.animateDecay(
                                     initialVelocity = initialNormVelocity,
-                                    animationSpec = decaySpec
+                                    animationSpec = exponentialDecay(frictionMultiplier = 1.35f)
                                 ) {
                                     val clampedNorm = value.coerceIn(0f, 1f)
                                     val computedZoom = ZoomMath.normalizedToZoom(clampedNorm, minZoom, maxZoom)
@@ -320,84 +673,99 @@ fun ZoomWheel(
             }
     ) {
         Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer()
+            modifier = Modifier.fillMaxSize()
         ) {
-            val cx = size.width / 2f
+            val w = size.width
             val h = size.height
+            val cx = w / 2f
+            val cylinderRadius = w / 2.3f
             val currentNorm = ZoomMath.zoomToNormalized(currentZoom, minZoom, maxZoom)
 
-            // 1. Minor logarithmic ticks (spaced every 0.02 in norm space)
-            val minorTickCount = 50
+            val minorTickCount = 55
             for (i in 0..minorTickCount) {
                 val tickNorm = i / minorTickCount.toFloat()
-                val tickX = cx + (tickNorm - currentNorm) * sweepPx
-                if (tickX in 0f..size.width) {
+                val deltaNorm = tickNorm - currentNorm
+                val arcDist = deltaNorm * sweepPx
+                val theta = arcDist / cylinderRadius
+                if (theta > -PI / 2.0 && theta < PI / 2.0) {
+                    val xProjected = cx + cylinderRadius * sin(theta.toDouble()).toFloat()
+                    val kappa = cos(theta.toDouble()).toFloat()
+                    val tickH = 9.dp.toPx() * kappa
+                    val startY = 8.dp.toPx()
                     drawLine(
-                        color = Color(0x33FFFFFF),
-                        start = Offset(tickX, 10.dp.toPx()),
-                        end = Offset(tickX, 20.dp.toPx()),
+                        color = Color.White.copy(alpha = 0.28f * (kappa * kappa)),
+                        start = Offset(xProjected, startY),
+                        end = Offset(xProjected, startY + tickH),
                         strokeWidth = 1.dp.toPx()
                     )
                 }
             }
 
-            // 2. Medium intermediate ticks
             for (mZoom in mediumStopZooms) {
                 val mNorm = ZoomMath.zoomToNormalized(mZoom, minZoom, maxZoom)
-                val mX = cx + (mNorm - currentNorm) * sweepPx
-                if (mX in 0f..size.width) {
+                val deltaNorm = mNorm - currentNorm
+                val arcDist = deltaNorm * sweepPx
+                val theta = arcDist / cylinderRadius
+                if (theta > -PI / 2.0 && theta < PI / 2.0) {
+                    val xProjected = cx + cylinderRadius * sin(theta.toDouble()).toFloat()
+                    val kappa = cos(theta.toDouble()).toFloat()
+                    val tickH = 15.dp.toPx() * kappa
+                    val startY = 6.dp.toPx()
                     drawLine(
-                        color = Color(0x77FFFFFF),
-                        start = Offset(mX, 7.dp.toPx()),
-                        end = Offset(mX, 23.dp.toPx()),
+                        color = Color.White.copy(alpha = 0.60f * (kappa * kappa)),
+                        start = Offset(xProjected, startY),
+                        end = Offset(xProjected, startY + tickH),
                         strokeWidth = 1.2.dp.toPx()
                     )
                 }
             }
 
-            // 3. Major stops with measured text labels
             for ((stopZoom, _, layout) in measuredLabels) {
                 val sNorm = ZoomMath.zoomToNormalized(stopZoom, minZoom, maxZoom)
-                val sX = cx + (sNorm - currentNorm) * sweepPx
-                if (sX in -40f..(size.width + 40f)) {
-                    // Major tick line
+                val deltaNorm = sNorm - currentNorm
+                val arcDist = deltaNorm * sweepPx
+                val theta = arcDist / cylinderRadius
+                if (theta > -PI / 2.0 && theta < PI / 2.0) {
+                    val xProjected = cx + cylinderRadius * sin(theta.toDouble()).toFloat()
+                    val kappa = cos(theta.toDouble()).toFloat()
+                    val tickH = 20.dp.toPx() * kappa
+                    val startY = 4.dp.toPx()
                     drawLine(
-                        color = Color.White,
-                        start = Offset(sX, 4.dp.toPx()),
-                        end = Offset(sX, 24.dp.toPx()),
-                        strokeWidth = 1.8.dp.toPx()
+                        color = Color.White.copy(alpha = (kappa * kappa).coerceIn(0f, 1f)),
+                        start = Offset(xProjected, startY),
+                        end = Offset(xProjected, startY + tickH),
+                        strokeWidth = 1.8.dp.toPx() * kappa
                     )
-                    // Text label below tick
-                    drawText(
-                        textLayoutResult = layout,
-                        topLeft = Offset(sX - layout.size.width / 2f, 26.dp.toPx())
-                    )
+                    if (kappa > 0.45f) {
+                        val textAlpha = ((kappa - 0.45f) / 0.55f).coerceIn(0f, 1f)
+                        drawText(
+                            textLayoutResult = layout,
+                            topLeft = Offset(xProjected - layout.size.width / 2f, 27.dp.toPx()),
+                            alpha = textAlpha
+                        )
+                    }
                 }
             }
 
-            // 4. Center indicator needle (Cinema Gold with top indicator triangle notch)
             drawLine(
-                color = Color(0xFFFFCC00),
+                color = Color(0xFFFFD60A),
                 start = Offset(cx, 0f),
                 end = Offset(cx, h),
                 strokeWidth = 2.dp.toPx()
             )
 
             val notchPath = Path().apply {
-                moveTo(cx - 4.dp.toPx(), 0f)
-                lineTo(cx + 4.dp.toPx(), 0f)
-                lineTo(cx, 4.5.dp.toPx())
+                moveTo(cx - 3.5.dp.toPx(), 0f)
+                lineTo(cx + 3.5.dp.toPx(), 0f)
+                lineTo(cx, 4.dp.toPx())
                 close()
             }
-            drawPath(notchPath, Color(0xFFFFCC00))
+            drawPath(notchPath, Color(0xFFFFD60A))
 
-            // 5. Edge fade vignettes (smoothly fades ticks at container borders)
-            val fadeWidth = 36.dp.toPx()
+            val fadeWidth = 40.dp.toPx()
             drawRect(
                 brush = Brush.horizontalGradient(
-                    colors = listOf(Color(0xF20A0C10), Color.Transparent),
+                    colors = listOf(Color(0xF2101216), Color.Transparent),
                     startX = 0f,
                     endX = fadeWidth
                 ),
@@ -405,11 +773,11 @@ fun ZoomWheel(
             )
             drawRect(
                 brush = Brush.horizontalGradient(
-                    colors = listOf(Color.Transparent, Color(0xF20A0C10)),
-                    startX = size.width - fadeWidth,
-                    endX = size.width
+                    colors = listOf(Color.Transparent, Color(0xF2101216)),
+                    startX = w - fadeWidth,
+                    endX = w
                 ),
-                topLeft = Offset(size.width - fadeWidth, 0f),
+                topLeft = Offset(w - fadeWidth, 0f),
                 size = Size(fadeWidth, h)
             )
         }

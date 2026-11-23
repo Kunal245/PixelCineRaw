@@ -45,9 +45,10 @@ fun BottomControlBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .height(68.dp)
             .background(Color(0xB30A0C10))
             .border(width = 0.5.dp, color = Color(0x26FFFFFF))
-            .padding(horizontal = 68.dp, vertical = 7.dp),
+            .padding(horizontal = 68.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
