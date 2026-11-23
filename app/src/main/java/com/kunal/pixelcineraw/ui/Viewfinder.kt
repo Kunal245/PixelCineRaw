@@ -16,6 +16,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import kotlinx.coroutines.Job
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
@@ -67,6 +69,8 @@ fun Viewfinder(
         }
     }
 
+    var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -75,6 +79,22 @@ fun Viewfinder(
     ) {
         AndroidView(
             modifier = Modifier
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, _, zoom, _ ->
+                        if (zoom != 1.0f) {
+                            val currentZoom = viewModel.state.value.zoomRatio
+                            val newZoom = currentZoom * zoom
+                            viewModel.cameraController.setZoomRatio(newZoom)
+                            viewModel.cameraController.setZoomSliderVisibility(true)
+
+                            pinchAutoHideJob?.cancel()
+                            pinchAutoHideJob = coroutineScope.launch {
+                                delay(1500L)
+                                viewModel.cameraController.setZoomSliderVisibility(false)
+                            }
+                        }
+                    }
+                }
                 .pointerInput(Unit) {
                     detectTapGestures { offset ->
                         val normX = offset.x / size.width

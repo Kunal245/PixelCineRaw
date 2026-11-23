@@ -8,6 +8,10 @@ data class CinemaState(
     val selectedLens: LensSelection = LensSelection.WIDE_1X,
     val availableLenses: List<LensSelection> = listOf(LensSelection.ULTRAWIDE, LensSelection.WIDE_1X, LensSelection.CROP_2X),
     val currentSensorSpec: CameraSensorSpec? = null,
+    val zoomRatio: Float = 1.0f,
+    val minZoomRatio: Float = 0.5f,
+    val maxZoomRatio: Float = 8.0f,
+    val isZoomSliderVisible: Boolean = false,
 
     // Exposure (Shutter & ISO)
     val isManualExposure: Boolean = true,

@@ -31,6 +31,8 @@ import com.kunal.pixelcineraw.camera.LensSelection
 fun BottomControlBar(
     state: CinemaState,
     onLensSelected: (LensSelection) -> Unit,
+    onZoomChanged: (Float) -> Unit,
+    onZoomSliderVisibilityChanged: (Boolean) -> Unit,
     onFocusDialClick: () -> Unit,
     onToggleLut: () -> Unit,
     onTogglePeaking: () -> Unit,
@@ -49,28 +51,12 @@ fun BottomControlBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 1. Lens Switcher (0.5x UW, 1x Wide, 2x Lossless In-Sensor Crop)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            LensPill(
-                label = "0.5x",
-                isSelected = state.selectedLens == LensSelection.ULTRAWIDE,
-                onClick = { onLensSelected(LensSelection.ULTRAWIDE) }
-            )
-            LensPill(
-                label = "1.0x",
-                isSelected = state.selectedLens == LensSelection.WIDE_1X,
-                onClick = { onLensSelected(LensSelection.WIDE_1X) }
-            )
-            LensPill(
-                label = "2.0x",
-                subText = "48M",
-                isSelected = state.selectedLens == LensSelection.CROP_2X,
-                onClick = { onLensSelected(LensSelection.CROP_2X) }
-            )
-        }
+        // 1. Cinema Zoom Hub (Quick-Tap Lens Pills: 0.5x, 1x, 2x, 5x + mm Readout + Expandable Slider)
+        CinemaZoomHub(
+            state = state,
+            onZoomChanged = onZoomChanged,
+            onSliderVisibilityChanged = onZoomSliderVisibilityChanged
+        )
 
         // 2. Monitoring & Tools Toolbar
         Row(

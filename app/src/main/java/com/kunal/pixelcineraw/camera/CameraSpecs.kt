@@ -29,9 +29,10 @@ data class CameraSensorSpec(
     val videoSizes: List<Size>,
     val isUltraWide: Boolean,
     val isMainWide: Boolean,
-    val sensorOrientation: Int = 90
+    val sensorOrientation: Int = 90,
+    val zoomRatioRange: Range<Float> = Range(1.0f, 8.0f)
 ) {
-    val maxZoomRatio: Float = 8f
+    val maxZoomRatio: Float = zoomRatioRange.upper
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

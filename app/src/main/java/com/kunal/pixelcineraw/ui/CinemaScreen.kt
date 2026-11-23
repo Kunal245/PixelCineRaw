@@ -126,6 +126,8 @@ fun CinemaScreen(
         BottomControlBar(
             state = state,
             onLensSelected = { lens -> viewModel.cameraController.selectLens(lens) },
+            onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
+            onZoomSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) },
             onFocusDialClick = {
                 activeDial = if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS
             },

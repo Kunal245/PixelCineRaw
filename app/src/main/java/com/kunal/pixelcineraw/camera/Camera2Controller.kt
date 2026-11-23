@@ -149,6 +149,7 @@ class Camera2Controller(
                 val isMain = !isUltraWide
 
                 val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+                val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) ?: Range(1.0f, 8.0f)
 
                 val spec = CameraSensorSpec(
                     cameraId = id,
@@ -171,7 +172,8 @@ class Camera2Controller(
                     videoSizes = videoSizes,
                     isUltraWide = isUltraWide,
                     isMainWide = isMain,
-                    sensorOrientation = sensorOrientation
+                    sensorOrientation = sensorOrientation,
+                    zoomRatioRange = zoomRange
                 )
 
                 _probedSensors.add(spec)
@@ -535,17 +537,26 @@ class Camera2Controller(
             builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisMode)
         }
 
-        // 6. 2x Lossless In-Sensor Center Crop (Pixel 9a 48MP Quad-PD)
-        val activeArray = spec.activeArraySize
-        if (state.selectedLens == LensSelection.CROP_2X) {
-            val cropWidth = activeArray.width() / 2
-            val cropHeight = activeArray.height() / 2
-            val cropLeft = activeArray.left + (activeArray.width() - cropWidth) / 2
-            val cropTop = activeArray.top + (activeArray.height() - cropHeight) / 2
-            val cropRect = Rect(cropLeft, cropTop, cropLeft + cropWidth, cropTop + cropHeight)
-            builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
+        // 6. Hardware-Accelerated Smooth Zoom (CONTROL_ZOOM_RATIO)
+        val zoomRatio = state.zoomRatio
+        val targetHardwareZoom = if (spec.isUltraWide) {
+            // Ultrawide sensor (displays 0.5x to 0.99x)
+            (zoomRatio / 0.5f).coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
         } else {
-            builder.set(CaptureRequest.SCALER_CROP_REGION, activeArray)
+            // Main wide sensor (displays 1.0x to 8.0x)
+            zoomRatio.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        }
+
+        try {
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, targetHardwareZoom)
+        } catch (e: Exception) {
+            // Fallback for devices without CONTROL_ZOOM_RATIO support
+            val activeArray = spec.activeArraySize
+            val cropW = (activeArray.width() / targetHardwareZoom).toInt()
+            val cropH = (activeArray.height() / targetHardwareZoom).toInt()
+            val cropL = (activeArray.width() - cropW) / 2
+            val cropT = (activeArray.height() - cropH) / 2
+            builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
         }
 
         // 7. Cinema Flat Log Tone Curve
@@ -646,8 +657,14 @@ class Camera2Controller(
         }
 
         _state.update {
+            val targetZoom = when (lens) {
+                LensSelection.ULTRAWIDE -> 0.5f
+                LensSelection.WIDE_1X -> 1.0f
+                LensSelection.CROP_2X -> 2.0f
+            }
             it.copy(
                 selectedLens = lens,
+                zoomRatio = targetZoom,
                 currentSensorSpec = targetSpec ?: it.currentSensorSpec,
                 supportedResolutions = if (probedResolutions.isNotEmpty()) probedResolutions else it.supportedResolutions
             )
@@ -658,6 +675,50 @@ class Camera2Controller(
         } else {
             createAndSetRepeatingRequest()
         }
+    }
+
+    private var lastZoomUpdateTime = 0L
+
+    /**
+     * User Action: Smooth Zoom Ratio update with automatic seamless sensor switching.
+     * Throttles Camera2 setRepeatingRequest to ~16ms (60Hz) to prevent capture session flooding.
+     */
+    fun setZoomRatio(ratio: Float, forceUpdate: Boolean = false) {
+        val clampedZoom = ratio.coerceIn(_state.value.minZoomRatio, _state.value.maxZoomRatio)
+
+        // Check if zoom requires switching between Ultrawide and Main Wide
+        val currentLens = _state.value.selectedLens
+        val needsUltrawide = clampedZoom < 1.0f
+        val isCurrentlyUltrawide = currentLens == LensSelection.ULTRAWIDE
+
+        if (needsUltrawide && !isCurrentlyUltrawide) {
+            selectLens(LensSelection.ULTRAWIDE)
+        } else if (!needsUltrawide && isCurrentlyUltrawide) {
+            selectLens(LensSelection.WIDE_1X)
+        }
+
+        val newLensSelection = when {
+            clampedZoom < 1.0f -> LensSelection.ULTRAWIDE
+            clampedZoom >= 2.0f -> LensSelection.CROP_2X
+            else -> LensSelection.WIDE_1X
+        }
+
+        _state.update {
+            it.copy(
+                zoomRatio = clampedZoom,
+                selectedLens = newLensSelection
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        if (forceUpdate || now - lastZoomUpdateTime >= 16L) {
+            lastZoomUpdateTime = now
+            createAndSetRepeatingRequest()
+        }
+    }
+
+    fun setZoomSliderVisibility(visible: Boolean) {
+        _state.update { it.copy(isZoomSliderVisible = visible) }
     }
 
     /**
