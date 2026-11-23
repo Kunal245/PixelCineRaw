@@ -81,8 +81,18 @@ fun MonitoringOverlays(
             )
         }
 
+        // 5b. Luma Waveform Monitor HUD
+        if (state.showWaveform) {
+            LumaWaveformHUD(
+                data = state.histogramData,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(bottom = 60.dp, start = 16.dp)
+            )
+        }
+
         // 6. 3D LUT Active Indicator
-        if (state.showLutPreview) {
+        if (state.showLutPreview && state.lutPreset != com.kunal.pixelcineraw.camera.LutPreset.OFF) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -92,9 +102,53 @@ fun MonitoringOverlays(
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Text(
-                    text = "LUT: REC.709 PRO",
+                    text = "LUT: ${state.lutPreset.label}${if (state.isLutBakeEnabled) " (BAKED)" else ""}",
                     color = Color(0xFF00E5FF),
-                    fontSize = 10.sp,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        // 6b. False Color Active Legend
+        if (state.showFalseColor) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 80.dp, start = 16.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
+                    .border(0.8.dp, Color(0xFFFF5252), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(6.dp).background(Color(0xFFFF1744), CircleShape))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "FALSE COLOR (ARRI)",
+                        color = Color(0xFFFF5252),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+
+        // 6c. Anamorphic De-Squeeze Badge
+        if (state.anamorphicDeSqueeze != com.kunal.pixelcineraw.camera.AnamorphicDeSqueeze.OFF) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = if (state.showFalseColor) 108.dp else 80.dp, start = 16.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
+                    .border(0.8.dp, Color(0xFFFFD700), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "ANAMORPHIC: ${state.anamorphicDeSqueeze.label}",
+                    color = Color(0xFFFFD700),
+                    fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
@@ -106,7 +160,7 @@ fun MonitoringOverlays(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = if (state.showLutPreview) 80.dp else 52.dp, start = 16.dp)
+                    .padding(top = if (state.showFalseColor || state.anamorphicDeSqueeze != com.kunal.pixelcineraw.camera.AnamorphicDeSqueeze.OFF) 136.dp else if (state.showLutPreview) 80.dp else 52.dp, start = 16.dp)
                     .background(Color(0xD9101216), RoundedCornerShape(4.dp))
                     .border(0.8.dp, Color(0xFFFFD700), RoundedCornerShape(4.dp))
                     .padding(horizontal = 7.dp, vertical = 2.5.dp)
@@ -365,5 +419,65 @@ fun MovableHistogramHUD(
                 )
             }
         }
+    }
+}
+
+@Composable
+fun LumaWaveformHUD(
+    data: HistogramData,
+    modifier: Modifier = Modifier
+) {
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+
+    Box(
+        modifier = modifier
+            .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    offsetX += dragAmount.x
+                    offsetY += dragAmount.y
+                }
+            }
+            .width(180.dp)
+            .height(80.dp)
+            .background(Color(0xD90A0D12), RoundedCornerShape(6.dp))
+            .border(0.6.dp, Color(0x3300E5FF), RoundedCornerShape(6.dp))
+            .padding(6.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+
+            // 0%, 50%, 100% IRE grid lines
+            val gridColor = Color(0x22FFFFFF)
+            drawLine(gridColor, Offset(0f, 0f), Offset(w, 0f), 0.5.dp.toPx()) // 100 IRE
+            drawLine(gridColor, Offset(0f, h * 0.5f), Offset(w, h * 0.5f), 0.5.dp.toPx()) // 50 IRE
+            drawLine(gridColor, Offset(0f, h), Offset(w, h), 0.5.dp.toPx()) // 0 IRE
+
+            val numBins = data.lumaBins.size
+            if (numBins > 1) {
+                for (i in 0 until numBins) {
+                    val x = (i.toFloat() / (numBins - 1)) * w
+                    val lumaWeight = data.lumaBins[i].coerceIn(0f, 1f)
+                    val y = h - (lumaWeight * h)
+                    drawCircle(
+                        color = Color(0xCC00E5FF),
+                        radius = 1.8.dp.toPx(),
+                        center = Offset(x, y)
+                    )
+                }
+            }
+        }
+
+        Text(
+            text = "WAVEFORM (IRE)",
+            color = Color(0xFF00E5FF),
+            fontSize = 7.5.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.align(Alignment.TopStart)
+        )
     }
 }

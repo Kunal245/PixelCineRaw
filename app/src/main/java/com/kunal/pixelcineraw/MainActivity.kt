@@ -45,6 +45,8 @@ class MainActivity : ComponentActivity() {
         // Hide system status and navigation bars for immersive cinema viewfinder
         hideSystemUI()
 
+        startOrientationListener()
+
         setContent {
             PixelCineRawTheme {
                 val state by cinemaViewModel.state.collectAsStateWithLifecycle()
@@ -98,9 +100,52 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var orientationEventListener: android.view.OrientationEventListener? = null
+
+    private fun startOrientationListener() {
+        orientationEventListener = object : android.view.OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                val rotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    try { display?.rotation ?: android.view.Surface.ROTATION_90 } catch (_: Exception) { android.view.Surface.ROTATION_90 }
+                } else {
+                    @Suppress("DEPRECATION")
+                    windowManager.defaultDisplay.rotation
+                }
+                cinemaViewModel.cameraController.setDisplayRotation(rotation)
+            }
+        }.apply {
+            if (canDetectOrientation()) enable()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        hideSystemUI()
+        val rotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            try { display?.rotation ?: android.view.Surface.ROTATION_90 } catch (_: Exception) { android.view.Surface.ROTATION_90 }
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
+        cinemaViewModel.cameraController.setDisplayRotation(rotation)
+    }
+
     override fun onResume() {
         super.onResume()
         hideSystemUI()
+        orientationEventListener?.enable()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        orientationEventListener?.disable()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        orientationEventListener?.disable()
+        orientationEventListener = null
     }
 
     private fun hideSystemUI() {

@@ -225,7 +225,9 @@ fun CinemaScreen(
                     viewModel.cameraController.setRecordingPaused(!state.isRecordingPaused)
                 },
                 onTorchToggle = { viewModel.cameraController.toggleTorch() },
-                onAeAfLockToggle = { viewModel.cameraController.toggleAeAfLock() }
+                onAeAfLockToggle = { viewModel.cameraController.toggleAeAfLock() },
+                onFlipCamera = { viewModel.cameraController.flipCamera() },
+                onToggleProDrawer = { viewModel.cameraController.toggleProToolsDrawer() }
             )
         }
 
@@ -435,7 +437,21 @@ fun CinemaScreen(
             }
         }
 
-        // 9. Cinema Settings Dialog (Format, Codec, Bitrate, Profile, Resolution)
+        // 9. Pro Cinema Suite Drawer (Slides out smoothly from end)
+        AnimatedVisibility(
+            visible = state.isProToolsDrawerOpen,
+            enter = slideInHorizontally { it } + fadeIn(tween(200)),
+            exit = slideOutHorizontally { it } + fadeOut(tween(200)),
+            modifier = Modifier.align(Alignment.CenterEnd)
+        ) {
+            ProToolsDrawer(
+                state = state,
+                cameraController = viewModel.cameraController,
+                onClose = { viewModel.cameraController.setProToolsDrawerOpen(false) }
+            )
+        }
+
+        // 10. Cinema Settings Dialog (Format, Codec, Bitrate, Profile, Resolution)
         if (showSettingsDialog) {
             CinemaSettingsDialog(
                 state = state,

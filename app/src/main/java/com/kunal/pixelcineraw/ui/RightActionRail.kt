@@ -45,6 +45,8 @@ fun RightActionRail(
     onPauseToggle: () -> Unit,
     onTorchToggle: () -> Unit,
     onAeAfLockToggle: () -> Unit,
+    onFlipCamera: () -> Unit = {},
+    onToggleProDrawer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -55,41 +57,104 @@ fun RightActionRail(
             .width(76.dp)
             .background(Color(0xB30C0E12))
             .border(width = 0.5.dp, color = Color(0x26FFFFFF))
-            .padding(vertical = 12.dp, horizontal = 8.dp),
+            .padding(vertical = 10.dp, horizontal = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // 1. Top Cluster: Torch & AE/AF Lock
+        // 1. Top Cluster: Flip Camera, Pro Suite, Torch & AE/AF Lock
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Torch / Video Light Button
+            // Flip Camera Button (Front / Rear)
             Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
-                    .background(if (state.isTorchOn) Color(0xFFFFCC00) else Color(0x33FFFFFF))
+                    .background(if (state.isFrontCamera) Color(0xFF00E5FF) else Color(0x33FFFFFF))
+                    .border(
+                        width = 1.dp,
+                        color = if (state.isFrontCamera) Color(0xFF66E5FF) else Color(0x22FFFFFF),
+                        shape = CircleShape
+                    )
+                    .clickable(enabled = !state.isRecording) { onFlipCamera() },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.FlipCameraAndroid,
+                        contentDescription = "Flip Camera",
+                        tint = if (state.isFrontCamera) Color.Black else Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = if (state.isFrontCamera) "FRONT" else "REAR",
+                        color = if (state.isFrontCamera) Color.Black else Color.White,
+                        fontSize = 7.sp,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            // Pro Cinema Suite Button
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (state.isProToolsDrawerOpen) Color(0xFF00E5FF) else Color(0x26FFFFFF))
+                    .border(
+                        width = 1.dp,
+                        color = if (state.isProToolsDrawerOpen) Color(0xFF80EEFF) else Color(0x22FFFFFF),
+                        shape = CircleShape
+                    )
+                    .clickable { onToggleProDrawer() },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = "Pro Suite",
+                        tint = if (state.isProToolsDrawerOpen) Color.Black else Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "PRO",
+                        color = if (state.isProToolsDrawerOpen) Color.Black else Color.White,
+                        fontSize = 7.5.sp,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            // Torch / Video Light Button (Disabled on front camera)
+            val torchEnabled = !state.isFrontCamera
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (state.isTorchOn) Color(0xFFFFCC00) else if (!torchEnabled) Color(0x11FFFFFF) else Color(0x33FFFFFF))
                     .border(
                         width = 1.dp,
                         color = if (state.isTorchOn) Color(0xFFFFE066) else Color(0x22FFFFFF),
                         shape = CircleShape
                     )
-                    .clickable { onTorchToggle() },
+                    .clickable(enabled = torchEnabled) { onTorchToggle() },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.FlashlightOn,
                     contentDescription = "Torch Light",
-                    tint = if (state.isTorchOn) Color.Black else Color.White,
-                    modifier = Modifier.size(20.dp)
+                    tint = if (state.isTorchOn) Color.Black else if (!torchEnabled) Color(0x44FFFFFF) else Color.White,
+                    modifier = Modifier.size(18.dp)
                 )
             }
 
             // AE/AF Lock Button
             Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
                     .background(if (state.isAeAfLocked) Color(0xFFFF3344) else Color(0x26FFFFFF))
                     .border(
@@ -105,12 +170,12 @@ fun RightActionRail(
                         imageVector = if (state.isAeAfLocked) Icons.Default.Lock else Icons.Default.LockOpen,
                         contentDescription = "AE/AF Lock",
                         tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                     Text(
                         text = "LOCK",
                         color = Color.White,
-                        fontSize = 8.sp,
+                        fontSize = 7.5.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace
                     )

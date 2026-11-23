@@ -9,6 +9,7 @@ data class CinemaState(
     // Sensor & Lens
     val selectedLens: LensSelection = LensSelection.WIDE_1X,
     val availableLenses: List<LensSelection> = listOf(LensSelection.ULTRAWIDE, LensSelection.WIDE_1X, LensSelection.CROP_2X),
+    val isFrontCamera: Boolean = false,
     val currentSensorSpec: CameraSensorSpec? = null,
     val zoomRatio: Float = 1.0f,
     val minZoomRatio: Float = 0.5f,
@@ -83,9 +84,24 @@ data class CinemaState(
     val showZebras: Boolean = false,
     val zebraIreThreshold: Int = 95, // 70 to 100%
     val showLutPreview: Boolean = true,
+    val lutPreset: LutPreset = LutPreset.REC709_NATURAL,
+    val isLutBakeEnabled: Boolean = false,
+    val customLutFileName: String? = null,
+    val showFalseColor: Boolean = false,
+    val showWaveform: Boolean = false,
     val frameGuide: FrameGuide = FrameGuide.NONE,
     val showGrid: Boolean = true,
     val showHorizonLeveler: Boolean = false,
+    val anamorphicDeSqueeze: AnamorphicDeSqueeze = AnamorphicDeSqueeze.OFF,
+
+    // Pro Cinema Suite Drawer & Advanced Controls
+    val isProToolsDrawerOpen: Boolean = false,
+    val rackFocusPointA: Float? = null,
+    val rackFocusPointB: Float? = null,
+    val isRackPulling: Boolean = false,
+    val rackPullDurationMs: Long = 2000L,
+    val isGyroflowLoggingEnabled: Boolean = true,
+    val deviceRotationDegrees: Int = 90,
 
     // System Telemetry
     val batteryPercent: Int = 100,

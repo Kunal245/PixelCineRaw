@@ -87,6 +87,15 @@ class Camera2Controller(
     private val _state = MutableStateFlow(CinemaState())
     val state: StateFlow<CinemaState> = _state.asStateFlow()
 
+    // Sensor pointers
+    private var mainCameraSpec: CameraSensorSpec? = null
+    private var frontCameraSpec: CameraSensorSpec? = null
+    private var ultraWideCameraSpec: CameraSensorSpec? = null
+
+    // Gyroflow & Rack Focus
+    private val gyroflowLogger by lazy { com.kunal.pixelcineraw.imu.GyroflowLogger(context) }
+    private var rackFocusJob: kotlinx.coroutines.Job? = null
+
     // FPS Metering
     private var frameCount = 0
     private var lastFpsTimestamp = System.nanoTime()
@@ -145,11 +154,11 @@ class Camera2Controller(
             }
             var mainWideSpec: CameraSensorSpec? = null
             var ultraWideSpec: CameraSensorSpec? = null
+            var frontSpec: CameraSensorSpec? = null
 
             for (id in cameraIds) {
                 val chars = cameraManager.getCameraCharacteristics(id)
                 val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
-                if (facing != CameraCharacteristics.LENS_FACING_BACK) continue
 
                 val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS) ?: floatArrayOf(0f)
                 val apertures = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES) ?: floatArrayOf(0f)
@@ -188,12 +197,13 @@ class Camera2Controller(
 
                 // Detect ultrawide vs main wide by focal length (Pixel 9a ultrawide is ~2.2mm, main is ~6.8mm)
                 val minFocal = focalLengths.minOrNull() ?: 5.0f
-                val isUltraWide = minFocal < 3.0f
-                val isMain = !isUltraWide
+                val isUltraWide = (facing == CameraCharacteristics.LENS_FACING_BACK) && minFocal < 3.0f
+                val isMain = (facing == CameraCharacteristics.LENS_FACING_BACK) && !isUltraWide
 
-                val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+                val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (facing == CameraCharacteristics.LENS_FACING_FRONT) 270 else 90)
                 val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) ?: Range(1.0f, 8.0f)
-                val isLogicalMultiCam = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) &&
+                val isLogicalMultiCam = (facing == CameraCharacteristics.LENS_FACING_BACK) &&
+                        capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) &&
                         zoomRange.lower <= 0.6f
 
                 val nrModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: intArrayOf()
@@ -232,8 +242,9 @@ class Camera2Controller(
 
                 _probedSensors.add(spec)
 
-                // Prioritize unified logical multi-camera covering 0.5x to 8.0x if available
-                if (isLogicalMultiCam && mainWideSpec == null) {
+                if (facing == CameraCharacteristics.LENS_FACING_FRONT && frontSpec == null) {
+                    frontSpec = spec
+                } else if (isLogicalMultiCam && mainWideSpec == null) {
                     mainWideSpec = spec
                 } else if (isMain && mainWideSpec == null) {
                     mainWideSpec = spec
@@ -241,6 +252,10 @@ class Camera2Controller(
                     ultraWideSpec = spec
                 }
             }
+
+            mainCameraSpec = mainWideSpec
+            frontCameraSpec = frontSpec
+            ultraWideCameraSpec = ultraWideSpec
 
             // Build list of supported cinema custom resolutions from selected sensor capabilities
             val initialSpec = mainWideSpec ?: _probedSensors.firstOrNull()
@@ -555,10 +570,36 @@ class Camera2Controller(
         }
         val vRes = _state.value.videoResolution
         hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height)
+
+        if (_state.value.isGyroflowLoggingEnabled) {
+            try {
+                val gcsvName = fileName.removeSuffix(".mp4") + ".gcsv"
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, gcsvName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "${android.os.Environment.DIRECTORY_MOVIES}/PixelCineRaw")
+                }
+                val uri = context.contentResolver.insert(android.provider.MediaStore.Files.getContentUri("external"), values)
+                if (uri != null) {
+                    val pfd = context.contentResolver.openFileDescriptor(uri, "rw")
+                    if (pfd != null) {
+                        gyroflowLogger.start(java.io.FileOutputStream(pfd.fileDescriptor))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to start Gyroflow logger", e)
+            }
+        }
+
         onStarted()
     }
 
     fun stopRecordingSession(onStopped: () -> Unit = {}) {
+        try {
+            gyroflowLogger.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping Gyroflow logger", e)
+        }
         hlgGlRenderer?.setEncoderSurface(null, 0, 0)
         videoRecordingSurface = null
         _state.update { it.copy(isRecording = false) }
@@ -931,11 +972,12 @@ class Camera2Controller(
         val currentSpec = _state.value.currentSensorSpec
 
         // If current camera is a logical multi-camera covering 0.5x..8.0x, keep same camera device!
-        if (currentSpec != null && currentSpec.isLogicalMultiCamera) {
+        if (currentSpec != null && currentSpec.isLogicalMultiCamera && lens != LensSelection.FRONT) {
             val targetZoom = when (lens) {
                 LensSelection.ULTRAWIDE -> 0.5f
                 LensSelection.WIDE_1X -> 1.0f
                 LensSelection.CROP_2X -> 2.0f
+                LensSelection.FRONT -> 1.0f
             }
             _state.update {
                 it.copy(
@@ -951,6 +993,7 @@ class Camera2Controller(
         val targetSpec = when (lens) {
             LensSelection.ULTRAWIDE -> _probedSensors.find { it.isUltraWide } ?: _probedSensors.firstOrNull()
             LensSelection.WIDE_1X, LensSelection.CROP_2X -> _probedSensors.find { it.isMainWide } ?: _probedSensors.firstOrNull()
+            LensSelection.FRONT -> frontCameraSpec ?: _probedSensors.find { it.isFrontCamera } ?: _probedSensors.firstOrNull()
         }
 
         val probedResolutions = mutableListOf<CustomResolution>()
@@ -968,6 +1011,7 @@ class Camera2Controller(
             LensSelection.ULTRAWIDE -> 0.5f
             LensSelection.WIDE_1X -> 1.0f
             LensSelection.CROP_2X -> 2.0f
+            LensSelection.FRONT -> 1.0f
         }
 
         val isSwitchingDevice = targetSpec != null && targetSpec.cameraId != cameraDevice?.id
@@ -1540,6 +1584,135 @@ class Camera2Controller(
     fun updateHistogramData(data: HistogramData) {
         _state.update {
             it.copy(histogramData = data)
+        }
+    }
+
+    fun flipCamera() {
+        if (_state.value.isRecording) {
+            Log.w(TAG, "Cannot flip camera while recording")
+            return
+        }
+
+        val isCurrentlyFront = _state.value.isFrontCamera
+        if (isCurrentlyFront) {
+            // Switch to Back Camera
+            val targetSpec = mainCameraSpec ?: _probedSensors.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK } ?: return
+            _state.update {
+                it.copy(
+                    isFrontCamera = false,
+                    selectedLens = LensSelection.WIDE_1X,
+                    availableLenses = listOf(LensSelection.ULTRAWIDE, LensSelection.WIDE_1X, LensSelection.CROP_2X),
+                    currentSensorSpec = targetSpec,
+                    zoomRatio = 1.0f,
+                    focusMode = FocusMode.AUTO_CONTINUOUS,
+                    isTorchOn = false
+                )
+            }
+            hlgGlRenderer?.setFrontCamera(false)
+            openCamera(targetSpec.cameraId)
+        } else {
+            // Switch to Front Camera
+            val targetSpec = frontCameraSpec ?: _probedSensors.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_FRONT } ?: return
+            _state.update {
+                it.copy(
+                    isFrontCamera = true,
+                    selectedLens = LensSelection.FRONT,
+                    availableLenses = listOf(LensSelection.FRONT),
+                    currentSensorSpec = targetSpec,
+                    zoomRatio = 1.0f,
+                    focusMode = FocusMode.AUTO_CONTINUOUS,
+                    isTorchOn = false,
+                    isAeAfLocked = false
+                )
+            }
+            hlgGlRenderer?.setFrontCamera(true)
+            openCamera(targetSpec.cameraId)
+        }
+    }
+
+    // --- Pro Cinema Suite Controls ---
+
+    fun toggleProToolsDrawer() {
+        _state.update { it.copy(isProToolsDrawerOpen = !it.isProToolsDrawerOpen) }
+    }
+
+    fun setProToolsDrawerOpen(open: Boolean) {
+        _state.update { it.copy(isProToolsDrawerOpen = open) }
+    }
+
+    fun setLutPreset(preset: LutPreset) {
+        _state.update { it.copy(lutPreset = preset, showLutPreview = preset != LutPreset.OFF) }
+        val mode = when (preset) {
+            LutPreset.OFF -> 0
+            LutPreset.REC709_NATURAL -> 1
+            LutPreset.KODAK_2383 -> 2
+            LutPreset.CINEMA_TEAL -> 3
+        }
+        hlgGlRenderer?.setLutPreset(mode)
+    }
+
+    fun setLutBakeEnabled(enabled: Boolean) {
+        _state.update { it.copy(isLutBakeEnabled = enabled) }
+        hlgGlRenderer?.setLutBakeEnabled(enabled)
+    }
+
+    fun toggleFalseColor() {
+        val next = !_state.value.showFalseColor
+        _state.update { it.copy(showFalseColor = next) }
+        hlgGlRenderer?.setFalseColor(next)
+    }
+
+    fun toggleWaveform() {
+        _state.update { it.copy(showWaveform = !it.showWaveform) }
+    }
+
+    fun setAnamorphicDeSqueeze(squeeze: AnamorphicDeSqueeze) {
+        _state.update { it.copy(anamorphicDeSqueeze = squeeze) }
+        hlgGlRenderer?.setAnamorphicScale(squeeze.factor)
+    }
+
+    fun setGyroflowLoggingEnabled(enabled: Boolean) {
+        _state.update { it.copy(isGyroflowLoggingEnabled = enabled) }
+    }
+
+    // --- Programmable A -> B Cinema Rack Focus ---
+
+    fun setRackPointA() {
+        val currentDist = _state.value.focusDistance
+        _state.update { it.copy(rackFocusPointA = currentDist) }
+    }
+
+    fun setRackPointB() {
+        val currentDist = _state.value.focusDistance
+        _state.update { it.copy(rackFocusPointB = currentDist) }
+    }
+
+    fun setRackPullDurationMs(durationMs: Long) {
+        _state.update { it.copy(rackPullDurationMs = durationMs) }
+    }
+
+    fun pullRackFocus(fromAtoB: Boolean = true) {
+        val pA = _state.value.rackFocusPointA ?: 0.0f
+        val pB = _state.value.rackFocusPointB ?: 5.0f
+        val startDist = if (fromAtoB) pA else pB
+        val endDist = if (fromAtoB) pB else pA
+        val durationMs = _state.value.rackPullDurationMs
+
+        rackFocusJob?.cancel()
+        rackFocusJob = scope.launch(Dispatchers.Default) {
+            _state.update { it.copy(isRackPulling = true) }
+            val startTime = System.currentTimeMillis()
+            val totalSteps = (durationMs / 16L).coerceAtLeast(10L)
+            for (step in 0..totalSteps) {
+                val elapsed = System.currentTimeMillis() - startTime
+                val progress = (elapsed.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                val easedProgress = (1.0f - kotlin.math.cos(progress * Math.PI.toFloat())) * 0.5f
+                val currentDistance = startDist + (endDist - startDist) * easedProgress
+                setFocusDistance(currentDistance)
+                if (progress >= 1.0f) break
+                kotlinx.coroutines.delay(16L)
+            }
+            _state.update { it.copy(isRackPulling = false) }
         }
     }
 

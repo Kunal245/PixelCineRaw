@@ -64,6 +64,8 @@ precision highp float;
 
 uniform samplerExternalOES sTexture;
 uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020, 3 = HDR10+ PQ
+uniform int uFalseColor; // 0 = off, 1 = on
+uniform int uLutPreset;  // 0 = off, 1 = REC.709 PRO, 2 = KODAK 2383, 3 = TEAL & ORANGE
 uniform vec2 uTexelSize;
 varying vec2 vTextureCoord;
 
@@ -124,24 +126,82 @@ vec4 sampleBicubic(samplerExternalOES tex, vec2 uv, vec2 texelSize) {
     return (s0 + s1 + s2 + s3) * 0.25;
 }
 
+// LUT 1: Rec.709 Pro (broadcast saturation & contrast)
+vec3 applyRec709Pro(vec3 color) {
+    vec3 c = pow(max(color, vec3(0.0)), vec3(0.95));
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(luma), c, 1.15);
+    return clamp(c, 0.0, 1.0);
+}
+
+// LUT 2: Kodak 2383 Film Print (warm highlights, deep blacks, subtractive film dye response)
+vec3 applyKodak2383(vec3 color) {
+    vec3 c = color;
+    c = c * c * (3.0 - 2.0 * c);
+    c.r = pow(max(0.0, c.r), 0.92);
+    c.g = pow(max(0.0, c.g), 0.98);
+    c.b = pow(max(0.0, c.b), 1.08);
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(luma), c, 1.25);
+    return clamp(c, 0.0, 1.0);
+}
+
+// LUT 3: Cinema Teal & Orange (blockbuster skin tone isolation)
+vec3 applyCinemaTeal(vec3 color) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    vec3 teal = vec3(0.0, 0.12, 0.22) * (1.0 - luma);
+    vec3 orange = vec3(0.22, 0.10, 0.0) * luma;
+    vec3 c = clamp(color + orange - teal, 0.0, 1.0);
+    c = c * c * (3.0 - 2.0 * c);
+    return clamp(c, 0.0, 1.0);
+}
+
+// Arri-Style False Color Luminance Mapping
+vec3 applyFalseColor(vec3 color) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float ire = luma * 100.0;
+    if (ire >= 98.0) return vec3(1.0, 0.0, 0.0); // Red: 98%+ clipping
+    if (ire >= 80.0) return vec3(1.0, 0.85, 0.0); // Yellow: 80-97% highlights
+    if (ire >= 52.0 && ire <= 58.0) return vec3(1.0, 0.4, 0.75); // Pink: 52-58% skin reference
+    if (ire >= 38.0 && ire <= 44.0) return vec3(0.0, 0.85, 0.2); // Green: 38-44% 18% gray card
+    if (ire >= 4.0 && ire < 12.0) return vec3(0.0, 0.4, 0.95); // Blue: 4-12% shadows
+    if (ire < 4.0) return vec3(0.5, 0.0, 0.8); // Purple: <4% crushed blacks
+    return vec3(luma * 0.45); // Neutral reference gray
+}
+
 void main() {
     vec4 src = sampleBicubic(sTexture, vTextureCoord, uTexelSize);
+    vec3 color = src.rgb;
+
+    // 3D LUT Simulation pass
+    if (uLutPreset == 1) {
+        color = applyRec709Pro(color);
+    } else if (uLutPreset == 2) {
+        color = applyKodak2383(color);
+    } else if (uLutPreset == 3) {
+        color = applyCinemaTeal(color);
+    }
+
+    if (uFalseColor == 1) {
+        gl_FragColor = vec4(applyFalseColor(color), 1.0);
+        return;
+    }
 
     if (uColorMode == 2) {
         // HLG / BT.2020 Mode
-        vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
+        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2));
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
         gl_FragColor = vec4(hlgRgb, 1.0);
     } else if (uColorMode == 3) {
         // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode)
-        vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
+        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2));
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 pqRgb = clamp(encodePq(rec2020), 0.0, 1.0);
         gl_FragColor = vec4(pqRgb, 1.0);
     } else {
         // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1)
-        gl_FragColor = vec4(src.rgb, 1.0);
+        gl_FragColor = vec4(color, 1.0);
     }
 }
 """
@@ -177,6 +237,8 @@ void main() {
     private var uAspectMatrixLoc: Int = -1
     private var uTexelSizeLoc: Int = -1
     private var uColorModeLoc: Int = -1
+    private var uFalseColorLoc: Int = -1
+    private var uLutPresetLoc: Int = -1
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -216,40 +278,126 @@ void main() {
     var displayRotation: Int = Surface.ROTATION_90
         private set
 
+    @Volatile
+    var isFrontCamera: Boolean = false
+        private set
+
+    @Volatile
+    var isFalseColorEnabled: Boolean = false
+        private set
+
+    @Volatile
+    var currentLutPreset: Int = 1 // 0 = OFF, 1 = REC709_NATURAL, 2 = KODAK_2383, 3 = CINEMA_TEAL
+        private set
+
+    @Volatile
+    var isLutBakeEnabled: Boolean = false
+        private set
+
+    @Volatile
+    var anamorphicScale: Float = 1.0f
+        private set
+
     fun setDisplayRotation(rotation: Int) {
         displayRotation = rotation
     }
 
+    fun setFrontCamera(isFront: Boolean) {
+        isFrontCamera = isFront
+    }
+
+    fun setFalseColor(enabled: Boolean) {
+        isFalseColorEnabled = enabled
+    }
+
+    fun setLutPreset(preset: Int) {
+        currentLutPreset = preset
+    }
+
+    fun setLutBakeEnabled(enabled: Boolean) {
+        isLutBakeEnabled = enabled
+    }
+
+    fun setAnamorphicScale(scale: Float) {
+        anamorphicScale = scale
+    }
+
     private val previewMatrix = FloatArray(16)
+    private val encoderMatrix = FloatArray(16)
     private val previewAspectMatrix = FloatArray(16)
     private val encoderAspectMatrix = FloatArray(16)
 
-    private fun computePreviewMatrix(stMatrix: FloatArray, rotation: Int): FloatArray {
+    private fun computePreviewMatrix(stMatrix: FloatArray, rotation: Int, isFront: Boolean): FloatArray {
         System.arraycopy(stMatrix, 0, previewMatrix, 0, 16)
-        val rotationDeg = when (rotation) {
-            Surface.ROTATION_90 -> -90f
-            Surface.ROTATION_270 -> 90f
-            Surface.ROTATION_180 -> 180f
-            else -> -90f // Default landscape
+        val rotationDeg = if (isFront) {
+            when (rotation) {
+                Surface.ROTATION_90 -> 90f
+                Surface.ROTATION_270 -> -90f
+                Surface.ROTATION_180 -> 0f
+                else -> 180f // ROTATION_0 (portrait)
+            }
+        } else {
+            when (rotation) {
+                Surface.ROTATION_90 -> -90f
+                Surface.ROTATION_270 -> 90f
+                Surface.ROTATION_180 -> 180f
+                else -> 0f // ROTATION_0 (portrait)
+            }
         }
         if (rotationDeg != 0f) {
             Matrix.translateM(previewMatrix, 0, 0.5f, 0.5f, 0.0f)
             Matrix.rotateM(previewMatrix, 0, rotationDeg, 0.0f, 0.0f, 1.0f)
             Matrix.translateM(previewMatrix, 0, -0.5f, -0.5f, 0.0f)
         }
+
+        if (isFront) {
+            // Horizontal mirror preview for selfie/front camera viewfinder
+            Matrix.translateM(previewMatrix, 0, 0.5f, 0.5f, 0.0f)
+            Matrix.scaleM(previewMatrix, 0, -1.0f, 1.0f, 1.0f)
+            Matrix.translateM(previewMatrix, 0, -0.5f, -0.5f, 0.0f)
+        }
+
         return previewMatrix
+    }
+
+    private fun computeEncoderMatrix(stMatrix: FloatArray, rotation: Int, isFront: Boolean): FloatArray {
+        System.arraycopy(stMatrix, 0, encoderMatrix, 0, 16)
+        val rotationDeg = if (isFront) {
+            when (rotation) {
+                Surface.ROTATION_90 -> 90f
+                Surface.ROTATION_270 -> -90f
+                Surface.ROTATION_180 -> 0f
+                else -> 180f
+            }
+        } else {
+            when (rotation) {
+                Surface.ROTATION_90 -> -90f
+                Surface.ROTATION_270 -> 90f
+                Surface.ROTATION_180 -> 180f
+                else -> 0f
+            }
+        }
+        if (rotationDeg != 0f) {
+            Matrix.translateM(encoderMatrix, 0, 0.5f, 0.5f, 0.0f)
+            Matrix.rotateM(encoderMatrix, 0, rotationDeg, 0.0f, 0.0f, 1.0f)
+            Matrix.translateM(encoderMatrix, 0, -0.5f, -0.5f, 0.0f)
+        }
+        // Recorded MP4 stays un-mirrored
+        return encoderMatrix
     }
 
     /**
      * Computes the 1:1 square-pixel aspect ratio center-crop matrix (uAspectMatrix).
      * Compares incomingBufferAspect against targetOutputAspect without stretching horizontally or squeezing vertically.
+     * Optionally applies anamorphic de-squeeze factor to expand compressed widescreen visuals.
      */
     private fun computeAspectMatrix(
         result: FloatArray,
         streamW: Int,
         streamH: Int,
         outW: Int,
-        outH: Int
+        outH: Int,
+        anamorphic: Float = 1.0f
     ): FloatArray {
         Matrix.setIdentityM(result, 0)
         if (streamW <= 0 || streamH <= 0 || outW <= 0 || outH <= 0) {
@@ -263,13 +411,13 @@ void main() {
         var scaleV = 1.0f
 
         if (incomingBufferAspect > targetOutputAspect) {
-            // Incoming buffer is wider than target (e.g. 16:9 stream into 4:3 target):
-            // Scale U coordinates by targetOutputAspect / incomingBufferAspect around center 0.5f (crops left/right)
             scaleU = targetOutputAspect / incomingBufferAspect
         } else if (incomingBufferAspect < targetOutputAspect) {
-            // Incoming buffer is taller than target (e.g. 4:3 full sensor stream into 16:9 or 2.39:1 Scope target):
-            // Scale V coordinates by incomingBufferAspect / targetOutputAspect around center 0.5f (crops top/bottom)
             scaleV = incomingBufferAspect / targetOutputAspect
+        }
+
+        if (anamorphic > 1.01f) {
+            scaleU *= (1.0f / anamorphic)
         }
 
         Matrix.translateM(result, 0, 0.5f, 0.5f, 0.0f)
@@ -487,6 +635,8 @@ void main() {
         uAspectMatrixLoc = GLES20.glGetUniformLocation(programId, "uAspectMatrix")
         uColorModeLoc = GLES20.glGetUniformLocation(programId, "uColorMode")
         uTexelSizeLoc = GLES20.glGetUniformLocation(programId, "uTexelSize")
+        uFalseColorLoc = GLES20.glGetUniformLocation(programId, "uFalseColor")
+        uLutPresetLoc = GLES20.glGetUniformLocation(programId, "uLutPreset")
         checkGlError("initShaders")
     }
 
@@ -736,9 +886,14 @@ void main() {
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-            val pMatrix = computePreviewMatrix(texMatrix, displayRotation)
-            val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h)
-            drawQuad(pMatrix, pAspect)
+            val pMatrix = computePreviewMatrix(texMatrix, displayRotation, isFrontCamera)
+            val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h, anamorphicScale)
+            drawQuad(
+                matrix = pMatrix,
+                aspectMatrix = pAspect,
+                falseColor = if (isFalseColorEnabled) 1 else 0,
+                lutPreset = currentLutPreset
+            )
             checkGlError("drawQuad preview")
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
 
@@ -756,8 +911,14 @@ void main() {
                     GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                    val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH)
-                    drawQuad(pMatrix, eAspect)
+                    val eMatrix = computeEncoderMatrix(texMatrix, displayRotation, isFrontCamera)
+                    val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH, 1.0f)
+                    drawQuad(
+                        matrix = eMatrix,
+                        aspectMatrix = eAspect,
+                        falseColor = 0,
+                        lutPreset = if (isLutBakeEnabled) currentLutPreset else 0
+                    )
                     checkGlError("drawQuad encoder")
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, timestampNs)
                     EGL14.eglSwapBuffers(eglDisplay, eSurf)
@@ -768,12 +929,23 @@ void main() {
         }
     }
 
-    private fun drawQuad(matrix: FloatArray, aspectMatrix: FloatArray) {
+    private fun drawQuad(
+        matrix: FloatArray,
+        aspectMatrix: FloatArray,
+        falseColor: Int = 0,
+        lutPreset: Int = 0
+    ) {
         GLES20.glUseProgram(programId)
 
         GLES20.glUniformMatrix4fv(uSTMatrixLoc, 1, false, matrix, 0)
         GLES20.glUniformMatrix4fv(uAspectMatrixLoc, 1, false, aspectMatrix, 0)
         GLES20.glUniform1i(uColorModeLoc, currentColorMode)
+        if (uFalseColorLoc != -1) {
+            GLES20.glUniform1i(uFalseColorLoc, falseColor)
+        }
+        if (uLutPresetLoc != -1) {
+            GLES20.glUniform1i(uLutPresetLoc, lutPreset)
+        }
         if (uTexelSizeLoc != -1) {
             val tw = maxOf(1, streamWidth).toFloat()
             val th = maxOf(1, streamHeight).toFloat()

@@ -39,6 +39,7 @@ data class CameraSensorSpec(
     val zoomRatioRange: Range<Float> = Range(1.0f, 8.0f)
 ) {
     val maxZoomRatio: Float = zoomRatioRange.upper
+    val isFrontCamera: Boolean = lensFacing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -55,7 +56,8 @@ data class CameraSensorSpec(
 enum class LensSelection(val label: String, val factor: Float) {
     ULTRAWIDE("0.5x UW", 0.5f),
     WIDE_1X("1x WIDE", 1.0f),
-    CROP_2X("2x LOSSLESS", 2.0f)
+    CROP_2X("2x LOSSLESS", 2.0f),
+    FRONT("1x FRONT", 1.0f)
 }
 
 enum class ShutterUnit {
@@ -108,5 +110,19 @@ enum class StabilizationMode(val label: String, val shortLabel: String, val desc
     OFF("STAB: OFF", "OFF", "Zero electronic crop, locks floating OIS element for tripod/gimbal pans"),
     OIS("STAB: OIS", "OIS", "Pure optical lens stabilization with full uncropped field of view"),
     OIS_EIS("STAB: OIS+EIS", "OIS+EIS", "Combined Tensor G4 electronic gyro preview stabilization with hardware OIS")
+}
+
+enum class LutPreset(val label: String, val shortLabel: String, val description: String) {
+    OFF("OFF", "OFF", "Passthrough / Native Sensor Profile"),
+    REC709_NATURAL("REC.709 PRO", "REC.709", "Standard Broadcast Natural Tone"),
+    KODAK_2383("KODAK 2383", "KODAK", "Classic 35mm Film Print Emulation"),
+    CINEMA_TEAL("TEAL & ORANGE", "TEAL", "Stylized Hollywood Blockbuster Grade")
+}
+
+enum class AnamorphicDeSqueeze(val label: String, val factor: Float) {
+    OFF("1.0x (OFF)", 1.0f),
+    SQUEEZE_1_33("1.33x", 1.33f),
+    SQUEEZE_1_55("1.55x", 1.55f),
+    SQUEEZE_2_00("2.00x", 2.0f)
 }
 
