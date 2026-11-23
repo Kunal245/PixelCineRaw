@@ -1,6 +1,5 @@
 package com.kunal.pixelcineraw.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -8,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Icon
@@ -24,10 +24,11 @@ import com.kunal.pixelcineraw.camera.CinemaState
 import com.kunal.pixelcineraw.camera.ColorMath
 import com.kunal.pixelcineraw.camera.ShutterUnit
 import com.kunal.pixelcineraw.camera.ThermalStatus
+import java.util.Locale
 
 /**
- * Cinema top status bar displaying real-time camera parameters, battery, storage,
- * and thermal telemetry.
+ * Sleek Blackmagic / Arri inspired cinema top status bar displaying real-time
+ * camera parameters and live hardware telemetry without number jitter.
  */
 @Composable
 fun TopStatusBar(
@@ -42,15 +43,16 @@ fun TopStatusBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xCC0D0D0D))
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .background(Color(0xD90D0F12))
+            .border(width = 0.5.dp, color = Color(0x33FFFFFF))
+            .padding(horizontal = 14.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Left: FPS, Shutter, ISO, WB, Profile (Tap to edit)
+        // Left: FPS, Shutter, ISO, WB, Profile (Tap to open tactile rotary scrubbers)
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // FPS Pill
             CinemaStatusPill(
@@ -99,17 +101,17 @@ fun TopStatusBar(
             )
         }
 
-        // Center / Recording indicator
+        // Center: High-contrast Recording Badge & Timecode
         if (state.isRecording) {
             val mins = state.recordingTimeSeconds / 60
             val secs = state.recordingTimeSeconds % 60
-            val timeString = String.format("%02d:%02d", mins, secs)
+            val timeString = String.format(Locale.US, "%02d:%02d", mins, secs)
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .background(Color(0xCCFF0033), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                    .background(Color(0xDDFF0033), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 10.dp, vertical = 3.dp)
             ) {
                 Box(
                     modifier = Modifier
@@ -127,26 +129,27 @@ fun TopStatusBar(
             }
         }
 
-        // Right: Storage, Battery, USB-C Mic, Thermal status
+        // Right: Real Live Telemetry (USB-C Mic, Internal Storage, Battery %, Tensor G4 Thermal)
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // External Mic Indicator
+            // USB-C External Mic Indicator
             if (state.isExternalMicConnected) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .background(Color(0x3300E5FF), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                        .background(Color(0x2A00E5FF), RoundedCornerShape(4.dp))
+                        .border(0.5.dp, Color(0xFF00E5FF), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Mic,
                         contentDescription = "USB Mic",
                         tint = Color(0xFF00E5FF),
-                        modifier = Modifier.size(12.dp)
+                        modifier = Modifier.size(11.dp)
                     )
-                    Spacer(modifier = Modifier.width(2.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "USB-C",
                         color = Color(0xFF00E5FF),
@@ -157,32 +160,41 @@ fun TopStatusBar(
                 }
             }
 
-            // Storage Remaining
+            // Real Live Free Internal Storage
             Text(
                 text = "${state.remainingStorageGb.toInt()}GB • ${state.remainingRecordingMinutes}m",
-                color = if (state.remainingRecordingMinutes < 15) Color(0xFFFF4444) else Color(0xCCFFFFFF),
+                color = if (state.remainingRecordingMinutes < 15) Color(0xFFFF3333) else Color(0xCCFFFFFF),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
 
-            // Battery %
+            // Real Live Battery Percentage
             Row(verticalAlignment = Alignment.CenterVertically) {
+                val batteryIcon = if (state.batteryPercent < 15) Icons.Default.BatteryAlert else Icons.Default.BatteryFull
+                val batteryColor = when {
+                    state.batteryPercent < 15 -> Color(0xFFFF3333)
+                    state.batteryPercent < 30 -> Color(0xFFFFD700)
+                    else -> Color(0xFF00FF66)
+                }
+
                 Icon(
-                    imageVector = Icons.Default.BatteryFull,
+                    imageVector = batteryIcon,
                     contentDescription = "Battery",
-                    tint = if (state.batteryPercent < 20) Color(0xFFFF4444) else Color(0xCCFFFFFF),
+                    tint = batteryColor,
                     modifier = Modifier.size(14.dp)
                 )
+                Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     text = "${state.batteryPercent}%",
-                    color = Color(0xCCFFFFFF),
+                    color = Color.White,
                     fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
             }
 
-            // Tensor G4 Thermal Badge
+            // Tensor G4 Real Live Thermal Badge
             ThermalIndicator(status = state.thermalStatus)
         }
     }
@@ -198,19 +210,19 @@ fun CinemaStatusPill(
 ) {
     Column(
         modifier = Modifier
-            .background(Color(0xFF1E1E1E), RoundedCornerShape(6.dp))
+            .background(Color(0xFF181A1D), RoundedCornerShape(5.dp))
             .border(
-                1.dp,
-                if (highlight) Color(0xFFFFD700).copy(alpha = 0.5f) else Color(0x22FFFFFF),
-                RoundedCornerShape(6.dp)
+                0.7.dp,
+                if (highlight) Color(0xFFFFCC00).copy(alpha = 0.6f) else Color(0x22FFFFFF),
+                RoundedCornerShape(5.dp)
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 3.dp),
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             text = label,
-            color = Color(0x88FFFFFF),
+            color = Color(0x99FFFFFF),
             fontSize = 8.sp,
             fontWeight = FontWeight.SemiBold,
             fontFamily = FontFamily.Monospace
@@ -218,7 +230,7 @@ fun CinemaStatusPill(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = value,
-                color = if (highlight) Color(0xFFFFD700) else Color.White,
+                color = if (highlight) Color(0xFFFFCC00) else Color.White,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
@@ -240,16 +252,16 @@ fun CinemaStatusPill(
 fun ThermalIndicator(status: ThermalStatus) {
     val (dotColor, text) = when (status) {
         ThermalStatus.NOMINAL -> Pair(Color(0xFF00FF66), "COOL")
-        ThermalStatus.LIGHT -> Pair(Color(0xFFFFD700), "WARM")
-        ThermalStatus.MODERATE -> Pair(Color(0xFFFF9900), "THROTTLE")
+        ThermalStatus.LIGHT, ThermalStatus.MODERATE -> Pair(Color(0xFFFFCC00), "WARM")
         ThermalStatus.SEVERE, ThermalStatus.EMERGENCY -> Pair(Color(0xFFFF2222), "HOT")
     }
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .background(Color(0xFF1A1A1A), RoundedCornerShape(4.dp))
-            .padding(horizontal = 5.dp, vertical = 2.dp)
+            .background(Color(0xFF181A1D), RoundedCornerShape(4.dp))
+            .border(0.5.dp, dotColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
         Box(
             modifier = Modifier

@@ -46,6 +46,7 @@ data class CinemaState(
 
     // Monitoring Overlays
     val showHistogram: Boolean = true,
+    val histogramData: HistogramData = HistogramData(),
     val showFocusPeaking: Boolean = false,
     val peakingColor: PeakingColor = PeakingColor.GREEN,
     val peakingSensitivity: Float = 0.6f, // 0.1 to 1.0
@@ -86,4 +87,29 @@ enum class ThermalStatus(val label: String, val isWarning: Boolean) {
     MODERATE("THROTTLING RISK", true),
     SEVERE("CRITICAL HEAT", true),
     EMERGENCY("EMERGENCY SHUTDOWN", true)
+}
+
+data class HistogramData(
+    val redBins: FloatArray = FloatArray(32),
+    val greenBins: FloatArray = FloatArray(32),
+    val blueBins: FloatArray = FloatArray(32),
+    val lumaBins: FloatArray = FloatArray(32)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as HistogramData
+        return redBins.contentEquals(other.redBins) &&
+                greenBins.contentEquals(other.greenBins) &&
+                blueBins.contentEquals(other.blueBins) &&
+                lumaBins.contentEquals(other.lumaBins)
+    }
+
+    override fun hashCode(): Int {
+        var result = redBins.contentHashCode()
+        result = 31 * result + greenBins.contentHashCode()
+        result = 31 * result + blueBins.contentHashCode()
+        result = 31 * result + lumaBins.contentHashCode()
+        return result
+    }
 }

@@ -146,6 +146,8 @@ class Camera2Controller(
                 val isUltraWide = minFocal < 3.0f
                 val isMain = !isUltraWide
 
+                val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+
                 val spec = CameraSensorSpec(
                     cameraId = id,
                     lensFacing = facing,
@@ -166,7 +168,8 @@ class Camera2Controller(
                     previewSizes = previewSizes,
                     videoSizes = videoSizes,
                     isUltraWide = isUltraWide,
-                    isMainWide = isMain
+                    isMainWide = isMain,
+                    sensorOrientation = sensorOrientation
                 )
 
                 _probedSensors.add(spec)
@@ -824,6 +827,12 @@ class Camera2Controller(
                 recordedBytes = bytes,
                 droppedFramesCount = droppedFrames
             )
+        }
+    }
+
+    fun updateHistogramData(data: HistogramData) {
+        _state.update {
+            it.copy(histogramData = data)
         }
     }
 

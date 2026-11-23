@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.*
+import java.util.Locale
 
 /**
  * Full landscape cinema viewfinder and dark HUD with expandable rotary controls.
@@ -32,6 +33,7 @@ fun CinemaScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
 
     // Cinema standard presets
+    val fpsValues = remember { listOf(24, 25, 30, 48, 50, 60) }
     val shutterAngles = remember { listOf(11.2f, 22.5f, 45f, 90f, 144f, 172.8f, 180f, 270f, 360f) }
     val shutterSpeedsNs = remember {
         listOf(
@@ -73,28 +75,23 @@ fun CinemaScreen(
                 activeDial = ActiveDial.NONE
             }
     ) {
-        // 1. Live Camera2 Viewfinder Surface
+        // 1. Live Camera2 Viewfinder Surface with rotation matrix and aspect ratio fit
         Viewfinder(
             viewModel = viewModel,
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Histogram)
+        // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Live Movable Histogram)
         MonitoringOverlays(
             state = state,
             modifier = Modifier.fillMaxSize()
         )
 
-        // 3. Top Cinema Status Bar
+        // 3. Top Cinema Status Bar (Tap values to open tactile scrubbers)
         TopStatusBar(
             state = state,
             onFpsClick = {
-                val nextFps = when (state.targetFps) {
-                    24 -> 30
-                    30 -> 60
-                    else -> 24
-                }
-                viewModel.cameraController.setTargetFps(nextFps)
+                activeDial = if (activeDial == ActiveDial.FPS) ActiveDial.NONE else ActiveDial.FPS
             },
             onShutterClick = {
                 activeDial = if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER
@@ -137,7 +134,7 @@ fun CinemaScreen(
             modifier = Modifier.align(Alignment.BottomCenter)
         )
 
-        // 5. Expandable Rotary Dial Bottom Sheet Overlay
+        // 5. Expandable Rotary Dial Bottom Sheet Overlay with Haptic Ticks
         AnimatedVisibility(
             visible = activeDial != ActiveDial.NONE,
             enter = slideInVertically { it } + fadeIn(),
@@ -147,6 +144,19 @@ fun CinemaScreen(
                 .padding(bottom = 68.dp)
         ) {
             when (activeDial) {
+                ActiveDial.FPS -> {
+                    val currentFps = state.targetFps
+                    val selectedIdx = fpsValues.indexOf(currentFps).coerceAtLeast(0)
+                    RotaryWheelScrubber(
+                        title = "Frame Rate (FPS)",
+                        items = fpsValues,
+                        selectedIndex = selectedIdx,
+                        onItemSelected = { _, fps -> viewModel.cameraController.setTargetFps(fps) },
+                        formatItem = { "$it FPS" },
+                        onClose = { activeDial = ActiveDial.NONE },
+                        presets = listOf("24p" to 0, "25p" to 1, "30p" to 2, "48p" to 3, "60p" to 5)
+                    )
+                }
                 ActiveDial.SHUTTER -> {
                     if (state.shutterUnit == ShutterUnit.ANGLE) {
                         val currentAngle = state.shutterAngle
@@ -158,6 +168,7 @@ fun CinemaScreen(
                             onItemSelected = { _, angle -> viewModel.cameraController.setShutterAngle(angle) },
                             formatItem = { "${it.toInt()}°" },
                             onClose = { activeDial = ActiveDial.NONE },
+                            presets = listOf("90°" to 3, "144°" to 4, "172.8°" to 5, "180°" to 6, "360°" to 8),
                             headerActions = {
                                 TextButton(onClick = { viewModel.cameraController.toggleShutterUnit() }) {
                                     Text("SWITCH TO SPEED", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -174,6 +185,7 @@ fun CinemaScreen(
                             onItemSelected = { _, ns -> viewModel.cameraController.setShutterSpeed(ns) },
                             formatItem = { ColorMath.formatShutterSpeed(it) },
                             onClose = { activeDial = ActiveDial.NONE },
+                            presets = listOf("1/24" to 12, "1/48" to 10, "1/50" to 9, "1/60" to 8, "1/120" to 6, "1/1000" to 3),
                             headerActions = {
                                 TextButton(onClick = { viewModel.cameraController.toggleShutterUnit() }) {
                                     Text("SWITCH TO ANGLE", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -192,6 +204,7 @@ fun CinemaScreen(
                         onItemSelected = { _, iso -> viewModel.cameraController.setIso(iso) },
                         formatItem = { "ISO $it" },
                         onClose = { activeDial = ActiveDial.NONE },
+                        presets = listOf("100" to 3, "200" to 6, "400" to 8, "800" to 10, "1600" to 13, "3200" to 18),
                         headerActions = {
                             TextButton(onClick = { viewModel.cameraController.toggleExposureMode() }) {
                                 Text(
@@ -216,10 +229,11 @@ fun CinemaScreen(
                             if (dist <= 0.05f) "∞ INFINITY"
                             else {
                                 val meters = 1.0f / dist
-                                String.format("%.2fm", meters)
+                                String.format(Locale.US, "%.2fm", meters)
                             }
                         },
                         onClose = { activeDial = ActiveDial.NONE },
+                        presets = listOf("∞ INF" to 0, "2.0m" to 10, "1.0m" to 20, "0.5m" to 30, "MACRO" to 40),
                         headerActions = {
                             TextButton(onClick = {
                                 viewModel.cameraController.setFocusMode(
@@ -246,6 +260,7 @@ fun CinemaScreen(
                         onItemSelected = { _, k -> viewModel.cameraController.setWhiteBalance(k, state.wbTint) },
                         formatItem = { "${it}K" },
                         onClose = { activeDial = ActiveDial.NONE },
+                        presets = listOf("3200K" to 9, "4000K" to 17, "5600K" to 33, "6500K" to 42, "7500K" to 52),
                         headerActions = {
                             TextButton(onClick = { viewModel.cameraController.toggleAutoWb() }) {
                                 Text(

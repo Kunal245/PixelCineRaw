@@ -1,6 +1,5 @@
 package com.kunal.pixelcineraw.camera
 
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -14,7 +13,8 @@ import kotlinx.coroutines.*
 import java.util.concurrent.Executors
 
 /**
- * Monitors battery, available storage, USB-C audio devices, and Tensor G4 thermal state.
+ * Monitors real live Pixel 9a battery level, free internal storage, USB-C audio devices,
+ * and Tensor G4 thermal state.
  */
 class SystemTelemetryMonitor(
     private val context: Context,
@@ -22,23 +22,17 @@ class SystemTelemetryMonitor(
 ) {
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
     private var isMonitoring = false
     private var monitorJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private var currentThermalStatus = ThermalStatus.NOMINAL
-
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
-        currentThermalStatus = when (status) {
-            PowerManager.THERMAL_STATUS_NONE -> ThermalStatus.NOMINAL
-            PowerManager.THERMAL_STATUS_LIGHT -> ThermalStatus.LIGHT
-            PowerManager.THERMAL_STATUS_MODERATE -> ThermalStatus.MODERATE
-            PowerManager.THERMAL_STATUS_SEVERE -> ThermalStatus.SEVERE
-            PowerManager.THERMAL_STATUS_CRITICAL,
-            PowerManager.THERMAL_STATUS_EMERGENCY,
-            PowerManager.THERMAL_STATUS_SHUTDOWN -> ThermalStatus.EMERGENCY
-            else -> ThermalStatus.NOMINAL
-        }
+        val thermal = mapThermalStatus(status)
+        val battery = getBatteryPercentage()
+        val storageGb = getAvailableStorageGb()
+        val micConnected = isExternalMicAttached()
+        onUpdate(battery, storageGb, thermal, micConnected)
     }
 
     fun start() {
@@ -51,10 +45,13 @@ class SystemTelemetryMonitor(
             // Ignore on devices without thermal HAL
         }
 
+        // Poll immediately and synchronously so first frame has live readings
+        pollTelemetry()
+
         monitorJob = scope.launch {
             while (isActive && isMonitoring) {
-                pollTelemetry()
                 delay(2000L) // Poll every 2 seconds
+                pollTelemetry()
             }
         }
     }
@@ -70,15 +67,23 @@ class SystemTelemetryMonitor(
         }
     }
 
-    private fun pollTelemetry() {
+    fun pollTelemetry() {
         val battery = getBatteryPercentage()
         val storageGb = getAvailableStorageGb()
+        val thermal = getThermalStatus()
         val micConnected = isExternalMicAttached()
 
-        onUpdate(battery, storageGb, currentThermalStatus, micConnected)
+        onUpdate(battery, storageGb, thermal, micConnected)
     }
 
     private fun getBatteryPercentage(): Int {
+        // Direct BatteryManager property query on Pixel 9a
+        val capacity = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        if (capacity in 0..100) {
+            return capacity
+        }
+
+        // Fallback: Sticky broadcast
         val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
         val batteryStatus: Intent? = context.registerReceiver(null, intentFilter)
         val level: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
@@ -90,12 +95,29 @@ class SystemTelemetryMonitor(
         }
     }
 
+    private fun getThermalStatus(): ThermalStatus {
+        return mapThermalStatus(powerManager.currentThermalStatus)
+    }
+
+    private fun mapThermalStatus(status: Int): ThermalStatus {
+        return when (status) {
+            PowerManager.THERMAL_STATUS_NONE -> ThermalStatus.NOMINAL
+            PowerManager.THERMAL_STATUS_LIGHT -> ThermalStatus.LIGHT
+            PowerManager.THERMAL_STATUS_MODERATE -> ThermalStatus.MODERATE
+            PowerManager.THERMAL_STATUS_SEVERE -> ThermalStatus.SEVERE
+            PowerManager.THERMAL_STATUS_CRITICAL,
+            PowerManager.THERMAL_STATUS_EMERGENCY,
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> ThermalStatus.EMERGENCY
+            else -> ThermalStatus.NOMINAL
+        }
+    }
+
     private fun getAvailableStorageGb(): Float {
         return try {
-            val path = Environment.getExternalStorageDirectory()
-            val stat = StatFs(path.path)
+            val path = Environment.getExternalStorageDirectory().path
+            val stat = StatFs(path)
             val bytesAvailable = stat.availableBlocksLong * stat.blockSizeLong
-            (bytesAvailable / (1024f * 1024f * 1024f))
+            bytesAvailable / (1024f * 1024f * 1024f)
         } catch (e: Exception) {
             64.0f
         }

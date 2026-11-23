@@ -28,7 +28,8 @@ data class CameraSensorSpec(
     val previewSizes: List<Size>,
     val videoSizes: List<Size>,
     val isUltraWide: Boolean,
-    val isMainWide: Boolean
+    val isMainWide: Boolean,
+    val sensorOrientation: Int = 90
 ) {
     val maxZoomRatio: Float = 8f
 

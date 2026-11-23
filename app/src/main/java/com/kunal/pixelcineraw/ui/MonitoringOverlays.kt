@@ -4,11 +4,11 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -16,16 +16,20 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
 import com.kunal.pixelcineraw.camera.FrameGuide
+import com.kunal.pixelcineraw.camera.HistogramData
+import kotlin.math.roundToInt
 
 /**
  * Cinema monitoring overlays: Frame Guides (2.39:1, 16:9, 4:3), Rule of Thirds grid,
- * Zebra stripes, Focus Peaking outlines, and live RGB / Luma Histogram.
+ * Zebra stripes, Focus Peaking outlines, and a live, movable RGB / Luma Histogram HUD.
  */
 @Composable
 fun MonitoringOverlays(
@@ -57,12 +61,13 @@ fun MonitoringOverlays(
             )
         }
 
-        // 5. Real-time RGB / Luma Histogram (Top Right HUD)
+        // 5. Real-Time Movable RGB / Luma Histogram (Top Right HUD by default)
         if (state.showHistogram) {
-            HistogramHUD(
+            MovableHistogramHUD(
+                data = state.histogramData,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 56.dp, end = 16.dp)
+                    .padding(top = 52.dp, end = 16.dp)
             )
         }
 
@@ -71,9 +76,9 @@ fun MonitoringOverlays(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 56.dp, start = 16.dp)
+                    .padding(top = 52.dp, start = 16.dp)
                     .background(Color(0x99000000), RoundedCornerShape(4.dp))
-                    .border(1.dp, Color(0xFF00E5FF), RoundedCornerShape(4.dp))
+                    .border(0.7.dp, Color(0xFF00E5FF), RoundedCornerShape(4.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Text(
@@ -143,7 +148,7 @@ fun GridOverlay() {
         drawLine(gridColor, Offset(0f, h / 3f), Offset(w, h / 3f), 1.dp.toPx())
         drawLine(gridColor, Offset(0f, h * 2f / 3f), Offset(w, h * 2f / 3f), 1.dp.toPx())
 
-        // Center Crosshair
+        // Center Crosshairs
         val cx = w / 2f
         val cy = h / 2f
         val crossSize = 14.dp.toPx()
@@ -172,7 +177,6 @@ fun ZebraOverlay(ireThreshold: Int) {
         val w = size.width
         val h = size.height
 
-        // Simulates zebras across highlights (IRE indicator)
         var x = -h + phase
         while (x < w) {
             drawLine(
@@ -189,7 +193,6 @@ fun ZebraOverlay(ireThreshold: Int) {
 @Composable
 fun FocusPeakingOverlay(color: Color, sensitivity: Float) {
     Canvas(modifier = Modifier.fillMaxSize()) {
-        // High-contrast edge peaking indicator
         val cx = size.width / 2f
         val cy = size.height / 2f
         val radius = 90.dp.toPx() * sensitivity
@@ -203,58 +206,86 @@ fun FocusPeakingOverlay(color: Color, sensitivity: Float) {
     }
 }
 
+/**
+ * Compact, semi-transparent, and freely movable RGB & Luma live histogram.
+ */
 @Composable
-fun HistogramHUD(modifier: Modifier = Modifier) {
+fun MovableHistogramHUD(
+    data: HistogramData,
+    modifier: Modifier = Modifier
+) {
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+
     Box(
         modifier = modifier
-            .size(width = 130.dp, height = 64.dp)
-            .background(Color(0xCC111111), RoundedCornerShape(6.dp))
-            .border(1.dp, Color(0x44FFFFFF), RoundedCornerShape(6.dp))
-            .padding(4.dp)
+            .offset { IntOffset(dragOffsetX.roundToInt(), dragOffsetY.roundToInt()) }
+            .size(width = 118.dp, height = 56.dp)
+            .background(Color(0xA6111317), RoundedCornerShape(6.dp))
+            .border(0.7.dp, Color(0x44FFFFFF), RoundedCornerShape(6.dp))
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    dragOffsetX += dragAmount.x
+                    dragOffsetY += dragAmount.y
+                }
+            }
+            .padding(horizontal = 4.dp, vertical = 3.dp)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
+            val numBins = data.redBins.size
 
-            // Simulated real-time RGB & Luma Curves
-            val points = 32
-            val redPath = Path()
-            val greenPath = Path()
-            val bluePath = Path()
-            val lumaPath = Path()
+            if (numBins > 1) {
+                val redPath = Path()
+                val greenPath = Path()
+                val bluePath = Path()
+                val lumaPath = Path()
 
-            redPath.moveTo(0f, h)
-            greenPath.moveTo(0f, h)
-            bluePath.moveTo(0f, h)
-            lumaPath.moveTo(0f, h)
+                val startY = h
+                redPath.moveTo(0f, startY)
+                greenPath.moveTo(0f, startY)
+                bluePath.moveTo(0f, startY)
+                lumaPath.moveTo(0f, startY)
 
-            for (i in 0 until points) {
-                val x = (i.toFloat() / (points - 1)) * w
-                // Bell curves centered on midtones/shadows for cinema flat profile
-                val normX = i.toFloat() / points
-                val redY = h - (Math.sin(normX * Math.PI) * 0.75 + Math.sin(normX * 2 * Math.PI) * 0.15).toFloat().coerceIn(0.05f, 0.95f) * h
-                val greenY = h - (Math.sin(normX * Math.PI * 0.9 + 0.2) * 0.8).toFloat().coerceIn(0.05f, 0.95f) * h
-                val blueY = h - (Math.sin(normX * Math.PI * 1.1) * 0.65).toFloat().coerceIn(0.05f, 0.95f) * h
-                val lumaY = (redY + greenY + blueY) / 3f
+                for (i in 0 until numBins) {
+                    val x = (i.toFloat() / (numBins - 1)) * w
+                    val rH = (data.redBins[i] * (h - 6f)).coerceIn(0f, h)
+                    val gH = (data.greenBins[i] * (h - 6f)).coerceIn(0f, h)
+                    val bH = (data.blueBins[i] * (h - 6f)).coerceIn(0f, h)
+                    val lH = (data.lumaBins[i] * (h - 6f)).coerceIn(0f, h)
 
-                redPath.lineTo(x, redY)
-                greenPath.lineTo(x, greenY)
-                bluePath.lineTo(x, blueY)
-                lumaPath.lineTo(x, lumaY)
+                    redPath.lineTo(x, h - rH)
+                    greenPath.lineTo(x, h - gH)
+                    bluePath.lineTo(x, h - bH)
+                    lumaPath.lineTo(x, h - lH)
+                }
+
+                drawPath(redPath, Color(0x99FF3333), style = Stroke(width = 1.2.dp.toPx()))
+                drawPath(greenPath, Color(0x9933FF33), style = Stroke(width = 1.2.dp.toPx()))
+                drawPath(bluePath, Color(0x993399FF), style = Stroke(width = 1.2.dp.toPx()))
+                drawPath(lumaPath, Color(0xEEFFFFFF), style = Stroke(width = 1.0.dp.toPx()))
             }
-
-            drawPath(redPath, Color(0x99FF3333), style = Stroke(width = 1.5.dp.toPx()))
-            drawPath(greenPath, Color(0x9933FF33), style = Stroke(width = 1.5.dp.toPx()))
-            drawPath(bluePath, Color(0x993388FF), style = Stroke(width = 1.5.dp.toPx()))
-            drawPath(lumaPath, Color(0xDDFFFFFF), style = Stroke(width = 1.dp.toPx()))
         }
 
-        Text(
-            text = "RGB/LUMA",
-            color = Color(0x88FFFFFF),
-            fontSize = 8.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.align(Alignment.TopStart).padding(2.dp)
-        )
+        Row(
+            modifier = Modifier.align(Alignment.TopStart),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(4.dp)
+                    .background(Color(0xFF00FF66), RoundedCornerShape(1.dp))
+            )
+            Spacer(modifier = Modifier.width(3.dp))
+            Text(
+                text = "RGB/LUMA LIVE",
+                color = Color(0x99FFFFFF),
+                fontSize = 7.5.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
     }
 }
