@@ -256,9 +256,9 @@ fun Viewfinder(
 }
 
 /**
- * Computes and applies a matrix transformation to ensure:
- * 1. Image is upright in both landscape orientations (ROTATION_90 and ROTATION_270).
- * 2. Aspect ratio is preserved (16:9 pillarboxed/letterboxed, never stretched).
+ * Configures the standard Google Camera2 Matrix transformation for TextureView:
+ * 1. Corrects aspect ratio and centers the image without stretching.
+ * 2. In landscape orientations (ROTATION_90 and ROTATION_270), rotates and scales correctly.
  */
 fun applyViewfinderTransform(
     textureView: TextureView,
@@ -272,49 +272,27 @@ fun applyViewfinderTransform(
 
     val display = textureView.display
         ?: (textureView.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay
-    val displayRotation = display?.rotation ?: Surface.ROTATION_90
-
-    val surfaceRotationDegrees = when (displayRotation) {
-        Surface.ROTATION_0 -> 0
-        Surface.ROTATION_90 -> 90
-        Surface.ROTATION_180 -> 180
-        Surface.ROTATION_270 -> 270
-        else -> 90
-    }
-
-    // Relative rotation required to make the camera sensor buffer upright on screen
-    // Back sensor: (sensorOrientation - surfaceRotationDegrees + 360) % 360
-    val relativeRotation = (sensorOrientation - surfaceRotationDegrees + 360) % 360
+    val rotation = display?.rotation ?: Surface.ROTATION_90
 
     val matrix = Matrix()
     val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
     val bufferRect = android.graphics.RectF(0f, 0f, previewHeight.toFloat(), previewWidth.toFloat())
-
     val centerX = viewRect.centerX()
     val centerY = viewRect.centerY()
 
-    if (relativeRotation == 90 || relativeRotation == 270) {
+    if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
         bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
         matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-        val scale = Math.min(
-            viewWidth.toFloat() / previewHeight.toFloat(),
-            viewHeight.toFloat() / previewWidth.toFloat()
-        )
-        matrix.postScale(scale, scale, centerX, centerY)
-        matrix.postRotate(relativeRotation.toFloat(), centerX, centerY)
-    } else if (relativeRotation == 180) {
-        val scale = Math.min(
+
+        // Fit inside view maintaining aspect ratio (pillarboxing on wide screens)
+        val scale = minOf(
             viewWidth.toFloat() / previewWidth.toFloat(),
             viewHeight.toFloat() / previewHeight.toFloat()
         )
         matrix.postScale(scale, scale, centerX, centerY)
+        matrix.postRotate((90 * (rotation - 2)).toFloat(), centerX, centerY)
+    } else if (Surface.ROTATION_180 == rotation) {
         matrix.postRotate(180f, centerX, centerY)
-    } else {
-        val scale = Math.min(
-            viewWidth.toFloat() / previewWidth.toFloat(),
-            viewHeight.toFloat() / previewHeight.toFloat()
-        )
-        matrix.postScale(scale, scale, centerX, centerY)
     }
 
     textureView.setTransform(matrix)
