@@ -40,6 +40,7 @@ fun TopStatusBar(
     onIspClick: () -> Unit,
     onAudioWavClick: () -> Unit,
     onAdvancedSettingsClick: () -> Unit,
+    onStabilizationClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showFormatPopover by remember { mutableStateOf(false) }
@@ -170,6 +171,20 @@ fun TopStatusBar(
                 value = if (state.recordWavSidecar) "48k WAV" else "AAC",
                 highlight = state.recordWavSidecar,
                 onClick = onAudioWavClick
+            )
+
+            // 6. Stabilization Mode Pill (OFF / OIS / OIS+EIS)
+            val stabDotColor = when (state.stabilizationMode) {
+                StabilizationMode.OFF -> Color(0xFF888888)
+                StabilizationMode.OIS -> Color(0xFF00E5FF)
+                StabilizationMode.OIS_EIS -> Color(0xFF00FF66)
+            }
+            FrostedPill(
+                label = "STAB",
+                value = state.stabilizationMode.shortLabel,
+                dotColor = stabDotColor,
+                highlight = state.stabilizationMode != StabilizationMode.OFF,
+                onClick = onStabilizationClick
             )
         }
 

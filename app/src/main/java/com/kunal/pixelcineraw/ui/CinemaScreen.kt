@@ -177,7 +177,8 @@ fun CinemaScreen(
                 onBitrateSelected = { mbps -> viewModel.cameraController.setBitrateMbps(mbps) },
                 onIspClick = { viewModel.cameraController.toggleIspMode() },
                 onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() },
-                onAdvancedSettingsClick = { showSettingsDialog = true }
+                onAdvancedSettingsClick = { showSettingsDialog = true },
+                onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() }
             )
         }
 
@@ -206,7 +207,7 @@ fun CinemaScreen(
                 onHorizonToggle = { viewModel.cameraController.toggleHorizonLeveler() },
                 onHistogramToggle = { viewModel.cameraController.toggleHistogram() },
                 onLutToggle = { viewModel.cameraController.toggleLutPreview() },
-                onStabilizationToggle = { viewModel.cameraController.toggleOis() }
+                onStabilizationToggle = { viewModel.cameraController.cycleStabilizationMode() }
             )
         }
 

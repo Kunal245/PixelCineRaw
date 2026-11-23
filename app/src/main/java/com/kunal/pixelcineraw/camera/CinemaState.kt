@@ -59,8 +59,9 @@ data class CinemaState(
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
     val hdrPipelineStatus: HdrPipelineStatus = HdrPipelineStatus.NONE,
     val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,
+    val stabilizationMode: StabilizationMode = StabilizationMode.OIS,
     val oisEnabed: Boolean = true,
-    val eisEnabled: Boolean = true,
+    val eisEnabled: Boolean = false,
 
     // Recording Runtime
     val isRecording: Boolean = false,

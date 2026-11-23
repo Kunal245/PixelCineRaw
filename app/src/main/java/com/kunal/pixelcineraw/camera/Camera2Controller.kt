@@ -38,6 +38,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * High-performance Camera2 Controller providing low-level hardware control
@@ -168,6 +169,9 @@ class Camera2Controller(
 
                 val eisModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: intArrayOf()
                 val supportsEis = eisModes.contains(CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                val supportsPreviewStab = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    eisModes.contains(CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)
+                } else false
 
                 val physicalIds = chars.physicalCameraIds
 
@@ -212,6 +216,7 @@ class Camera2Controller(
                     isHlg10Supported = supportsHlg10,
                     supportsOis = supportsOis,
                     supportsEis = supportsEis,
+                    supportsPreviewStabilization = supportsPreviewStab,
                     physicalCameraIds = physicalIds,
                     previewSizes = previewSizes,
                     surfaceTextureSizes = stSizes,
@@ -708,23 +713,33 @@ class Camera2Controller(
             }
         }
 
-        // 5. Optical & Electronic Stabilization (OIS / EIS)
-        if (spec.supportsOis) {
-            val oisMode = if (state.oisEnabed) {
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-            } else {
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+        // 5. Optical & Electronic Stabilization (OFF / OIS / OIS+EIS)
+        when (state.stabilizationMode) {
+            StabilizationMode.OFF -> {
+                if (spec.supportsOis) {
+                    builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+                }
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
             }
-            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, oisMode)
-        }
-
-        if (spec.supportsEis) {
-            val eisMode = if (state.eisEnabled) {
-                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
-            } else {
-                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+            StabilizationMode.OIS -> {
+                if (spec.supportsOis) {
+                    builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                }
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
             }
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisMode)
+            StabilizationMode.OIS_EIS -> {
+                if (spec.supportsOis) {
+                    builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                }
+                val eisMode = if (spec.supportsPreviewStabilization && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
+                } else if (spec.supportsEis) {
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                } else {
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                }
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisMode)
+            }
         }
 
         // 6. Hardware-Accelerated Smooth Zoom (CONTROL_ZOOM_RATIO)
@@ -1170,7 +1185,9 @@ class Camera2Controller(
 
     /**
      * User Action: Tap-to-Focus
-     * Converts normalized [0, 1] preview touch coordinates to Camera2 MeteringRectangle.
+     * Converts normalized [0, 1] preview touch coordinates to Camera2 MeteringRectangle,
+     * transforming accurately for SENSOR_ORIENTATION (90°/270° landscape), video aspect ratio
+     * sensor crop, and active hardware zoom ratio.
      */
     fun tapToFocus(normX: Float, normY: Float) {
         val spec = _state.value.currentSensorSpec ?: return
@@ -1179,19 +1196,76 @@ class Camera2Controller(
         val builder = previewRequestBuilder ?: return
         val handler = cameraHandler ?: return
 
-        val sensorX = (normX * activeArray.width()).toInt().coerceIn(0, activeArray.width())
-        val sensorY = (normY * activeArray.height()).toInt().coerceIn(0, activeArray.height())
+        val clampedNormX = normX.coerceIn(0f, 1f)
+        val clampedNormY = normY.coerceIn(0f, 1f)
 
-        val left = max(0, sensorX - FOCUS_AREA_SIZE)
-        val top = max(0, sensorY - FOCUS_AREA_SIZE)
-        val right = min(activeArray.width(), sensorX + FOCUS_AREA_SIZE)
-        val bottom = min(activeArray.height(), sensorY + FOCUS_AREA_SIZE)
+        // Account for display rotation in landscape (ROTATION_90 vs ROTATION_270)
+        val displayRot = getDisplayRotation()
+        val (u, v) = if (displayRot == Surface.ROTATION_270) {
+            Pair(1.0f - clampedNormX, 1.0f - clampedNormY)
+        } else {
+            Pair(clampedNormX, clampedNormY)
+        }
+
+        // Active sensor array dimensions
+        val wa = activeArray.width().toFloat()
+        val ha = activeArray.height().toFloat()
+        val sensorAspect = wa / ha
+
+        // Video stream aspect ratio
+        val vRes = _state.value.videoResolution
+        val resW = maxOf(vRes.width, vRes.height).toFloat()
+        val resH = minOf(vRes.width, vRes.height).toFloat()
+        val videoAspect = resW / resH
+
+        // Aspect-ratio crop mapping from video viewport to sensor active array
+        val (xBase, yBase) = when {
+            videoAspect > sensorAspect -> {
+                // Video is wider than sensor: full width used, top/bottom cropped
+                val hVisible = wa / videoAspect
+                val yOffset = (ha - hVisible) / 2.0f
+                Pair(u * wa, yOffset + v * hVisible)
+            }
+            videoAspect < sensorAspect -> {
+                // Video is narrower than sensor: full height used, left/right cropped
+                val wVisible = ha * videoAspect
+                val xOffset = (wa - wVisible) / 2.0f
+                Pair(xOffset + u * wVisible, v * ha)
+            }
+            else -> {
+                Pair(u * wa, v * ha)
+            }
+        }
+
+        // Zoom scale transformation (CONTROL_ZOOM_RATIO scales around active array center)
+        val zoomRatio = _state.value.zoomRatio
+        val targetHardwareZoom = if (spec.isLogicalMultiCamera) {
+            zoomRatio.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        } else if (spec.isUltraWide) {
+            (zoomRatio / 0.5f).coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        } else {
+            zoomRatio.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        }.coerceAtLeast(1.0f)
+
+        val cx = wa / 2.0f
+        val cy = ha / 2.0f
+        val sensorX = cx + (xBase - cx) / targetHardwareZoom
+        val sensorY = cy + (yBase - cy) / targetHardwareZoom
+
+        val sensorXInt = sensorX.roundToInt().coerceIn(0, activeArray.width())
+        val sensorYInt = sensorY.roundToInt().coerceIn(0, activeArray.height())
+
+        val halfArea = (FOCUS_AREA_SIZE / (2 * targetHardwareZoom)).roundToInt().coerceAtLeast(40)
+        val left = max(0, sensorXInt - halfArea)
+        val top = max(0, sensorYInt - halfArea)
+        val right = min(activeArray.width(), sensorXInt + halfArea)
+        val bottom = min(activeArray.height(), sensorYInt + halfArea)
 
         val meteringRect = MeteringRectangle(Rect(left, top, right, bottom), MeteringRectangle.METERING_WEIGHT_MAX)
 
         _state.update {
             it.copy(
-                tapToFocusPoint = Pair(normX, normY),
+                tapToFocusPoint = Pair(clampedNormX, clampedNormY),
                 focusMode = FocusMode.AUTO_CONTINUOUS
             )
         }
@@ -1201,12 +1275,15 @@ class Camera2Controller(
             builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
             builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
             builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
 
             session.capture(builder.build(), null, handler)
 
-            // Reset trigger to IDLE
+            // Reset triggers to IDLE
             builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
+            builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE)
             session.setRepeatingRequest(builder.build(), captureCallback, handler)
+            Log.d(TAG, "Triggered tap-to-focus at sensor ($sensorXInt, $sensorYInt), zoom=$targetHardwareZoom")
         } catch (e: Exception) {
             Log.e(TAG, "Failed tap-to-focus trigger", e)
         }
@@ -1274,16 +1351,34 @@ class Camera2Controller(
     }
 
     /**
-     * User Action: Stabilization (OIS / EIS)
+     * User Action: Stabilization (OFF / OIS / OIS+EIS)
      */
-    fun toggleOis() {
-        _state.update { it.copy(oisEnabed = !it.oisEnabed) }
+    fun setStabilizationMode(mode: StabilizationMode) {
+        _state.update {
+            it.copy(
+                stabilizationMode = mode,
+                oisEnabed = mode != StabilizationMode.OFF,
+                eisEnabled = mode == StabilizationMode.OIS_EIS
+            )
+        }
         createAndSetRepeatingRequest()
     }
 
+    fun cycleStabilizationMode() {
+        val nextMode = when (_state.value.stabilizationMode) {
+            StabilizationMode.OFF -> StabilizationMode.OIS
+            StabilizationMode.OIS -> StabilizationMode.OIS_EIS
+            StabilizationMode.OIS_EIS -> StabilizationMode.OFF
+        }
+        setStabilizationMode(nextMode)
+    }
+
+    fun toggleOis() {
+        cycleStabilizationMode()
+    }
+
     fun toggleEis() {
-        _state.update { it.copy(eisEnabled = !it.eisEnabled) }
-        createAndSetRepeatingRequest()
+        cycleStabilizationMode()
     }
 
     /**

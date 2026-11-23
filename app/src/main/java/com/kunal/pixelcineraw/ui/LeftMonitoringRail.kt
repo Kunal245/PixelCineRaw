@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
 import com.kunal.pixelcineraw.camera.FrameGuide
+import com.kunal.pixelcineraw.camera.StabilizationMode
 
 /**
  * Collapsible left-edge cinema monitoring and pro assistance rail.
@@ -119,11 +120,21 @@ fun LeftMonitoringRail(
             onClick = onLutToggle
         )
 
-        // 8. Optical / Electronic Stabilization Toggle
+        // 8. Optical / Electronic Stabilization Toggle (OFF / OIS / OIS+EIS)
+        val stabLabel = when (state.stabilizationMode) {
+            StabilizationMode.OFF -> "OFF"
+            StabilizationMode.OIS -> "OIS"
+            StabilizationMode.OIS_EIS -> "OIS+"
+        }
+        val stabColor = when (state.stabilizationMode) {
+            StabilizationMode.OFF -> Color(0xFF888888)
+            StabilizationMode.OIS -> Color(0xFF00E5FF)
+            StabilizationMode.OIS_EIS -> Color(0xFF00FF66)
+        }
         MonitoringRailButton(
-            label = if (state.oisEnabed) "OIS" else "STAB",
-            isActive = state.oisEnabed,
-            activeColor = Color(0xFF00FF66),
+            label = stabLabel,
+            isActive = state.stabilizationMode != StabilizationMode.OFF,
+            activeColor = stabColor,
             onClick = onStabilizationToggle
         )
     }

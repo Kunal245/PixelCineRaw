@@ -25,6 +25,7 @@ data class CameraSensorSpec(
     val isHlg10Supported: Boolean = false,
     val supportsOis: Boolean,
     val supportsEis: Boolean,
+    val supportsPreviewStabilization: Boolean = false,
     val physicalCameraIds: Set<String>,
     val previewSizes: List<Size>,
     val surfaceTextureSizes: List<Size> = emptyList(),
@@ -102,3 +103,10 @@ enum class PeakingColor(val label: String, val hexColor: Long) {
     CYAN("Cyan", 0xFF00E5FFL),
     YELLOW("Yellow", 0xFFFFD700L)
 }
+
+enum class StabilizationMode(val label: String, val shortLabel: String, val description: String) {
+    OFF("STAB: OFF", "OFF", "Zero electronic crop, locks floating OIS element for tripod/gimbal pans"),
+    OIS("STAB: OIS", "OIS", "Pure optical lens stabilization with full uncropped field of view"),
+    OIS_EIS("STAB: OIS+EIS", "OIS+EIS", "Combined Tensor G4 electronic gyro preview stabilization with hardware OIS")
+}
+
