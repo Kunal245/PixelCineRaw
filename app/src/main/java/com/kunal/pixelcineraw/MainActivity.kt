@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.Surface
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -29,6 +30,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.CinemaViewModel
 import com.kunal.pixelcineraw.camera.ColorProfile
+import com.kunal.pixelcineraw.camera.OrientationLockMode
 import com.kunal.pixelcineraw.ui.CinemaScreen
 import com.kunal.pixelcineraw.ui.theme.PixelCineRawTheme
 
@@ -58,6 +60,25 @@ class MainActivity : ComponentActivity() {
                         ActivityInfo.COLOR_MODE_HDR
                     } else {
                         ActivityInfo.COLOR_MODE_DEFAULT
+                    }
+                }
+
+                // Orientation Lock & Hold: Enforces user-selected lock and auto-holds orientation during recording
+                LaunchedEffect(state.isRecording, state.orientationLockMode) {
+                    if (state.isRecording) {
+                        val currentRotation = cinemaViewModel.cameraController.getDisplayRotation()
+                        val isLandscape = currentRotation == Surface.ROTATION_90 || currentRotation == Surface.ROTATION_270
+                        requestedOrientation = if (isLandscape) {
+                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        } else {
+                            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        }
+                    } else {
+                        requestedOrientation = when (state.orientationLockMode) {
+                            OrientationLockMode.AUTO -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+                            OrientationLockMode.LOCK_LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            OrientationLockMode.LOCK_PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        }
                     }
                 }
 

@@ -8,9 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.BatteryFull
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,6 +39,7 @@ fun TopStatusBar(
     onAudioWavClick: () -> Unit,
     onAdvancedSettingsClick: () -> Unit,
     onStabilizationClick: () -> Unit,
+    onOrientationLockClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showFormatPopover by remember { mutableStateOf(false) }
@@ -185,6 +184,21 @@ fun TopStatusBar(
                 dotColor = stabDotColor,
                 highlight = state.stabilizationMode != StabilizationMode.OFF,
                 onClick = onStabilizationClick
+            )
+
+            // 7. Orientation Lock Pill (AUTO / LANDSCAPE / PORTRAIT)
+            val isOrientLocked = state.orientationLockMode != OrientationLockMode.AUTO
+            val orientIcon = when (state.orientationLockMode) {
+                OrientationLockMode.AUTO -> Icons.Default.ScreenRotation
+                OrientationLockMode.LOCK_LANDSCAPE -> Icons.Default.StayCurrentLandscape
+                OrientationLockMode.LOCK_PORTRAIT -> Icons.Default.StayCurrentPortrait
+            }
+            FrostedPill(
+                label = "ORIENT",
+                value = state.orientationLockMode.shortLabel,
+                icon = orientIcon,
+                highlight = isOrientLocked,
+                onClick = onOrientationLockClick
             )
         }
 
@@ -552,6 +566,7 @@ fun FrostedPill(
     value: String,
     subText: String? = null,
     dotColor: Color? = null,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     highlight: Boolean = false,
     onClick: () -> Unit
 ) {
@@ -575,7 +590,15 @@ fun FrostedPill(
             fontFamily = FontFamily.Monospace
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (dotColor != null) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (highlight) Color(0xFFFFCC00) else Color.White,
+                    modifier = Modifier.size(10.dp)
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+            } else if (dotColor != null) {
                 Box(
                     modifier = Modifier
                         .size(5.dp)

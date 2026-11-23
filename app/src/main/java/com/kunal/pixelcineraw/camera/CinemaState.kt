@@ -102,6 +102,7 @@ data class CinemaState(
     val rackPullDurationMs: Long = 2000L,
     val isGyroflowLoggingEnabled: Boolean = true,
     val deviceRotationDegrees: Int = 90,
+    val orientationLockMode: OrientationLockMode = OrientationLockMode.AUTO,
 
     // System Telemetry
     val batteryPercent: Int = 100,

@@ -614,6 +614,44 @@ fun ProToolsDrawer(
                 }
             }
 
+            // 9. Orientation Lock
+            ToolSectionCard(title = "ORIENTATION LOCK", icon = Icons.Default.ScreenRotation) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = state.orientationLockMode.description,
+                        color = Color(0x88FFFFFF),
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OrientationLockMode.values().forEach { mode ->
+                            val isSelected = state.orientationLockMode == mode
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isSelected) Color(0xFFFFCC00) else Color(0x22FFFFFF))
+                                    .clickable { cameraController.setOrientationLockMode(mode) }
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = mode.shortLabel,
+                                    color = if (isSelected) Color.Black else Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(20.dp))
         }
     }

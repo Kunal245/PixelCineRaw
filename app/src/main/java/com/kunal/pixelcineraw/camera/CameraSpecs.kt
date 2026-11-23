@@ -126,3 +126,10 @@ enum class AnamorphicDeSqueeze(val label: String, val factor: Float) {
     SQUEEZE_2_00("2.00x", 2.0f)
 }
 
+enum class OrientationLockMode(val label: String, val shortLabel: String, val description: String) {
+    AUTO("AUTO ROTATE", "AUTO", "Adapts freely between Portrait and Landscape"),
+    LOCK_LANDSCAPE("LOCK LANDSCAPE", "LANDSCAPE", "Locked to landscape (allows left/right flip for rigs)"),
+    LOCK_PORTRAIT("LOCK PORTRAIT", "PORTRAIT", "Locked to upright portrait (for vertical cinema)")
+}
+
+

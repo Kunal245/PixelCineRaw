@@ -178,7 +178,8 @@ fun CinemaScreen(
                 onIspClick = { viewModel.cameraController.toggleIspMode() },
                 onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() },
                 onAdvancedSettingsClick = { showSettingsDialog = true },
-                onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() }
+                onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() },
+                onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() }
             )
         }
 

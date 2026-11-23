@@ -1675,6 +1675,19 @@ class Camera2Controller(
         _state.update { it.copy(isGyroflowLoggingEnabled = enabled) }
     }
 
+    fun setOrientationLockMode(mode: OrientationLockMode) {
+        _state.update { it.copy(orientationLockMode = mode) }
+    }
+
+    fun cycleOrientationLockMode() {
+        val nextMode = when (_state.value.orientationLockMode) {
+            OrientationLockMode.AUTO -> OrientationLockMode.LOCK_LANDSCAPE
+            OrientationLockMode.LOCK_LANDSCAPE -> OrientationLockMode.LOCK_PORTRAIT
+            OrientationLockMode.LOCK_PORTRAIT -> OrientationLockMode.AUTO
+        }
+        setOrientationLockMode(nextMode)
+    }
+
     // --- Programmable A -> B Cinema Rack Focus ---
 
     fun setRackPointA() {
