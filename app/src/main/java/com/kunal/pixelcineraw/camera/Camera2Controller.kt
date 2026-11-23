@@ -186,33 +186,14 @@ class Camera2Controller(
             val probedResolutions = mutableListOf<CustomResolution>()
 
             if (initialSpec != null) {
-                val allVideoSizes: List<Size> = (initialSpec.previewSizes + initialSpec.videoSizes)
+                // Collect all valid hardware output sizes for preview/video
+                val allVideoSizes: List<Size> = (initialSpec.videoSizes + initialSpec.previewSizes)
+                    .filter { it.width >= 640 && it.height >= 480 } // filter out tiny thumbnails
                     .distinctBy { "${it.width}x${it.height}" }
+                    .sortedWith(compareByDescending<Size> { it.width * it.height }.thenByDescending { it.width })
 
-                // Check for 4K UHD
-                if (allVideoSizes.any { it.width == 3840 && it.height == 2160 }) {
-                    probedResolutions.add(CustomResolution.UHD_4K)
-                }
-                // Check for 4K DCI
-                if (allVideoSizes.any { it.width == 4096 && it.height == 2160 }) {
-                    probedResolutions.add(CustomResolution.DCI_4K)
-                }
-                // Check for 2.5K QHD
-                if (allVideoSizes.any { it.width == 2560 && it.height == 1440 }) {
-                    probedResolutions.add(CustomResolution.QHD_1440P)
-                }
-                // Check for 1080p FHD
-                if (allVideoSizes.any { it.width == 1920 && it.height == 1080 }) {
-                    probedResolutions.add(CustomResolution.FHD_1080P)
-                }
-                // Check for 720p HD
-                if (allVideoSizes.any { it.width == 1280 && it.height == 720 }) {
-                    probedResolutions.add(CustomResolution.HD_720P)
-                }
-                // Check for 4:3 Open Gate
-                val max43 = allVideoSizes.filter { it.width * 3 == it.height * 4 }.maxByOrNull { it.width * it.height }
-                if (max43 != null) {
-                    probedResolutions.add(CustomResolution("4:3 Open Gate (${max43.width}×${max43.height})", max43.width, max43.height, "4:3"))
+                for (size in allVideoSizes) {
+                    probedResolutions.add(CustomResolution.fromSize(size.width, size.height))
                 }
             }
 
@@ -226,7 +207,9 @@ class Camera2Controller(
                     it.copy(
                         currentSensorSpec = initialSpec,
                         supportedResolutions = probedResolutions,
-                        videoResolution = probedResolutions.firstOrNull { r -> r.width == 3840 && r.height == 2160 } ?: probedResolutions.first(),
+                        videoResolution = probedResolutions.firstOrNull { r -> r.width == 3840 && r.height == 2160 }
+                            ?: probedResolutions.firstOrNull { r -> r.width == 1920 && r.height == 1080 }
+                            ?: probedResolutions.first(),
                         iso = initialSpec.isoRange.lower.coerceAtLeast(100),
                         focusDistance = 0.0f // Infinity
                     )
@@ -647,10 +630,22 @@ class Camera2Controller(
             LensSelection.WIDE_1X, LensSelection.CROP_2X -> _probedSensors.find { it.isMainWide } ?: _probedSensors.firstOrNull()
         }
 
+        val probedResolutions = mutableListOf<CustomResolution>()
+        if (targetSpec != null) {
+            val allVideoSizes: List<Size> = (targetSpec.videoSizes + targetSpec.previewSizes)
+                .filter { it.width >= 640 && it.height >= 480 }
+                .distinctBy { "${it.width}x${it.height}" }
+                .sortedWith(compareByDescending<Size> { it.width * it.height }.thenByDescending { it.width })
+            for (size in allVideoSizes) {
+                probedResolutions.add(CustomResolution.fromSize(size.width, size.height))
+            }
+        }
+
         _state.update {
             it.copy(
                 selectedLens = lens,
-                currentSensorSpec = targetSpec ?: it.currentSensorSpec
+                currentSensorSpec = targetSpec ?: it.currentSensorSpec,
+                supportedResolutions = if (probedResolutions.isNotEmpty()) probedResolutions else it.supportedResolutions
             )
         }
 

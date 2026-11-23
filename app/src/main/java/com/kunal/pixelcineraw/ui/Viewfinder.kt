@@ -256,9 +256,9 @@ fun Viewfinder(
 }
 
 /**
- * Configures the standard Google Camera2 Matrix transformation for TextureView:
- * 1. Corrects aspect ratio and centers the image without stretching.
- * 2. In landscape orientations (ROTATION_90 and ROTATION_270), rotates and scales correctly.
+ * Configures the matrix transformation for TextureView:
+ * Ensures correct orientation in both landscape orientations (ROTATION_90 and ROTATION_270)
+ * and preserves the exact aspect ratio of the camera buffer (pillarboxed or letterboxed, never stretched).
  */
 fun applyViewfinderTransform(
     textureView: TextureView,
@@ -284,12 +284,24 @@ fun applyViewfinderTransform(
         bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
         matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
 
-        // Fit inside view maintaining aspect ratio (pillarboxing on wide screens)
-        val scale = minOf(
-            viewWidth.toFloat() / previewWidth.toFloat(),
-            viewHeight.toFloat() / previewHeight.toFloat()
-        )
-        matrix.postScale(scale, scale, centerX, centerY)
+        // Calculate aspect ratios
+        val bufferAspect = previewWidth.toFloat() / previewHeight.toFloat()
+        val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+
+        val scaleX: Float
+        val scaleY: Float
+
+        if (viewAspect > bufferAspect) {
+            // View is wider than buffer (e.g. 20:9 screen vs 16:9 or 4:3 buffer) -> pillarbox bars on left/right
+            scaleX = (viewHeight * bufferAspect) / viewWidth
+            scaleY = 1.0f
+        } else {
+            // View is taller than buffer -> letterbox bars on top/bottom
+            scaleX = 1.0f
+            scaleY = (viewWidth / bufferAspect) / viewHeight
+        }
+
+        matrix.postScale(scaleX, scaleY, centerX, centerY)
         matrix.postRotate((90 * (rotation - 2)).toFloat(), centerX, centerY)
     } else if (Surface.ROTATION_180 == rotation) {
         matrix.postRotate(180f, centerX, centerY)

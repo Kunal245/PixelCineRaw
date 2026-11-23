@@ -35,8 +35,7 @@ data class CinemaState(
         CustomResolution.UHD_4K,
         CustomResolution.DCI_4K,
         CustomResolution.QHD_1440P,
-        CustomResolution.FHD_1080P,
-        CustomResolution.OPEN_GATE_4_3
+        CustomResolution.FHD_1080P
     ),
     val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
     val targetBitrateMbps: Int = 100, // 50 to 200 Mbps
@@ -77,21 +76,53 @@ data class CinemaState(
 )
 
 /**
- * Blackmagic-style customizable resolutions with aspect ratio categorization
+ * Customizable sensor resolution probed from the hardware Camera2 capabilities.
  */
 data class CustomResolution(
     val label: String,
     val width: Int,
     val height: Int,
-    val aspectLabel: String
+    val aspectLabel: String,
+    val aspectRatio: Float
 ) {
     companion object {
-        val UHD_4K = CustomResolution("4K UHD (3840×2160)", 3840, 2160, "16:9")
-        val DCI_4K = CustomResolution("4K DCI (4096×2160)", 4096, 2160, "1.90:1")
-        val QHD_1440P = CustomResolution("2.5K QHD (2560×1440)", 2560, 1440, "16:9")
-        val FHD_1080P = CustomResolution("1080p FHD (1920×1080)", 1920, 1080, "16:9")
-        val HD_720P = CustomResolution("720p HD (1280×720)", 1280, 720, "16:9")
-        val OPEN_GATE_4_3 = CustomResolution("4:3 Open Gate (3840×2880)", 3840, 2880, "4:3")
+        fun fromSize(width: Int, height: Int): CustomResolution {
+            val ratio = width.toFloat() / height.toFloat()
+            val aspectLabel = when {
+                Math.abs(ratio - (16f / 9f)) < 0.05f -> "16:9"
+                Math.abs(ratio - (4f / 3f)) < 0.05f -> "4:3"
+                Math.abs(ratio - (1.90f)) < 0.05f || Math.abs(ratio - (256f / 135f)) < 0.05f -> "1.90:1 (DCI)"
+                Math.abs(ratio - (2.39f)) < 0.08f -> "2.39:1 (Scope)"
+                Math.abs(ratio - 1.0f) < 0.05f -> "1:1 (Square)"
+                Math.abs(ratio - (3f / 2f)) < 0.05f -> "3:2"
+                Math.abs(ratio - (20f / 9f)) < 0.08f -> "20:9 (Full)"
+                else -> String.format(java.util.Locale.US, "%.2f:1", ratio)
+            }
+
+            val friendlyName = when {
+                width == 3840 && height == 2160 -> "4K UHD"
+                width == 4096 && height == 2160 -> "4K DCI"
+                width == 2560 && height == 1440 -> "2.5K QHD"
+                width == 1920 && height == 1080 -> "1080p FHD"
+                width == 1280 && height == 720 -> "720p HD"
+                width >= 3000 && Math.abs(ratio - (4f / 3f)) < 0.05f -> "4:3 Open Gate"
+                else -> "${width}×${height}"
+            }
+
+            return CustomResolution(
+                label = "$friendlyName ($aspectLabel)",
+                width = width,
+                height = height,
+                aspectLabel = aspectLabel,
+                aspectRatio = ratio
+            )
+        }
+
+        val UHD_4K = fromSize(3840, 2160)
+        val DCI_4K = fromSize(4096, 2160)
+        val QHD_1440P = fromSize(2560, 1440)
+        val FHD_1080P = fromSize(1920, 1080)
+        val HD_720P = fromSize(1280, 720)
     }
 }
 

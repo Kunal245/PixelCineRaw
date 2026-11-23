@@ -353,10 +353,37 @@ fun CinemaSettingsDialog(
                     }
                 }
 
-                // 3. Sensor Video Resolution (Blackmagic Custom List)
-                Text("RESOLUTION & ASPECT RATIO", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                // 3. Sensor Video Resolution & Aspect Ratio (Grouped by Aspect Ratio)
+                Text("RESOLUTION & ASPECT RATIO (${state.supportedResolutions.size} AVAILABLE)", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+
+                var selectedAspectFilter by remember { mutableStateOf<String?>("ALL") }
+                val availableAspects = remember(state.supportedResolutions) {
+                    listOf("ALL") + state.supportedResolutions.map { it.aspectLabel }.distinct()
+                }
+
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    availableAspects.forEach { aspect ->
+                        FilterChip(
+                            selected = selectedAspectFilter == aspect,
+                            onClick = { selectedAspectFilter = aspect },
+                            label = { Text(aspect, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                        )
+                    }
+                }
+
+                val filteredResolutions = remember(selectedAspectFilter, state.supportedResolutions) {
+                    if (selectedAspectFilter == "ALL" || selectedAspectFilter == null) {
+                        state.supportedResolutions
+                    } else {
+                        state.supportedResolutions.filter { it.aspectLabel == selectedAspectFilter }
+                    }
+                }
+
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    state.supportedResolutions.forEach { res ->
+                    filteredResolutions.forEach { res ->
                         val isSelected = state.videoResolution.width == res.width && state.videoResolution.height == res.height
                         Surface(
                             onClick = { onSelectResolution(res) },
@@ -383,7 +410,7 @@ fun CinemaSettingsDialog(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "${res.width} × ${res.height} • ${res.aspectLabel}",
+                                        text = "${res.width} × ${res.height} • Aspect Ratio: ${res.aspectLabel}",
                                         color = Color(0x88FFFFFF),
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace
