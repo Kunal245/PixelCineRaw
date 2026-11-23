@@ -73,6 +73,10 @@ class Camera2Controller(
     private var lastIso: Int? = null
     private var lastColorGains: RggbChannelVector? = null
 
+    // HLG Fallback & Stalled HAL Watchdog
+    private var hardwareHlgFallback = false
+    private var hlgWatchdogRunnable: Runnable? = null
+
     // State flow
     private val _state = MutableStateFlow(CinemaState())
     val state: StateFlow<CinemaState> = _state.asStateFlow()
@@ -343,6 +347,31 @@ class Camera2Controller(
      * 2. Video recording Surface (when active)
      * 3. RAW ImageReader Surface (when in RAW mode)
      */
+    private fun armHlgWatchdog() {
+        disarmHlgWatchdog()
+        hlgWatchdogRunnable = Runnable {
+            if (_state.value.colorProfile == ColorProfile.HLG_10BIT && !hardwareHlgFallback) {
+                Log.w(TAG, "No HLG10 frame arrived within 500ms! Stalled HAL detected. Falling back to STANDARD preview + 64-point BT.2100 HLG TonemapCurve")
+                hardwareHlgFallback = true
+                startCaptureSession()
+            }
+        }
+        cameraHandler?.postDelayed(hlgWatchdogRunnable!!, 500L)
+    }
+
+    private fun disarmHlgWatchdog() {
+        hlgWatchdogRunnable?.let {
+            cameraHandler?.removeCallbacks(it)
+            hlgWatchdogRunnable = null
+        }
+    }
+
+    /**
+     * Creates a deterministic Camera2 CaptureSession supporting:
+     * 1. Viewfinder preview Surface (10-bit HLG or SDR)
+     * 2. Video recording Surface (when active)
+     * 3. Automatic onConfigureFailed / 500ms timeout fallback to 64-point BT.2100 HLG curve
+     */
     fun startCaptureSession(onConfigured: () -> Unit = {}) {
         val device = cameraDevice ?: return
         val surface = previewSurface ?: return
@@ -350,9 +379,31 @@ class Camera2Controller(
         val spec = _state.value.currentSensorSpec ?: return
 
         try {
+            // Properly close existing capture session before reconfiguring
+            try {
+                captureSession?.stopRepeating()
+                captureSession?.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing previous capture session", e)
+            } finally {
+                captureSession = null
+            }
+
             val outputConfigs = mutableListOf<OutputConfiguration>()
             val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
-            val useHardwareHlg = isHlg && spec.isHlg10Supported
+            val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
+
+            // Inspect HLG10 constraints on Tensor G4 HAL
+            if (useHardwareHlg) {
+                try {
+                    val chars = cameraManager.getCameraCharacteristics(spec.cameraId)
+                    val dynamicProfiles = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
+                    val constraints = dynamicProfiles?.getProfileCaptureRequestConstraints(DynamicRangeProfiles.HLG10) ?: emptySet()
+                    Log.d(TAG, "HLG10 capture request constraints: $constraints")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error querying HLG10 constraints", e)
+                }
+            }
 
             val previewConfig = OutputConfiguration(surface).apply {
                 if (useHardwareHlg) {
@@ -373,8 +424,8 @@ class Camera2Controller(
                 }
             }
 
-            // If RAW mode is selected, configure RAW_SENSOR ImageReader
-            if (_state.value.recordingFormat == RecordingFormat.RAW_DNG && spec.isRawCapable) {
+            // In HLG mode, do not attach incompatible RAW or 8-bit secondary stream
+            if (!isHlg && _state.value.recordingFormat == RecordingFormat.RAW_DNG && spec.isRawCapable) {
                 val rawSize = spec.pixelArraySize
                 rawImageReader = ImageReader.newInstance(
                     rawSize.width,
@@ -408,6 +459,13 @@ class Camera2Controller(
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         Log.e(TAG, "CaptureSession configuration failed")
+                        if (useHardwareHlg && !hardwareHlgFallback) {
+                            Log.w(TAG, "Hardware HLG10 session configuration failed! Falling back to STANDARD preview + 64-point BT.2100 HLG TonemapCurve")
+                            hardwareHlgFallback = true
+                            cameraHandler?.post {
+                                startCaptureSession()
+                            }
+                        }
                     }
                 }
             )
@@ -415,6 +473,10 @@ class Camera2Controller(
             device.createCaptureSession(sessionConfig)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start capture session", e)
+            if (_state.value.colorProfile == ColorProfile.HLG_10BIT && !hardwareHlgFallback) {
+                hardwareHlgFallback = true
+                cameraHandler?.post { startCaptureSession() }
+            }
         }
     }
 
@@ -480,6 +542,14 @@ class Camera2Controller(
 
             previewRequestBuilder = builder
 
+            val isHlg = stateVal.colorProfile == ColorProfile.HLG_10BIT
+            val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
+            if (useHardwareHlg) {
+                armHlgWatchdog()
+            } else {
+                disarmHlgWatchdog()
+            }
+
             session.setRepeatingRequest(builder.build(), captureCallback, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set repeating request", e)
@@ -495,8 +565,10 @@ class Camera2Controller(
         spec: CameraSensorSpec,
         state: CinemaState
     ) {
-        // 1. Target FPS Range
-        val fpsRange = Range(state.targetFps, state.targetFps)
+        // 1. Target FPS Range (Clamp to 30fps for 4K HLG if 60fps causes HAL rejection)
+        val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
+        val safeFps = if (isHlg && state.targetFps > 30 && state.videoResolution.width >= 3840) 30 else state.targetFps
+        val fpsRange = Range(safeFps, safeFps)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
         // 2. Exposure & Sensitivity (Shutter & ISO)
@@ -611,8 +683,8 @@ class Camera2Controller(
 
         // 7. Tone Curves: HLG BT.2100 Fallback vs Flat Log vs SDR
         if (state.colorProfile == ColorProfile.HLG_10BIT) {
-            if (!spec.isHlg10Supported) {
-                // Smart Fallback: Apply mathematically accurate ITU-R BT.2100 HLG OETF curve
+            if (!spec.isHlg10Supported || hardwareHlgFallback) {
+                // Smart Fallback: Apply mathematically accurate 64-point ITU-R BT.2100 HLG OETF curve
                 applyHlgToneCurve(builder)
             } else {
                 builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
@@ -625,11 +697,11 @@ class Camera2Controller(
     }
 
     /**
-     * Applies a mathematically accurate ITU-R BT.2100 HLG OETF contrast curve to the Camera2 pipeline.
+     * Applies a mathematically accurate 64-point ITU-R BT.2100 HLG OETF contrast curve to the Camera2 pipeline.
      */
     private fun applyHlgToneCurve(builder: CaptureRequest.Builder) {
         try {
-            val points = 32
+            val points = 64
             val curve = FloatArray(points * 2)
             for (i in 0 until points) {
                 val inVal = i.toFloat() / (points - 1)
@@ -677,6 +749,8 @@ class Camera2Controller(
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            disarmHlgWatchdog()
+
             lastCaptureResult = result
             lastExposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
             lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY)
@@ -732,6 +806,7 @@ class Camera2Controller(
      * User Action: Switch Lens (0.5x Ultrawide, 1x Main Wide, 2x Lossless Center Crop)
      */
     fun selectLens(lens: LensSelection) {
+        hardwareHlgFallback = false
         val currentSpec = _state.value.currentSensorSpec
 
         // If current camera is a logical multi-camera covering 0.5x..8.0x, keep same camera device!
@@ -1038,6 +1113,7 @@ class Camera2Controller(
      */
     fun setColorProfile(profile: ColorProfile) {
         val prevProfile = _state.value.colorProfile
+        hardwareHlgFallback = false
         _state.update { it.copy(colorProfile = profile) }
         val isPrevHlg = prevProfile == ColorProfile.HLG_10BIT
         val isNewHlg = profile == ColorProfile.HLG_10BIT

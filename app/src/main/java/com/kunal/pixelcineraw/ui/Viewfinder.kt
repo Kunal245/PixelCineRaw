@@ -137,6 +137,8 @@ fun Viewfinder(
 
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
+                            surfaceViewRef = this@apply
+                            applyCurrentDataSpace()
                             val surface = holder.surface
                             if (surface.isValid) {
                                 viewModel.attachPreviewSurface(surface)
@@ -146,20 +148,22 @@ fun Viewfinder(
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                             val pSize = viewModel.cameraController.optimalPreviewSize
                             setAspectRatio(pSize.width, pSize.height)
+                            applyCurrentDataSpace()
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
                             viewModel.detachPreviewSurface()
-                            surfaceViewRef = null
                         }
                     })
                 }
             },
             update = { view ->
+                surfaceViewRef = view
                 val currentSize = viewModel.cameraController.optimalPreviewSize
                 view.holder.setFixedSize(currentSize.width, currentSize.height)
                 view.setAspectRatio(currentSize.width, currentSize.height)
                 view.setHdrMode(state.colorProfile == ColorProfile.HLG_10BIT)
+                view.applyCurrentDataSpace()
             }
         )
 
