@@ -22,6 +22,7 @@ data class CameraSensorSpec(
     val isManualSensorCapable: Boolean,
     val isRawCapable: Boolean,
     val is10BitDynamicRangeSupported: Boolean,
+    val isHlg10Supported: Boolean = false,
     val supportsOis: Boolean,
     val supportsEis: Boolean,
     val physicalCameraIds: Set<String>,
@@ -59,9 +60,9 @@ enum class ShutterUnit {
 }
 
 enum class ColorProfile(val label: String, val description: String) {
-    REC709("Rec.709", "Standard Dynamic Range (SDR)"),
-    FLAT_LOG("Pixel-Log", "Flat Log-like Contrast Curve for Grading"),
-    HLG_10BIT("HLG 10-Bit", "Hybrid Log-Gamma 10-bit HDR (BT.2020)")
+    REC709("REC.709", "Standard Dynamic Range (8-bit SDR)"),
+    FLAT_LOG("PIXEL-LOG", "Flat Log Contrast Curve for Grading"),
+    HLG_10BIT("HLG10 HDR", "Hybrid Log-Gamma 10-bit HDR (BT.2020)")
 }
 
 enum class VideoCodec(val label: String, val mimeType: String, val is10Bit: Boolean) {

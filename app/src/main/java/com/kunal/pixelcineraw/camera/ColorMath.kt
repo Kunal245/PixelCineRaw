@@ -101,4 +101,23 @@ object ColorMath {
         val frameDurationNs = 1_000_000_000L / safeFps
         return ((nanos.toFloat() / frameDurationNs.toFloat()) * 360f).coerceIn(1f, 360f)
     }
+
+    /**
+     * ITU-R BT.2100 / ARIB STD-B67 Hybrid Log-Gamma (HLG) Opto-Electronic Transfer Function (OETF).
+     * Maps normalized scene luminance E in [0, 1] to non-linear signal value:
+     * - E <= 1/12: sqrt(3 * E)
+     * - E > 1/12: a * ln(12 * E - b) + c
+     * where a = 0.17883277, b = 1 - 4a = 0.28466892, c = 0.5 - a * ln(4a) = 0.55991073.
+     */
+    fun hlgOetf(linear: Float): Float {
+        val e = linear.coerceIn(0.0f, 1.0f)
+        val a = 0.17883277f
+        val b = 0.28466892f
+        val c = 0.55991073f
+        return if (e <= 1.0f / 12.0f) {
+            kotlin.math.sqrt(3.0f * e)
+        } else {
+            a * kotlin.math.ln(12.0f * e - b) + c
+        }.coerceIn(0.0f, 1.0f)
+    }
 }

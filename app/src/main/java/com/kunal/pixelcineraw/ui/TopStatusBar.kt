@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
 import com.kunal.pixelcineraw.camera.ColorMath
+import com.kunal.pixelcineraw.camera.ColorProfile
 import com.kunal.pixelcineraw.camera.RecordingFormat
 import com.kunal.pixelcineraw.camera.ShutterUnit
 import com.kunal.pixelcineraw.camera.ThermalStatus
@@ -39,6 +40,7 @@ fun TopStatusBar(
     onWbClick: () -> Unit,
     onFpsClick: () -> Unit,
     onColorProfileClick: () -> Unit,
+    onFormatClick: () -> Unit = onColorProfileClick,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -93,10 +95,16 @@ fun TopStatusBar(
                 onClick = onWbClick
             )
 
-            // Color Profile Pill
+            // Color Profile Pill (Selector: REC.709 8-bit, PIXEL-LOG, and HLG10 HDR 10-bit)
+            val profileSubText = when (state.colorProfile) {
+                ColorProfile.REC709 -> "8-bit"
+                ColorProfile.FLAT_LOG -> "Log"
+                ColorProfile.HLG_10BIT -> "10-bit"
+            }
             CinemaStatusPill(
                 label = "PROFILE",
                 value = state.colorProfile.label,
+                subText = profileSubText,
                 highlight = true,
                 onClick = onColorProfileClick
             )
@@ -107,7 +115,7 @@ fun TopStatusBar(
                 value = state.videoResolution.aspectLabel,
                 subText = "${state.videoResolution.width}p",
                 highlight = true,
-                onClick = onColorProfileClick
+                onClick = onFormatClick
             )
         }
 

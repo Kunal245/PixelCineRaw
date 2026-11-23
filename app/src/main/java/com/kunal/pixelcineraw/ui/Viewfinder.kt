@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.CinemaViewModel
+import com.kunal.pixelcineraw.camera.ColorProfile
 import com.kunal.pixelcineraw.camera.HistogramData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -76,6 +77,12 @@ fun Viewfinder(
             sv.holder.setFixedSize(previewSize.width, previewSize.height)
             sv.setAspectRatio(previewSize.width, previewSize.height)
         }
+    }
+
+    // Configure 10-bit HDR or 8-bit SDR surface mode on AutoFitSurfaceView
+    LaunchedEffect(state.colorProfile) {
+        val isHdr = state.colorProfile == ColorProfile.HLG_10BIT
+        surfaceViewRef?.setHdrMode(isHdr)
     }
 
     var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
@@ -126,6 +133,7 @@ fun Viewfinder(
                     val initialSize = viewModel.cameraController.optimalPreviewSize
                     setAspectRatio(initialSize.width, initialSize.height)
                     holder.setFixedSize(initialSize.width, initialSize.height)
+                    setHdrMode(state.colorProfile == ColorProfile.HLG_10BIT)
 
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
@@ -151,6 +159,7 @@ fun Viewfinder(
                 val currentSize = viewModel.cameraController.optimalPreviewSize
                 view.holder.setFixedSize(currentSize.width, currentSize.height)
                 view.setAspectRatio(currentSize.width, currentSize.height)
+                view.setHdrMode(state.colorProfile == ColorProfile.HLG_10BIT)
             }
         )
 

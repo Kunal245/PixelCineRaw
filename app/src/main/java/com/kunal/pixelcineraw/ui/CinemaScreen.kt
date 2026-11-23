@@ -117,6 +117,14 @@ fun CinemaScreen(
                 activeDial = if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE
             },
             onColorProfileClick = {
+                val nextProfile = when (state.colorProfile) {
+                    ColorProfile.REC709 -> ColorProfile.FLAT_LOG
+                    ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
+                    ColorProfile.HLG_10BIT -> ColorProfile.REC709
+                }
+                viewModel.cameraController.setColorProfile(nextProfile)
+            },
+            onFormatClick = {
                 showSettingsDialog = true
             },
             modifier = Modifier.align(Alignment.TopCenter)

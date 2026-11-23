@@ -7,6 +7,7 @@ import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
+import android.hardware.camera2.params.DynamicRangeProfiles
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
@@ -151,6 +152,7 @@ class Camera2Controller(
                 // Check for 10-bit dynamic range profile (Android 13+)
                 val dynamicRangeProfiles = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
                 val supports10Bit = dynamicRangeProfiles != null
+                val supportsHlg10 = dynamicRangeProfiles?.supportedProfiles?.contains(DynamicRangeProfiles.HLG10) == true
 
                 // Detect ultrawide vs main wide by focal length (Pixel 9a ultrawide is ~2.2mm, main is ~6.8mm)
                 val minFocal = focalLengths.minOrNull() ?: 5.0f
@@ -176,6 +178,7 @@ class Camera2Controller(
                     isManualSensorCapable = isManual,
                     isRawCapable = isRaw,
                     is10BitDynamicRangeSupported = supports10Bit,
+                    isHlg10Supported = supportsHlg10,
                     supportsOis = supportsOis,
                     supportsEis = supportsEis,
                     physicalCameraIds = physicalIds,
@@ -348,12 +351,25 @@ class Camera2Controller(
 
         try {
             val outputConfigs = mutableListOf<OutputConfiguration>()
-            outputConfigs.add(OutputConfiguration(surface))
+            val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
+            val useHardwareHlg = isHlg && spec.isHlg10Supported
+
+            val previewConfig = OutputConfiguration(surface).apply {
+                if (useHardwareHlg) {
+                    setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
+                }
+            }
+            outputConfigs.add(previewConfig)
 
             // If video recording surface is attached, add it
             videoRecordingSurface?.let { recSurface ->
                 if (recSurface.isValid) {
-                    outputConfigs.add(OutputConfiguration(recSurface))
+                    val recConfig = OutputConfiguration(recSurface).apply {
+                        if (useHardwareHlg) {
+                            setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
+                        }
+                    }
+                    outputConfigs.add(recConfig)
                 }
             }
 
@@ -593,11 +609,39 @@ class Camera2Controller(
             builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
         }
 
-        // 7. Cinema Flat Log Tone Curve
-        if (state.colorProfile == ColorProfile.FLAT_LOG) {
+        // 7. Tone Curves: HLG BT.2100 Fallback vs Flat Log vs SDR
+        if (state.colorProfile == ColorProfile.HLG_10BIT) {
+            if (!spec.isHlg10Supported) {
+                // Smart Fallback: Apply mathematically accurate ITU-R BT.2100 HLG OETF curve
+                applyHlgToneCurve(builder)
+            } else {
+                builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
+            }
+        } else if (state.colorProfile == ColorProfile.FLAT_LOG) {
             applyLogToneCurve(builder)
         } else {
             builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
+        }
+    }
+
+    /**
+     * Applies a mathematically accurate ITU-R BT.2100 HLG OETF contrast curve to the Camera2 pipeline.
+     */
+    private fun applyHlgToneCurve(builder: CaptureRequest.Builder) {
+        try {
+            val points = 32
+            val curve = FloatArray(points * 2)
+            for (i in 0 until points) {
+                val inVal = i.toFloat() / (points - 1)
+                val outVal = ColorMath.hlgOetf(inVal)
+                curve[i * 2] = inVal
+                curve[i * 2 + 1] = outVal
+            }
+            val tonemapCurve = TonemapCurve(curve, curve, curve)
+            builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE)
+            builder.set(CaptureRequest.TONEMAP_CURVE, tonemapCurve)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to apply HLG tone curve", e)
         }
     }
 
@@ -990,11 +1034,19 @@ class Camera2Controller(
     }
 
     /**
-     * User Action: Color Profile (Log, HLG, Rec709)
+     * User Action: Color Profile (Rec.709 8-bit, Pixel-Log, HLG10 HDR 10-bit)
      */
     fun setColorProfile(profile: ColorProfile) {
+        val prevProfile = _state.value.colorProfile
         _state.update { it.copy(colorProfile = profile) }
-        createAndSetRepeatingRequest()
+        val isPrevHlg = prevProfile == ColorProfile.HLG_10BIT
+        val isNewHlg = profile == ColorProfile.HLG_10BIT
+        if (isPrevHlg != isNewHlg) {
+            // Reconfigure CameraCaptureSession to attach or detach DynamicRangeProfiles.HLG10
+            startCaptureSession()
+        } else {
+            createAndSetRepeatingRequest()
+        }
     }
 
     /**

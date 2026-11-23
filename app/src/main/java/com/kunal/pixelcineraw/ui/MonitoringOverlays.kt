@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -23,6 +24,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
+import com.kunal.pixelcineraw.camera.ColorProfile
 import com.kunal.pixelcineraw.camera.FrameGuide
 import com.kunal.pixelcineraw.camera.HistogramData
 import kotlin.math.roundToInt
@@ -48,9 +50,11 @@ fun MonitoringOverlays(
             GridOverlay()
         }
 
-        // 3. Exposure Zebras (Diagonal striped shader simulation for IRE >= threshold)
+        // 3. Exposure Zebras (Diagonal striped shader simulation for IRE >= threshold, 75% diffuse white in HLG)
         if (state.showZebras) {
-            ZebraOverlay(ireThreshold = state.zebraIreThreshold)
+            val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
+            val threshold = if (isHlg) 75 else state.zebraIreThreshold
+            ZebraOverlay(ireThreshold = threshold, isHlg = isHlg)
         }
 
         // 4. Focus Peaking Overlay
@@ -65,6 +69,7 @@ fun MonitoringOverlays(
         if (state.showHistogram) {
             MovableHistogramHUD(
                 data = state.histogramData,
+                isHlg = state.colorProfile == ColorProfile.HLG_10BIT,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(top = 52.dp, end = 16.dp)
@@ -88,6 +93,34 @@ fun MonitoringOverlays(
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
+            }
+        }
+
+        // 7. True 10-Bit HLG HDR Active Indicator Badge
+        if (state.colorProfile == ColorProfile.HLG_10BIT) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = if (state.showLutPreview) 80.dp else 52.dp, start = 16.dp)
+                    .background(Color(0xD9101216), RoundedCornerShape(4.dp))
+                    .border(0.8.dp, Color(0xFFFFD700), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 7.dp, vertical = 2.5.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .background(Color(0xFFFFD700), CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "HDR · HLG10",
+                        color = Color(0xFFFFD700),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
         }
     }
@@ -159,7 +192,10 @@ fun GridOverlay() {
 }
 
 @Composable
-fun ZebraOverlay(ireThreshold: Int) {
+fun ZebraOverlay(
+    ireThreshold: Int,
+    isHlg: Boolean = false
+) {
     val infiniteTransition = rememberInfiniteTransition(label = "ZebraAnimation")
     val phase by infiniteTransition.animateFloat(
         initialValue = 0f,
@@ -173,7 +209,8 @@ fun ZebraOverlay(ireThreshold: Int) {
 
     Canvas(modifier = Modifier.fillMaxSize()) {
         val step = 20.dp.toPx()
-        val zebraColor = Color(0x77FFFFFF)
+        // In HLG mode: 75% IRE indicates diffuse white (203 nits reference); 100% IRE tracks specular headroom (1000 nits)
+        val zebraColor = if (isHlg) Color(0x99FFD700) else Color(0x77FFFFFF)
         val w = size.width
         val h = size.height
 
@@ -212,6 +249,7 @@ fun FocusPeakingOverlay(color: Color, sensitivity: Float) {
 @Composable
 fun MovableHistogramHUD(
     data: HistogramData,
+    isHlg: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var dragOffsetX by remember { mutableFloatStateOf(0f) }
@@ -220,9 +258,9 @@ fun MovableHistogramHUD(
     Box(
         modifier = modifier
             .offset { IntOffset(dragOffsetX.roundToInt(), dragOffsetY.roundToInt()) }
-            .size(width = 118.dp, height = 56.dp)
+            .size(width = 124.dp, height = 58.dp)
             .background(Color(0xA6111317), RoundedCornerShape(6.dp))
-            .border(0.7.dp, Color(0x44FFFFFF), RoundedCornerShape(6.dp))
+            .border(0.7.dp, if (isHlg) Color(0x88FFD700) else Color(0x44FFFFFF), RoundedCornerShape(6.dp))
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
@@ -266,6 +304,17 @@ fun MovableHistogramHUD(
                 drawPath(greenPath, Color(0x9933FF33), style = Stroke(width = 1.2.dp.toPx()))
                 drawPath(bluePath, Color(0x993399FF), style = Stroke(width = 1.2.dp.toPx()))
                 drawPath(lumaPath, Color(0xEEFFFFFF), style = Stroke(width = 1.0.dp.toPx()))
+
+                // HLG diffuse white (75% IRE / 203 nits) and specular headroom (100% IRE / 1000 nits) reference line
+                if (isHlg) {
+                    val x75 = w * 0.75f
+                    drawLine(
+                        color = Color(0x99FFD700),
+                        start = Offset(x75, 10f),
+                        end = Offset(x75, h),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                }
             }
         }
 
@@ -276,12 +325,12 @@ fun MovableHistogramHUD(
             Box(
                 modifier = Modifier
                     .size(4.dp)
-                    .background(Color(0xFF00FF66), RoundedCornerShape(1.dp))
+                    .background(if (isHlg) Color(0xFFFFD700) else Color(0xFF00FF66), RoundedCornerShape(1.dp))
             )
             Spacer(modifier = Modifier.width(3.dp))
             Text(
-                text = "RGB/LUMA LIVE",
-                color = Color(0x99FFFFFF),
+                text = if (isHlg) "HLG10 (75% W)" else "RGB/LUMA LIVE",
+                color = if (isHlg) Color(0xFFFFD700) else Color(0x99FFFFFF),
                 fontSize = 7.5.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace

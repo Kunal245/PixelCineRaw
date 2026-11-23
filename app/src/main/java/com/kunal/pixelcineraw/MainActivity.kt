@@ -1,6 +1,7 @@
 package com.kunal.pixelcineraw
 
 import android.Manifest
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowInsets
@@ -25,7 +26,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.CinemaViewModel
+import com.kunal.pixelcineraw.camera.ColorProfile
 import com.kunal.pixelcineraw.ui.CinemaScreen
 import com.kunal.pixelcineraw.ui.theme.PixelCineRawTheme
 
@@ -44,6 +47,18 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             PixelCineRawTheme {
+                val state by cinemaViewModel.state.collectAsStateWithLifecycle()
+
+                // True HDR Display Mode: Boost Pixel 9a OLED peak brightness when HLG mode is active
+                LaunchedEffect(state.colorProfile) {
+                    val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
+                    window.colorMode = if (isHlg) {
+                        ActivityInfo.COLOR_MODE_HDR
+                    } else {
+                        ActivityInfo.COLOR_MODE_DEFAULT
+                    }
+                }
+
                 val permissions = remember {
                     arrayOf(
                         Manifest.permission.CAMERA,

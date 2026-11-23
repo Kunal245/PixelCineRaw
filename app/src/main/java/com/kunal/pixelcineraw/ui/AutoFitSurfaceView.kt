@@ -48,4 +48,15 @@ class AutoFitSurfaceView @JvmOverloads constructor(
             }
         }
     }
+
+    /**
+     * Configures the SurfaceHolder format for 10-bit HDR (RGBA_1010102) or standard 8-bit SDR.
+     */
+    fun setHdrMode(isHdr: Boolean) {
+        if (isHdr) {
+            holder.setFormat(android.graphics.PixelFormat.RGBA_1010102)
+        } else {
+            holder.setFormat(android.graphics.PixelFormat.RGBA_8888)
+        }
+    }
 }
