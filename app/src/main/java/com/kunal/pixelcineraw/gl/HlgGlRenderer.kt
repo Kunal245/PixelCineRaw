@@ -472,12 +472,12 @@ void main() {
             try {
                 destroyEncoderSurface()
                 if (surface != null && surface.isValid && isReady) {
-                    encoderWidth = width
-                    encoderHeight = height
+                    encoderWidth = maxOf(width, height)
+                    encoderHeight = minOf(width, height)
                     val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         encoderEglSurface = eglSurf
-                        Log.i(TAG, "Encoder EGL surface attached (${width}x$height)")
+                        Log.i(TAG, "Encoder EGL surface attached (${encoderWidth}x${encoderHeight})")
                     }
                 }
             } catch (e: Throwable) {
@@ -558,14 +558,21 @@ void main() {
             checkGlError("drawQuad preview")
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
 
-            // 4. Render to MediaCodec HEVC Encoder if recording (clean sensor landscape matrix)
+            // 4. Render to MediaCodec HEVC Encoder if recording (exact upright matrix matching viewfinder)
             if (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE) {
                 if (EGL14.eglMakeCurrent(eglDisplay, eSurf, eSurf, eglContext)) {
-                    GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
+                    val encSurfWidth = IntArray(1)
+                    val encSurfHeight = IntArray(1)
+                    EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_WIDTH, encSurfWidth, 0)
+                    EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_HEIGHT, encSurfHeight, 0)
+                    val encW = if (encSurfWidth[0] > 0) encSurfWidth[0] else encoderWidth
+                    val encH = if (encSurfHeight[0] > 0) encSurfHeight[0] else encoderHeight
+
+                    GLES20.glViewport(0, 0, encW, encH)
                     GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                    drawQuad(texMatrix)
+                    drawQuad(pMatrix)
                     checkGlError("drawQuad encoder")
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, timestampNs)
                     EGL14.eglSwapBuffers(eglDisplay, eSurf)

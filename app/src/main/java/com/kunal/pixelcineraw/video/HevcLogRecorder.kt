@@ -94,8 +94,8 @@ class HevcLogRecorder(
         pendingVideoSamples.clear()
         pendingAudioSamples.clear()
 
-        val width = resolution.width
-        val height = resolution.height
+        val width = maxOf(resolution.width, resolution.height)
+        val height = minOf(resolution.width, resolution.height)
         val isHlg = colorProfile == ColorProfile.HLG_10BIT
         isHlgRecording = isHlg
         val targetMime = if (isHlg) MediaFormat.MIMETYPE_VIDEO_HEVC else codec.mimeType
@@ -185,7 +185,9 @@ class HevcLogRecorder(
             ?: throw IllegalStateException("Failed to open file descriptor for $uri")
         fileDescriptor = pfd
 
-        mediaMuxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        mediaMuxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).apply {
+            setOrientationHint(0)
+        }
 
         videoEncoder?.start()
         audioEncoder?.start()
