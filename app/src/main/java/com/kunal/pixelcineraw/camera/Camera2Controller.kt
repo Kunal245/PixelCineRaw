@@ -23,6 +23,7 @@ import android.util.Range
 import android.util.Size
 import android.view.PixelCopy
 import android.view.Surface
+import com.kunal.pixelcineraw.gl.HlgGlRenderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,8 +74,9 @@ class Camera2Controller(
     private var lastIso: Int? = null
     private var lastColorGains: RggbChannelVector? = null
 
-    // HLG Fallback
+    // HLG Fallback & OpenGL ES BT.2020 Render Pipeline
     private var hardwareHlgFallback = false
+    private val hlgGlRenderer = HlgGlRenderer()
 
     // State flow
     private val _state = MutableStateFlow(CinemaState())
@@ -99,6 +101,7 @@ class Camera2Controller(
     }
 
     fun stopBackgroundThread() {
+        hlgGlRenderer.release()
         cameraThread?.quitSafely()
         try {
             cameraThread?.join(1000)
@@ -262,6 +265,9 @@ class Camera2Controller(
      */
     fun attachPreviewSurface(surface: Surface) {
         previewSurface = surface
+        val pSize = optimalPreviewSize
+        val vRes = _state.value.videoResolution
+        hlgGlRenderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
         val currentSpec = _state.value.currentSensorSpec
         if (currentSpec != null) {
             openCamera(currentSpec.cameraId)
@@ -270,6 +276,7 @@ class Camera2Controller(
 
     fun detachPreviewSurface() {
         closeCamera()
+        hlgGlRenderer.setPreviewSurface(null, 0, 0, 0, 0)
         previewSurface = null
     }
 
@@ -398,35 +405,63 @@ class Camera2Controller(
             val outputConfigs = mutableListOf<OutputConfiguration>()
             val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
             val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
+            val useGlPipeline = isHlg && !useHardwareHlg
 
-            // Inspect HLG10 constraints on Tensor G4 HAL
-            if (useHardwareHlg) {
-                try {
-                    val chars = cameraManager.getCameraCharacteristics(spec.cameraId)
-                    val dynamicProfiles = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
-                    val constraints = dynamicProfiles?.getProfileCaptureRequestConstraints(DynamicRangeProfiles.HLG10) ?: emptySet()
-                    Log.d(TAG, "HLG10 capture request constraints: $constraints")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error querying HLG10 constraints", e)
-                }
-            }
-
-            val previewConfig = OutputConfiguration(surface).apply {
-                if (useHardwareHlg) {
-                    setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
-                }
-            }
-            outputConfigs.add(previewConfig)
-
-            // If video recording surface is attached, add it
-            videoRecordingSurface?.let { recSurface ->
-                if (recSurface.isValid) {
-                    val recConfig = OutputConfiguration(recSurface).apply {
-                        if (useHardwareHlg) {
-                            setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
-                        }
+            if (useGlPipeline && !hlgGlRenderer.isReady) {
+                val pSize = optimalPreviewSize
+                hlgGlRenderer.initialize(pSize.width, pSize.height) {
+                    cameraHandler?.post {
+                        startCaptureSession(onConfigured)
                     }
-                    outputConfigs.add(recConfig)
+                }
+                return
+            }
+
+            if (useGlPipeline) {
+                val pSize = optimalPreviewSize
+                val vRes = _state.value.videoResolution
+                hlgGlRenderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
+                if (videoRecordingSurface != null) {
+                    hlgGlRenderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
+                } else {
+                    hlgGlRenderer.setEncoderSurface(null, 0, 0)
+                }
+
+                val glInputSurface = hlgGlRenderer.inputSurface ?: surface
+                outputConfigs.add(OutputConfiguration(glInputSurface))
+            } else {
+                hlgGlRenderer.setPreviewSurface(null, 0, 0, 0, 0)
+                hlgGlRenderer.setEncoderSurface(null, 0, 0)
+
+                // Inspect HLG10 constraints on Tensor G4 HAL
+                if (useHardwareHlg) {
+                    try {
+                        val chars = cameraManager.getCameraCharacteristics(spec.cameraId)
+                        val dynamicProfiles = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
+                        val constraints = dynamicProfiles?.getProfileCaptureRequestConstraints(DynamicRangeProfiles.HLG10) ?: emptySet()
+                        Log.d(TAG, "HLG10 capture request constraints: $constraints")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error querying HLG10 constraints", e)
+                    }
+                }
+
+                val previewConfig = OutputConfiguration(surface).apply {
+                    if (useHardwareHlg) {
+                        setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
+                    }
+                }
+                outputConfigs.add(previewConfig)
+
+                // If video recording surface is attached, add it
+                videoRecordingSurface?.let { recSurface ->
+                    if (recSurface.isValid) {
+                        val recConfig = OutputConfiguration(recSurface).apply {
+                            if (useHardwareHlg) {
+                                setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
+                            }
+                        }
+                        outputConfigs.add(recConfig)
+                    }
                 }
             }
 
@@ -472,7 +507,7 @@ class Camera2Controller(
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         Log.e(TAG, "CaptureSession configuration failed")
                         if (useHardwareHlg && !hardwareHlgFallback) {
-                            Log.w(TAG, "Hardware HLG10 session configuration failed! Falling back to STANDARD preview + 64-point BT.2100 HLG TonemapCurve")
+                            Log.w(TAG, "Hardware HLG10 session configuration failed! Falling back to OpenGL ES BT.2020 HLG pipeline")
                             hardwareHlgFallback = true
                             _state.update { it.copy(hdrPipelineStatus = HdrPipelineStatus.CURVE_HLG10) }
                             cameraHandler?.post {
@@ -505,14 +540,35 @@ class Camera2Controller(
                 droppedFramesCount = 0
             )
         }
-        startCaptureSession(onConfigured = onStarted)
+        val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
+        val useHardwareHlg = isHlg && (_state.value.currentSensorSpec?.isHlg10Supported == true) && !hardwareHlgFallback
+        val useGlPipeline = isHlg && !useHardwareHlg
+
+        if (useGlPipeline) {
+            val vRes = _state.value.videoResolution
+            hlgGlRenderer.setEncoderSurface(surface, vRes.width, vRes.height)
+            onStarted()
+        } else {
+            startCaptureSession(onConfigured = onStarted)
+        }
     }
 
     fun stopRecordingSession(onStopped: () -> Unit = {}) {
-        videoRecordingSurface = null
-        _state.update { it.copy(isRecording = false) }
-        createAndSetRepeatingRequest()
-        startCaptureSession(onConfigured = onStopped)
+        val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
+        val useHardwareHlg = isHlg && (_state.value.currentSensorSpec?.isHlg10Supported == true) && !hardwareHlgFallback
+        val useGlPipeline = isHlg && !useHardwareHlg
+
+        if (useGlPipeline) {
+            hlgGlRenderer.setEncoderSurface(null, 0, 0)
+            videoRecordingSurface = null
+            _state.update { it.copy(isRecording = false) }
+            onStopped()
+        } else {
+            videoRecordingSurface = null
+            _state.update { it.copy(isRecording = false) }
+            createAndSetRepeatingRequest()
+            startCaptureSession(onConfigured = onStopped)
+        }
     }
 
     /**
@@ -533,13 +589,25 @@ class Camera2Controller(
                 CameraDevice.TEMPLATE_PREVIEW
             }
 
-            val builder = device.createCaptureRequest(template).apply {
-                addTarget(pSurface)
+            val isHlg = stateVal.colorProfile == ColorProfile.HLG_10BIT
+            val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
+            val useGlPipeline = isHlg && !useHardwareHlg
 
-                // Add recording surface if recording
-                videoRecordingSurface?.let { recSurface ->
-                    if (recSurface.isValid) {
-                        addTarget(recSurface)
+            val streamSurface = if (useGlPipeline) {
+                hlgGlRenderer.inputSurface ?: pSurface
+            } else {
+                pSurface
+            }
+
+            val builder = device.createCaptureRequest(template).apply {
+                addTarget(streamSurface)
+
+                // Add recording surface directly to Camera2 only when NOT using GL pipeline
+                if (!useGlPipeline) {
+                    videoRecordingSurface?.let { recSurface ->
+                        if (recSurface.isValid) {
+                            addTarget(recSurface)
+                        }
                     }
                 }
 
@@ -688,12 +756,16 @@ class Camera2Controller(
         }
 
         // 7. Tone Curves: HLG BT.2100 Fallback vs Flat Log vs SDR
-        if (state.colorProfile == ColorProfile.HLG_10BIT) {
-            if (!spec.isHlg10Supported || hardwareHlgFallback) {
-                // Smart Fallback: Apply mathematically accurate 64-point ITU-R BT.2100 HLG OETF curve
-                applyHlgToneCurve(builder)
-            } else {
+        val isHlgProfile = state.colorProfile == ColorProfile.HLG_10BIT
+        val useHardwareHlg = isHlgProfile && spec.isHlg10Supported && !hardwareHlgFallback
+
+        if (isHlgProfile) {
+            if (useHardwareHlg) {
                 builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
+            } else {
+                // Apply flat logarithmic tone curve so highlights aren't clipped by sensor ISP
+                // before reaching the HlgGlRenderer shader!
+                applyLogToneCurve(builder)
             }
         } else if (state.colorProfile == ColorProfile.FLAT_LOG) {
             applyLogToneCurve(builder)
