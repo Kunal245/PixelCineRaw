@@ -18,6 +18,8 @@ import java.nio.FloatBuffer
  * converts color primaries from Rec.709 to Rec.2020 via a 3x3 color matrix, applies the
  * ITU-R BT.2100 HLG OETF transfer curve, and drives both the OLED viewfinder (via EGL_GL_COLORSPACE_BT2020_HLG_EXT)
  * and the HEVCProfileMain10 video encoder.
+ *
+ * Thread-safe and lazily initialized only when HLG10 mode is requested.
  */
 class HlgGlRenderer {
 
@@ -27,7 +29,6 @@ class HlgGlRenderer {
         // EGL Colorspace extensions (EGL_EXT_gl_colorspace_bt2020_hlg)
         private const val EGL_GL_COLORSPACE_KHR = 0x309D
         private const val EGL_GL_COLORSPACE_BT2020_HLG_EXT = 0x3540
-        private const val EGL_GL_COLORSPACE_BT2020_PQ_EXT = 0x3541
 
         // Full-screen Quad geometry
         private val VERTICES = floatArrayOf(
@@ -113,6 +114,7 @@ void main() {
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
+    private var supportsHlgColorSpace = false
 
     // Window Surfaces
     private var previewEglSurface: EGLSurface? = null
@@ -143,6 +145,7 @@ void main() {
     private var encoderWidth = 3840
     private var encoderHeight = 2160
 
+    @Volatile
     var isReady: Boolean = false
         private set
 
@@ -162,11 +165,9 @@ void main() {
                 put(TEX_COORDS)
                 position(0)
             }
-
-        startGlThread()
     }
 
-    private fun startGlThread() {
+    private fun ensureGlThreadStarted() {
         if (glThread == null) {
             glThread = HandlerThread("PixelCineHlgGl").apply {
                 start()
@@ -176,23 +177,29 @@ void main() {
     }
 
     /**
-     * Initializes EGL context with 10-bit config and creates the Camera2 OES input surface.
+     * Lazily initializes EGL context with 10-bit config and creates the Camera2 OES input surface.
      */
     fun initialize(width: Int, height: Int, onReady: () -> Unit = {}) {
         previewWidth = width
         previewHeight = height
+        ensureGlThreadStarted()
         val handler = glHandler ?: return
 
         handler.post {
             try {
+                if (isReady && eglContext != EGL14.EGL_NO_CONTEXT) {
+                    onReady()
+                    return@post
+                }
                 initEGL()
                 initShaders()
                 initOesTexture(width, height)
                 isReady = true
-                Log.i(TAG, "HlgGlRenderer initialized successfully (${width}x$height)")
+                Log.i(TAG, "HlgGlRenderer initialized successfully (${width}x$height, HLG EGL extension=$supportsHlgColorSpace)")
                 onReady()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize HlgGlRenderer", e)
+                isReady = false
             }
         }
     }
@@ -208,6 +215,13 @@ void main() {
             throw RuntimeException("Unable to initialize EGL14")
         }
 
+        // Query available extensions
+        val extensions = EGL14.eglQueryString(eglDisplay, EGL14.EGL_EXTENSIONS) ?: ""
+        val hasKhr = extensions.contains("EGL_KHR_gl_colorspace")
+        val hasHlg = extensions.contains("EGL_EXT_gl_colorspace_bt2020_hlg")
+        supportsHlgColorSpace = hasKhr && hasHlg
+        Log.d(TAG, "EGL Colorspace query: hasKhr=$hasKhr, hasHlg=$hasHlg")
+
         // 1. Try choosing 10-bit EGL config (RGBA 10:10:10:2)
         val config10BitAttribs = intArrayOf(
             EGL14.EGL_RED_SIZE, 10,
@@ -222,9 +236,9 @@ void main() {
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
 
-        var foundConfig = EGL14.eglChooseConfig(
+        var foundConfig = (EGL14.eglChooseConfig(
             eglDisplay, config10BitAttribs, 0, configs, 0, 1, numConfigs, 0
-        ) && numConfigs[0] > 0
+        ) && numConfigs[0] > 0)
 
         if (!foundConfig) {
             Log.w(TAG, "10-bit EGLConfig not found, falling back to 8-bit RGBA_8888")
@@ -237,9 +251,9 @@ void main() {
                 EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
                 EGL14.EGL_NONE
             )
-            foundConfig = EGL14.eglChooseConfig(
+            foundConfig = (EGL14.eglChooseConfig(
                 eglDisplay, config8BitAttribs, 0, configs, 0, 1, numConfigs, 0
-            ) && numConfigs[0] > 0
+            ) && numConfigs[0] > 0)
         }
 
         if (!foundConfig || configs[0] == null) {
@@ -317,7 +331,7 @@ void main() {
     }
 
     /**
-     * Attaches or updates the viewfinder Surface with EGL_GL_COLORSPACE_BT2020_HLG_EXT.
+     * Attaches or updates the viewfinder Surface safely.
      */
     fun setPreviewSurface(
         surface: Surface?,
@@ -326,61 +340,84 @@ void main() {
         streamWidth: Int,
         streamHeight: Int
     ) {
+        if (!isReady) return
         val handler = glHandler ?: return
         handler.post {
-            destroyPreviewSurface()
-            if (surface != null && surface.isValid) {
-                previewEglSurface = createHlgWindowSurface(surface)
-                calculateViewport(viewWidth, viewHeight, streamWidth, streamHeight)
+            try {
+                destroyPreviewSurface()
+                if (surface != null && surface.isValid) {
+                    val eglSurf = createHlgWindowSurface(surface)
+                    if (eglSurf != EGL14.EGL_NO_SURFACE) {
+                        previewEglSurface = eglSurf
+                        calculateViewport(viewWidth, viewHeight, streamWidth, streamHeight)
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Error setting preview surface", e)
             }
         }
     }
 
     /**
-     * Attaches or detaches the HEVC MediaCodec recording input surface.
+     * Attaches or detaches the HEVC MediaCodec recording input surface safely.
      */
     fun setEncoderSurface(surface: Surface?, width: Int, height: Int) {
+        if (!isReady) return
         val handler = glHandler ?: return
         handler.post {
-            destroyEncoderSurface()
-            if (surface != null && surface.isValid) {
-                encoderWidth = width
-                encoderHeight = height
-                encoderEglSurface = createHlgWindowSurface(surface)
-                Log.i(TAG, "Encoder EGL surface attached (${width}x$height)")
+            try {
+                destroyEncoderSurface()
+                if (surface != null && surface.isValid) {
+                    encoderWidth = width
+                    encoderHeight = height
+                    val eglSurf = createHlgWindowSurface(surface)
+                    if (eglSurf != EGL14.EGL_NO_SURFACE) {
+                        encoderEglSurface = eglSurf
+                        Log.i(TAG, "Encoder EGL surface attached (${width}x$height)")
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Error setting encoder surface", e)
             }
         }
     }
 
     private fun createHlgWindowSurface(surface: Surface): EGLSurface {
-        val config = eglConfig ?: throw IllegalStateException("EGLConfig not initialized")
-
-        // 1. Try creating EGLSurface with BT.2020 HLG colorspace extension
-        val hlgAttribs = intArrayOf(
-            EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_BT2020_HLG_EXT,
-            EGL14.EGL_NONE
-        )
-        var eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, hlgAttribs, 0)
-
-        // 2. Fallback to BT.2020 PQ if HLG extension not present
-        if (eglSurf == EGL14.EGL_NO_SURFACE) {
-            val pqAttribs = intArrayOf(
-                EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_BT2020_PQ_EXT,
-                EGL14.EGL_NONE
-            )
-            eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, pqAttribs, 0)
+        val config = eglConfig ?: run {
+            Log.w(TAG, "Cannot create window surface: EGLConfig is null")
+            return EGL14.EGL_NO_SURFACE
+        }
+        if (!surface.isValid) {
+            Log.w(TAG, "Cannot create window surface: Surface is invalid")
+            return EGL14.EGL_NO_SURFACE
         }
 
-        // 3. Fallback to default colorspace
-        if (eglSurf == EGL14.EGL_NO_SURFACE) {
-            eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
+        try {
+            // 1. Only pass EGL_GL_COLORSPACE_BT2020_HLG_EXT if extension is actually supported!
+            if (supportsHlgColorSpace) {
+                val hlgAttribs = intArrayOf(
+                    EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_BT2020_HLG_EXT,
+                    EGL14.EGL_NONE
+                )
+                val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, hlgAttribs, 0)
+                if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                    return eglSurf
+                }
+            }
+
+            // 2. Clean window surface without colorspace extension attributes
+            val defaultAttribs = intArrayOf(EGL14.EGL_NONE)
+            val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, defaultAttribs, 0)
+            if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                return eglSurf
+            }
+
+            Log.w(TAG, "Failed to create EGL window surface: 0x${Integer.toHexString(EGL14.eglGetError())}")
+        } catch (e: Throwable) {
+            Log.w(TAG, "Exception creating EGL window surface", e)
         }
 
-        if (eglSurf == EGL14.EGL_NO_SURFACE) {
-            throw RuntimeException("Failed to create EGL window surface: 0x${Integer.toHexString(EGL14.eglGetError())}")
-        }
-
-        return eglSurf
+        return EGL14.EGL_NO_SURFACE
     }
 
     private fun calculateViewport(viewWidth: Int, viewHeight: Int, streamWidth: Int, streamHeight: Int) {
@@ -472,8 +509,12 @@ void main() {
     private fun destroyPreviewSurface() {
         previewEglSurface?.let {
             if (it != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                EGL14.eglDestroySurface(eglDisplay, it)
+                try {
+                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                    EGL14.eglDestroySurface(eglDisplay, it)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Error destroying preview EGLSurface", e)
+                }
             }
             previewEglSurface = null
         }
@@ -482,8 +523,12 @@ void main() {
     private fun destroyEncoderSurface() {
         encoderEglSurface?.let {
             if (it != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                EGL14.eglDestroySurface(eglDisplay, it)
+                try {
+                    EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                    EGL14.eglDestroySurface(eglDisplay, it)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Error destroying encoder EGLSurface", e)
+                }
             }
             encoderEglSurface = null
         }

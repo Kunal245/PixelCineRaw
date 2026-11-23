@@ -74,9 +74,9 @@ class Camera2Controller(
     private var lastIso: Int? = null
     private var lastColorGains: RggbChannelVector? = null
 
-    // HLG Fallback & OpenGL ES BT.2020 Render Pipeline
+    // HLG Fallback & OpenGL ES BT.2020 Render Pipeline (Lazily instantiated for HLG10)
     private var hardwareHlgFallback = false
-    private val hlgGlRenderer = HlgGlRenderer()
+    private var hlgGlRenderer: HlgGlRenderer? = null
 
     // State flow
     private val _state = MutableStateFlow(CinemaState())
@@ -101,7 +101,8 @@ class Camera2Controller(
     }
 
     fun stopBackgroundThread() {
-        hlgGlRenderer.release()
+        hlgGlRenderer?.release()
+        hlgGlRenderer = null
         cameraThread?.quitSafely()
         try {
             cameraThread?.join(1000)
@@ -265,9 +266,6 @@ class Camera2Controller(
      */
     fun attachPreviewSurface(surface: Surface) {
         previewSurface = surface
-        val pSize = optimalPreviewSize
-        val vRes = _state.value.videoResolution
-        hlgGlRenderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
         val currentSpec = _state.value.currentSensorSpec
         if (currentSpec != null) {
             openCamera(currentSpec.cameraId)
@@ -276,7 +274,7 @@ class Camera2Controller(
 
     fun detachPreviewSurface() {
         closeCamera()
-        hlgGlRenderer.setPreviewSurface(null, 0, 0, 0, 0)
+        hlgGlRenderer?.setPreviewSurface(null, 0, 0, 0, 0)
         previewSurface = null
     }
 
@@ -407,31 +405,37 @@ class Camera2Controller(
             val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
             val useGlPipeline = isHlg && !useHardwareHlg
 
-            if (useGlPipeline && !hlgGlRenderer.isReady) {
-                val pSize = optimalPreviewSize
-                hlgGlRenderer.initialize(pSize.width, pSize.height) {
-                    cameraHandler?.post {
-                        startCaptureSession(onConfigured)
-                    }
-                }
-                return
-            }
-
             if (useGlPipeline) {
+                val renderer = hlgGlRenderer ?: HlgGlRenderer().also { hlgGlRenderer = it }
+                if (!renderer.isReady) {
+                    val pSize = optimalPreviewSize
+                    renderer.initialize(pSize.width, pSize.height) {
+                        cameraHandler?.post {
+                            startCaptureSession(onConfigured)
+                        }
+                    }
+                    return
+                }
+
                 val pSize = optimalPreviewSize
                 val vRes = _state.value.videoResolution
-                hlgGlRenderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
+                renderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
                 if (videoRecordingSurface != null) {
-                    hlgGlRenderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
+                    renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
                 } else {
-                    hlgGlRenderer.setEncoderSurface(null, 0, 0)
+                    renderer.setEncoderSurface(null, 0, 0)
                 }
 
-                val glInputSurface = hlgGlRenderer.inputSurface ?: surface
-                outputConfigs.add(OutputConfiguration(glInputSurface))
+                val glInputSurface = renderer.inputSurface
+                if (glInputSurface != null && glInputSurface.isValid) {
+                    outputConfigs.add(OutputConfiguration(glInputSurface))
+                } else {
+                    Log.w(TAG, "GL input surface invalid, falling back to direct SurfaceView")
+                    outputConfigs.add(OutputConfiguration(surface))
+                }
             } else {
-                hlgGlRenderer.setPreviewSurface(null, 0, 0, 0, 0)
-                hlgGlRenderer.setEncoderSurface(null, 0, 0)
+                hlgGlRenderer?.release()
+                hlgGlRenderer = null
 
                 // Inspect HLG10 constraints on Tensor G4 HAL
                 if (useHardwareHlg) {
@@ -546,7 +550,7 @@ class Camera2Controller(
 
         if (useGlPipeline) {
             val vRes = _state.value.videoResolution
-            hlgGlRenderer.setEncoderSurface(surface, vRes.width, vRes.height)
+            hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height)
             onStarted()
         } else {
             startCaptureSession(onConfigured = onStarted)
@@ -559,7 +563,7 @@ class Camera2Controller(
         val useGlPipeline = isHlg && !useHardwareHlg
 
         if (useGlPipeline) {
-            hlgGlRenderer.setEncoderSurface(null, 0, 0)
+            hlgGlRenderer?.setEncoderSurface(null, 0, 0)
             videoRecordingSurface = null
             _state.update { it.copy(isRecording = false) }
             onStopped()
@@ -594,7 +598,7 @@ class Camera2Controller(
             val useGlPipeline = isHlg && !useHardwareHlg
 
             val streamSurface = if (useGlPipeline) {
-                hlgGlRenderer.inputSurface ?: pSurface
+                hlgGlRenderer?.inputSurface ?: pSurface
             } else {
                 pSurface
             }
