@@ -90,15 +90,22 @@ vec3 encodeHlg(vec3 rgb) {
     return vec3(hlgOetf(rgb.r), hlgOetf(rgb.g), hlgOetf(rgb.b));
 }
 
-// Decode logarithmic tone curve from Camera2 sensor to linear scene light
-vec3 decodeLinear(vec3 s) {
-    // Inverse log transfer: linear = (10^s - 1) / 9
-    return clamp((pow(vec3(10.0), s) - 1.0) / 9.0, 0.0, 1.0);
+float hlgEotf(float V) {
+    V = clamp(V, 0.0, 1.0);
+    if (V <= 0.5) {
+        return (V * V) / 3.0;
+    } else {
+        return (exp((V - c) / a) + b) / 12.0;
+    }
+}
+
+vec3 decodeHlg(vec3 hlg) {
+    return vec3(hlgEotf(hlg.r), hlgEotf(hlg.g), hlgEotf(hlg.b));
 }
 
 void main() {
     vec4 src = texture(sTexture, vTextureCoord);
-    vec3 linearRgb = decodeLinear(src.rgb);
+    vec3 linearRgb = decodeHlg(src.rgb);
     vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
     vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
     fragColor = vec4(hlgRgb, 1.0);
@@ -145,6 +152,8 @@ void main() {
     private var encoderWidth = 3840
     private var encoderHeight = 2160
 
+    private var hasLoggedFirstFrame = false
+
     @Volatile
     var isReady: Boolean = false
         private set
@@ -177,25 +186,41 @@ void main() {
     }
 
     /**
-     * Lazily initializes EGL context with 10-bit config and creates the Camera2 OES input surface.
+     * Lazily initializes EGL context with 10-bit config, binds active SurfaceView preview surface,
+     * and creates the Camera2 OES input surface.
      */
-    fun initialize(width: Int, height: Int, onReady: () -> Unit = {}) {
-        previewWidth = width
-        previewHeight = height
+    fun initialize(
+        previewSurface: Surface? = null,
+        viewWidth: Int,
+        viewHeight: Int,
+        streamWidth: Int,
+        streamHeight: Int,
+        onReady: () -> Unit = {}
+    ) {
+        previewWidth = viewWidth
+        previewHeight = viewHeight
         ensureGlThreadStarted()
         val handler = glHandler ?: return
 
         handler.post {
             try {
-                if (isReady && eglContext != EGL14.EGL_NO_CONTEXT) {
-                    onReady()
-                    return@post
+                if (!isReady || eglContext == EGL14.EGL_NO_CONTEXT) {
+                    initEGL()
+                    initShaders()
+                    initOesTexture(streamWidth, streamHeight)
+                    isReady = true
+                    Log.i(TAG, "HlgGlRenderer initialized successfully (${streamWidth}x$streamHeight, HLG EGL extension=$supportsHlgColorSpace)")
                 }
-                initEGL()
-                initShaders()
-                initOesTexture(width, height)
-                isReady = true
-                Log.i(TAG, "HlgGlRenderer initialized successfully (${width}x$height, HLG EGL extension=$supportsHlgColorSpace)")
+
+                if (previewSurface != null && previewSurface.isValid) {
+                    destroyPreviewSurface()
+                    val eglSurf = createHlgWindowSurface(previewSurface)
+                    if (eglSurf != EGL14.EGL_NO_SURFACE) {
+                        previewEglSurface = eglSurf
+                        calculateViewport(viewWidth, viewHeight, streamWidth, streamHeight)
+                    }
+                }
+
                 onReady()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize HlgGlRenderer", e)
@@ -203,6 +228,8 @@ void main() {
             }
         }
     }
+
+    fun getCameraInputSurface(): Surface? = inputSurface
 
     private fun initEGL() {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -321,9 +348,7 @@ void main() {
         surfaceTexture = SurfaceTexture(oesTextureId).apply {
             setDefaultBufferSize(width, height)
             setOnFrameAvailableListener({
-                glHandler?.post {
-                    renderFrame()
-                }
+                renderFrame()
             }, glHandler)
         }
 
@@ -340,12 +365,11 @@ void main() {
         streamWidth: Int,
         streamHeight: Int
     ) {
-        if (!isReady) return
         val handler = glHandler ?: return
         handler.post {
             try {
                 destroyPreviewSurface()
-                if (surface != null && surface.isValid) {
+                if (surface != null && surface.isValid && isReady) {
                     val eglSurf = createHlgWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
@@ -362,12 +386,11 @@ void main() {
      * Attaches or detaches the HEVC MediaCodec recording input surface safely.
      */
     fun setEncoderSurface(surface: Surface?, width: Int, height: Int) {
-        if (!isReady) return
         val handler = glHandler ?: return
         handler.post {
             try {
                 destroyEncoderSurface()
-                if (surface != null && surface.isValid) {
+                if (surface != null && surface.isValid && isReady) {
                     encoderWidth = width
                     encoderHeight = height
                     val eglSurf = createHlgWindowSurface(surface)
@@ -455,6 +478,11 @@ void main() {
             st.getTransformMatrix(texMatrix)
             val timestampNs = st.timestamp
 
+            if (!hasLoggedFirstFrame) {
+                hasLoggedFirstFrame = true
+                Log.d("PixelCineHDR", "GL frame rendered")
+            }
+
             // 1. Render to Viewfinder
             val pSurf = previewEglSurface
             if (pSurf != null && pSurf != EGL14.EGL_NO_SURFACE) {
@@ -535,6 +563,7 @@ void main() {
     }
 
     fun release() {
+        hasLoggedFirstFrame = false
         val handler = glHandler
         if (handler != null) {
             handler.post {

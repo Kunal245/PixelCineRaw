@@ -406,10 +406,18 @@ class Camera2Controller(
             val useGlPipeline = isHlg && !useHardwareHlg
 
             if (useGlPipeline) {
+                val pSize = optimalPreviewSize
+                val vRes = _state.value.videoResolution
                 val renderer = hlgGlRenderer ?: HlgGlRenderer().also { hlgGlRenderer = it }
+
                 if (!renderer.isReady) {
-                    val pSize = optimalPreviewSize
-                    renderer.initialize(pSize.width, pSize.height) {
+                    renderer.initialize(
+                        previewSurface = surface,
+                        viewWidth = pSize.width,
+                        viewHeight = pSize.height,
+                        streamWidth = pSize.width,
+                        streamHeight = pSize.height
+                    ) {
                         cameraHandler?.post {
                             startCaptureSession(onConfigured)
                         }
@@ -417,8 +425,6 @@ class Camera2Controller(
                     return
                 }
 
-                val pSize = optimalPreviewSize
-                val vRes = _state.value.videoResolution
                 renderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
                 if (videoRecordingSurface != null) {
                     renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
@@ -426,7 +432,7 @@ class Camera2Controller(
                     renderer.setEncoderSurface(null, 0, 0)
                 }
 
-                val glInputSurface = renderer.inputSurface
+                val glInputSurface = renderer.getCameraInputSurface()
                 if (glInputSurface != null && glInputSurface.isValid) {
                     outputConfigs.add(OutputConfiguration(glInputSurface))
                 } else {
@@ -759,18 +765,10 @@ class Camera2Controller(
             builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
         }
 
-        // 7. Tone Curves: HLG BT.2100 Fallback vs Flat Log vs SDR
+        // 7. Tone Curves: HLG BT.2100 vs Flat Log vs SDR
         val isHlgProfile = state.colorProfile == ColorProfile.HLG_10BIT
-        val useHardwareHlg = isHlgProfile && spec.isHlg10Supported && !hardwareHlgFallback
-
         if (isHlgProfile) {
-            if (useHardwareHlg) {
-                builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
-            } else {
-                // Apply flat logarithmic tone curve so highlights aren't clipped by sensor ISP
-                // before reaching the HlgGlRenderer shader!
-                applyLogToneCurve(builder)
-            }
+            applyHlgToneCurve(builder)
         } else if (state.colorProfile == ColorProfile.FLAT_LOG) {
             applyLogToneCurve(builder)
         } else {
