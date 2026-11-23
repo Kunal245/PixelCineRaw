@@ -2,21 +2,25 @@ package com.kunal.pixelcineraw.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.TonemapCurve
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.util.Range
 import android.util.Size
+import android.view.PixelCopy
 import android.view.Surface
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,6 +66,11 @@ class Camera2Controller(
     var lastCaptureResult: TotalCaptureResult? = null
         private set
     var onRawFrameAvailable: ((Image, TotalCaptureResult) -> Unit)? = null
+
+    // Transition Pre-matching Cache
+    private var lastExposureNs: Long? = null
+    private var lastIso: Int? = null
+    private var lastColorGains: RggbChannelVector? = null
 
     // State flow
     private val _state = MutableStateFlow(CinemaState())
@@ -150,6 +159,8 @@ class Camera2Controller(
 
                 val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
                 val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) ?: Range(1.0f, 8.0f)
+                val isLogicalMultiCam = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) &&
+                        zoomRange.lower <= 0.6f
 
                 val spec = CameraSensorSpec(
                     cameraId = id,
@@ -172,13 +183,17 @@ class Camera2Controller(
                     videoSizes = videoSizes,
                     isUltraWide = isUltraWide,
                     isMainWide = isMain,
+                    isLogicalMultiCamera = isLogicalMultiCam,
                     sensorOrientation = sensorOrientation,
                     zoomRatioRange = zoomRange
                 )
 
                 _probedSensors.add(spec)
 
-                if (isMain && mainWideSpec == null) {
+                // Prioritize unified logical multi-camera covering 0.5x to 8.0x if available
+                if (isLogicalMultiCam && mainWideSpec == null) {
+                    mainWideSpec = spec
+                } else if (isMain && mainWideSpec == null) {
                     mainWideSpec = spec
                 } else if (isUltraWide && ultraWideSpec == null) {
                     ultraWideSpec = spec
@@ -490,6 +505,18 @@ class Camera2Controller(
         } else {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             builder.set(CaptureRequest.CONTROL_AE_LOCK, false)
+
+            // Pre-match exposure from previous sensor during physical transition to eliminate brightness flash
+            if (state.isTransitioningLens) {
+                lastExposureNs?.let { exp ->
+                    val safeExp = exp.coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+                    builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, safeExp)
+                }
+                lastIso?.let { iso ->
+                    val safeIso = iso.coerceIn(spec.isoRange.lower, spec.isoRange.upper)
+                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, safeIso)
+                }
+            }
         }
 
         // 3. Manual Focus / Tap to Focus
@@ -516,6 +543,10 @@ class Camera2Controller(
             builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, rggb)
         } else {
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            // Pre-match color gains from previous sensor during physical transition to eliminate color flash
+            if (state.isTransitioningLens && lastColorGains != null) {
+                builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, lastColorGains)
+            }
         }
 
         // 5. Optical & Electronic Stabilization (OIS / EIS)
@@ -539,11 +570,14 @@ class Camera2Controller(
 
         // 6. Hardware-Accelerated Smooth Zoom (CONTROL_ZOOM_RATIO)
         val zoomRatio = state.zoomRatio
-        val targetHardwareZoom = if (spec.isUltraWide) {
-            // Ultrawide sensor (displays 0.5x to 0.99x)
+        val targetHardwareZoom = if (spec.isLogicalMultiCamera) {
+            // Logical multi-camera directly handles the full range (e.g. 0.5x to 8.0x) natively
+            zoomRatio.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        } else if (spec.isUltraWide) {
+            // Physical Ultrawide sensor (displays 0.5x to 0.99x)
             (zoomRatio / 0.5f).coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
         } else {
-            // Main wide sensor (displays 1.0x to 8.0x)
+            // Physical Main wide sensor (displays 1.0x to 8.0x)
             zoomRatio.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
         }
 
@@ -600,6 +634,20 @@ class Camera2Controller(
             result: TotalCaptureResult
         ) {
             lastCaptureResult = result
+            lastExposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+            lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+            lastColorGains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+
+            // If transitioning between physical lenses, first captured frame marks completion
+            if (_state.value.isTransitioningLens) {
+                _state.update {
+                    it.copy(
+                        isTransitioningLens = false,
+                        transitionScale = 1.0f,
+                        transitionBitmap = null
+                    )
+                }
+            }
 
             // Measure actual FPS
             frameCount++
@@ -640,6 +688,25 @@ class Camera2Controller(
      * User Action: Switch Lens (0.5x Ultrawide, 1x Main Wide, 2x Lossless Center Crop)
      */
     fun selectLens(lens: LensSelection) {
+        val currentSpec = _state.value.currentSensorSpec
+
+        // If current camera is a logical multi-camera covering 0.5x..8.0x, keep same camera device!
+        if (currentSpec != null && currentSpec.isLogicalMultiCamera) {
+            val targetZoom = when (lens) {
+                LensSelection.ULTRAWIDE -> 0.5f
+                LensSelection.WIDE_1X -> 1.0f
+                LensSelection.CROP_2X -> 2.0f
+            }
+            _state.update {
+                it.copy(
+                    selectedLens = lens,
+                    zoomRatio = targetZoom
+                )
+            }
+            createAndSetRepeatingRequest()
+            return
+        }
+
         val targetSpec = when (lens) {
             LensSelection.ULTRAWIDE -> _probedSensors.find { it.isUltraWide } ?: _probedSensors.firstOrNull()
             LensSelection.WIDE_1X, LensSelection.CROP_2X -> _probedSensors.find { it.isMainWide } ?: _probedSensors.firstOrNull()
@@ -656,21 +723,42 @@ class Camera2Controller(
             }
         }
 
+        val targetZoom = when (lens) {
+            LensSelection.ULTRAWIDE -> 0.5f
+            LensSelection.WIDE_1X -> 1.0f
+            LensSelection.CROP_2X -> 2.0f
+        }
+
+        val isSwitchingDevice = targetSpec != null && targetSpec.cameraId != cameraDevice?.id
+
         _state.update {
-            val targetZoom = when (lens) {
-                LensSelection.ULTRAWIDE -> 0.5f
-                LensSelection.WIDE_1X -> 1.0f
-                LensSelection.CROP_2X -> 2.0f
-            }
             it.copy(
                 selectedLens = lens,
                 zoomRatio = targetZoom,
                 currentSensorSpec = targetSpec ?: it.currentSensorSpec,
-                supportedResolutions = if (probedResolutions.isNotEmpty()) probedResolutions else it.supportedResolutions
+                supportedResolutions = if (probedResolutions.isNotEmpty()) probedResolutions else it.supportedResolutions,
+                isTransitioningLens = isSwitchingDevice,
+                transitionScale = if (lens == LensSelection.ULTRAWIDE) 0.95f else 1.05f
             )
         }
 
-        if (targetSpec != null && targetSpec.cameraId != cameraDevice?.id) {
+        if (isSwitchingDevice && targetSpec != null) {
+            val surface = previewSurface
+            if (surface != null && surface.isValid) {
+                try {
+                    val pSize = optimalPreviewSize
+                    if (pSize.width > 0 && pSize.height > 0) {
+                        val bitmap = Bitmap.createBitmap(pSize.width, pSize.height, Bitmap.Config.ARGB_8888)
+                        PixelCopy.request(surface, bitmap, { copyResult ->
+                            if (copyResult == PixelCopy.SUCCESS) {
+                                _state.update { it.copy(transitionBitmap = bitmap) }
+                            }
+                        }, cameraHandler ?: Handler(Looper.getMainLooper()))
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to capture transition frame", e)
+                }
+            }
             openCamera(targetSpec.cameraId)
         } else {
             createAndSetRepeatingRequest()
@@ -685,8 +773,33 @@ class Camera2Controller(
      */
     fun setZoomRatio(ratio: Float, forceUpdate: Boolean = false) {
         val clampedZoom = ratio.coerceIn(_state.value.minZoomRatio, _state.value.maxZoomRatio)
+        val currentSpec = _state.value.currentSensorSpec
 
-        // Check if zoom requires switching between Ultrawide and Main Wide
+        // If the sensor is a unified logical multi-camera covering 0.5x..8.0x,
+        // we never switch physical camera devices; Tensor G4 hardware handles lens handoff seamlessly!
+        if (currentSpec != null && currentSpec.isLogicalMultiCamera) {
+            val newLensSelection = when {
+                clampedZoom < 1.0f -> LensSelection.ULTRAWIDE
+                clampedZoom >= 2.0f -> LensSelection.CROP_2X
+                else -> LensSelection.WIDE_1X
+            }
+
+            _state.update {
+                it.copy(
+                    zoomRatio = clampedZoom,
+                    selectedLens = newLensSelection
+                )
+            }
+
+            val now = System.currentTimeMillis()
+            if (forceUpdate || now - lastZoomUpdateTime >= 16L) {
+                lastZoomUpdateTime = now
+                createAndSetRepeatingRequest()
+            }
+            return
+        }
+
+        // Fallback for separate physical camera devices
         val currentLens = _state.value.selectedLens
         val needsUltrawide = clampedZoom < 1.0f
         val isCurrentlyUltrawide = currentLens == LensSelection.ULTRAWIDE

@@ -29,6 +29,7 @@ data class CameraSensorSpec(
     val videoSizes: List<Size>,
     val isUltraWide: Boolean,
     val isMainWide: Boolean,
+    val isLogicalMultiCamera: Boolean = false,
     val sensorOrientation: Int = 90,
     val zoomRatioRange: Range<Float> = Range(1.0f, 8.0f)
 ) {

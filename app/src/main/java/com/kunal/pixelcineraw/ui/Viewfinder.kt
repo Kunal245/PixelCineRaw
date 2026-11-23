@@ -11,9 +11,15 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -26,8 +32,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -144,6 +153,43 @@ fun Viewfinder(
                 view.setAspectRatio(currentSize.width, currentSize.height)
             }
         )
+
+        // Seamless Lens Transition Crossfade and Scale-Match Mask (eliminates black flash/freeze)
+        val transitionScaleAnim by animateFloatAsState(
+            targetValue = if (state.isTransitioningLens) state.transitionScale else 1.0f,
+            animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+            label = "LensTransitionScale"
+        )
+
+        AnimatedVisibility(
+            visible = state.isTransitioningLens,
+            enter = fadeIn(animationSpec = tween(durationMillis = 40)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 140)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = transitionScaleAnim
+                        scaleY = transitionScaleAnim
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                state.transitionBitmap?.let { bmp ->
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } ?: Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.5f))
+                )
+            }
+        }
 
         // Animated Tap-to-Focus Cinema Reticle
         tapOffset?.let { offset ->

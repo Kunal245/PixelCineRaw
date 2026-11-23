@@ -1,5 +1,7 @@
 package com.kunal.pixelcineraw.camera
 
+import android.graphics.Bitmap
+
 /**
  * Immutable UI and camera engine state emitted to Jetpack Compose.
  */
@@ -12,6 +14,9 @@ data class CinemaState(
     val minZoomRatio: Float = 0.5f,
     val maxZoomRatio: Float = 8.0f,
     val isZoomSliderVisible: Boolean = false,
+    val isTransitioningLens: Boolean = false,
+    val transitionScale: Float = 1.0f,
+    val transitionBitmap: Bitmap? = null,
 
     // Exposure (Shutter & ISO)
     val isManualExposure: Boolean = true,
