@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlin.math.min
 
@@ -88,6 +89,11 @@ class Camera2Controller(
     // FPS Metering
     private var frameCount = 0
     private var lastFpsTimestamp = System.nanoTime()
+
+    // Lock-free VSYNC Zoom Sync State
+    private val pendingZoomRatio = AtomicReference<Float>(1.0f)
+    @Volatile private var lastAppliedZoomRatio = 1.0f
+    private var isZoomCheckScheduled = false
 
     init {
         startBackgroundThread()
@@ -591,6 +597,8 @@ class Camera2Controller(
             previewRequestBuilder = builder
 
             session.setRepeatingRequest(builder.build(), captureCallback, handler)
+            lastAppliedZoomRatio = stateVal.zoomRatio
+            pendingZoomRatio.set(stateVal.zoomRatio)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set repeating request", e)
         }
@@ -892,6 +900,11 @@ class Camera2Controller(
                     _state.update { it.copy(focusDistance = actualFocusDist) }
                 }
             }
+
+            // VSYNC Zoom Sync: Check if a zoom update is pending and apply at most once per actual camera frame
+            if (Math.abs(pendingZoomRatio.get() - lastAppliedZoomRatio) > 0.0005f) {
+                applyZoomUpdateIfPending(force = false)
+            }
         }
     }
 
@@ -915,7 +928,8 @@ class Camera2Controller(
                     zoomRatio = targetZoom
                 )
             }
-            createAndSetRepeatingRequest()
+            pendingZoomRatio.set(targetZoom)
+            cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
             return
         }
 
@@ -977,36 +991,39 @@ class Camera2Controller(
         }
     }
 
-    private var lastZoomUpdateTime = 0L
-
     /**
-     * User Action: Smooth Zoom Ratio update with automatic seamless sensor switching.
-     * Throttles Camera2 setRepeatingRequest to ~16ms (60Hz) to prevent capture session flooding.
+     * User Action: Smooth Zoom Ratio update.
+     * Updates UI state instantly at 120Hz, queues zoom into lock-free AtomicReference,
+     * and throttles Camera2 setRepeatingRequest cleanly to actual frame completion (VSYNC).
      */
     fun setZoomRatio(ratio: Float, forceUpdate: Boolean = false) {
         val clampedZoom = ratio.coerceIn(_state.value.minZoomRatio, _state.value.maxZoomRatio)
         val currentSpec = _state.value.currentSensorSpec
 
-        // If the sensor is a unified logical multi-camera covering 0.5x..8.0x,
-        // we never switch physical camera devices; Tensor G4 hardware handles lens handoff seamlessly!
+        val newLensSelection = when {
+            clampedZoom < 1.0f -> LensSelection.ULTRAWIDE
+            clampedZoom >= 2.0f -> LensSelection.CROP_2X
+            else -> LensSelection.WIDE_1X
+        }
+
+        _state.update {
+            it.copy(
+                zoomRatio = clampedZoom,
+                selectedLens = newLensSelection
+            )
+        }
+
+        pendingZoomRatio.set(clampedZoom)
+
         if (currentSpec != null && currentSpec.isLogicalMultiCamera) {
-            val newLensSelection = when {
-                clampedZoom < 1.0f -> LensSelection.ULTRAWIDE
-                clampedZoom >= 2.0f -> LensSelection.CROP_2X
-                else -> LensSelection.WIDE_1X
-            }
-
-            _state.update {
-                it.copy(
-                    zoomRatio = clampedZoom,
-                    selectedLens = newLensSelection
-                )
-            }
-
-            val now = System.currentTimeMillis()
-            if (forceUpdate || now - lastZoomUpdateTime >= 16L) {
-                lastZoomUpdateTime = now
-                createAndSetRepeatingRequest()
+            if (forceUpdate) {
+                cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
+            } else if (!isZoomCheckScheduled) {
+                isZoomCheckScheduled = true
+                cameraHandler?.post {
+                    isZoomCheckScheduled = false
+                    applyZoomUpdateIfPending(force = false)
+                }
             }
             return
         }
@@ -1022,23 +1039,56 @@ class Camera2Controller(
             selectLens(LensSelection.WIDE_1X)
         }
 
-        val newLensSelection = when {
-            clampedZoom < 1.0f -> LensSelection.ULTRAWIDE
-            clampedZoom >= 2.0f -> LensSelection.CROP_2X
-            else -> LensSelection.WIDE_1X
+        if (forceUpdate) {
+            cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
+        } else if (!isZoomCheckScheduled) {
+            isZoomCheckScheduled = true
+            cameraHandler?.post {
+                isZoomCheckScheduled = false
+                applyZoomUpdateIfPending(force = false)
+            }
+        }
+    }
+
+    /**
+     * Synchronizes hardware CONTROL_ZOOM_RATIO to camera frame VSYNC.
+     * Reuses the pre-built previewRequestBuilder on cameraHandler thread to eliminate HAL queue flooding.
+     */
+    private fun applyZoomUpdateIfPending(force: Boolean = false) {
+        val builder = previewRequestBuilder ?: return
+        val session = captureSession ?: return
+        val handler = cameraHandler ?: return
+        val spec = _state.value.currentSensorSpec ?: return
+
+        val targetZoom = pendingZoomRatio.get()
+        if (!force && Math.abs(targetZoom - lastAppliedZoomRatio) <= 0.0005f) {
+            return
         }
 
-        _state.update {
-            it.copy(
-                zoomRatio = clampedZoom,
-                selectedLens = newLensSelection
-            )
+        val targetHardwareZoom = if (spec.isLogicalMultiCamera) {
+            targetZoom.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        } else if (spec.isUltraWide) {
+            (targetZoom / 0.5f).coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        } else {
+            targetZoom.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
         }
 
-        val now = System.currentTimeMillis()
-        if (forceUpdate || now - lastZoomUpdateTime >= 16L) {
-            lastZoomUpdateTime = now
-            createAndSetRepeatingRequest()
+        try {
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, targetHardwareZoom)
+        } catch (e: Exception) {
+            val activeArray = spec.activeArraySize
+            val cropW = (activeArray.width() / targetHardwareZoom).toInt()
+            val cropH = (activeArray.height() / targetHardwareZoom).toInt()
+            val cropL = (activeArray.width() - cropW) / 2
+            val cropT = (activeArray.height() - cropH) / 2
+            builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
+        }
+
+        try {
+            session.setRepeatingRequest(builder.build(), captureCallback, handler)
+            lastAppliedZoomRatio = targetZoom
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to apply zoom ratio update", e)
         }
     }
 

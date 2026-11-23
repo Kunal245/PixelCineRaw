@@ -23,6 +23,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.*
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.abs
 
@@ -45,6 +48,7 @@ fun CinemaScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
     var activeDial by remember { mutableStateOf(ActiveDial.NONE) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
@@ -251,6 +255,46 @@ fun CinemaScreen(
                 onEvClick = {
                     activeDial = if (activeDial == ActiveDial.EV) ActiveDial.NONE else ActiveDial.EV
                 }
+            )
+        }
+
+        // 7b. 120Hz Sleek Apple/Blackmagic Canvas Rotary Zoom Wheel (Floats directly above lens hub)
+        var zoomAutoHideJob by remember { mutableStateOf<Job?>(null) }
+        fun scheduleZoomAutoHide() {
+            zoomAutoHideJob?.cancel()
+            zoomAutoHideJob = coroutineScope.launch {
+                delay(1500L)
+                viewModel.cameraController.setZoomSliderVisibility(false)
+            }
+        }
+
+        LaunchedEffect(state.isZoomSliderVisible) {
+            if (state.isZoomSliderVisible) {
+                scheduleZoomAutoHide()
+            }
+        }
+
+        AnimatedVisibility(
+            visible = state.isZoomSliderVisible && !state.isCleanViewfinder,
+            enter = slideInVertically { it / 2 } + fadeIn(tween(150)),
+            exit = slideOutVertically { it / 2 } + fadeOut(tween(150)),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 68.dp, bottom = 58.dp)
+        ) {
+            ZoomWheel(
+                currentZoom = state.zoomRatio,
+                minZoom = state.minZoomRatio,
+                maxZoom = state.maxZoomRatio,
+                onZoomChanged = { zoom ->
+                    viewModel.cameraController.setZoomRatio(zoom)
+                },
+                onUserInteraction = {
+                    scheduleZoomAutoHide()
+                },
+                modifier = Modifier
+                    .width(300.dp)
+                    .height(44.dp)
             )
         }
 
