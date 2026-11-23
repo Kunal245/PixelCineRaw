@@ -3,7 +3,6 @@ package com.kunal.pixelcineraw
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -70,8 +69,7 @@ class MainActivity : ComponentActivity() {
                     CinemaScreen(
                         viewModel = cinemaViewModel,
                         onRecordToggle = {
-                            val isRec = cinemaViewModel.state.value.isRecording
-                            cinemaViewModel.cameraController.setRecordingActive(!isRec)
+                            cinemaViewModel.toggleRecording()
                         }
                     )
                 } else {

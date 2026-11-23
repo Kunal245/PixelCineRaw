@@ -10,6 +10,7 @@ import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.TonemapCurve
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -58,6 +59,9 @@ class Camera2Controller(
     private var previewSurface: Surface? = null
     private var videoRecordingSurface: Surface? = null
     private var rawImageReader: ImageReader? = null
+    var lastCaptureResult: TotalCaptureResult? = null
+        private set
+    var onRawFrameAvailable: ((Image, TotalCaptureResult) -> Unit)? = null
 
     // State flow
     private val _state = MutableStateFlow(CinemaState())
@@ -290,6 +294,15 @@ class Camera2Controller(
                     ImageFormat.RAW_SENSOR,
                     5 // 5-frame ring buffer
                 ).apply {
+                    setOnImageAvailableListener({ reader ->
+                        val image = reader.acquireLatestImage()
+                        val result = lastCaptureResult
+                        if (image != null && result != null) {
+                            onRawFrameAvailable?.invoke(image, result)
+                        } else {
+                            image?.close()
+                        }
+                    }, handler)
                     outputConfigs.add(OutputConfiguration(this.surface))
                 }
             }
@@ -498,6 +511,8 @@ class Camera2Controller(
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            lastCaptureResult = result
+
             // Measure actual FPS
             frameCount++
             val now = System.nanoTime()
@@ -796,6 +811,12 @@ class Camera2Controller(
         createAndSetRepeatingRequest()
     }
 
+    fun updateAudioLevels(peakL: Float, peakR: Float) {
+        _state.update {
+            it.copy(audioPeakDbL = peakL, audioPeakDbR = peakR)
+        }
+    }
+
     fun updateRecordingMetrics(seconds: Long, bytes: Long, droppedFrames: Int) {
         _state.update {
             it.copy(
@@ -804,5 +825,9 @@ class Camera2Controller(
                 droppedFramesCount = droppedFrames
             )
         }
+    }
+
+    fun getCameraCharacteristics(cameraId: String): CameraCharacteristics {
+        return cameraManager.getCameraCharacteristics(cameraId)
     }
 }
