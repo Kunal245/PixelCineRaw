@@ -11,7 +11,8 @@ import android.util.Log
 import android.view.Surface
 import com.kunal.pixelcineraw.audio.AudioEngine
 import com.kunal.pixelcineraw.camera.ColorProfile
-import com.kunal.pixelcineraw.camera.VideoResolution
+import com.kunal.pixelcineraw.camera.CustomResolution
+import com.kunal.pixelcineraw.camera.VideoCodec
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
@@ -69,13 +70,14 @@ class HevcLogRecorder(
     val encoderSurface: Surface? get() = inputSurface
 
     /**
-     * Initializes the HEVC encoder and creates the Camera2 recording Surface.
+     * Initializes the cinema hardware encoder (HEVC 10-bit/8-bit or AVC) and creates the Camera2 recording Surface.
      */
     fun prepare(
-        resolution: VideoResolution,
+        resolution: CustomResolution,
         fps: Int,
         bitrateMbps: Int,
-        colorProfile: ColorProfile
+        colorProfile: ColorProfile,
+        codec: VideoCodec = VideoCodec.HEVC_10BIT
     ): Surface {
         // Reset tracking state
         videoTrackIndex = -1
@@ -94,27 +96,35 @@ class HevcLogRecorder(
         val height = resolution.height
         val bitrate = bitrateMbps * 1_000_000
 
-        // 1. Configure Video Encoder (HEVC)
-        val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, width, height).apply {
+        // 1. Configure Video Encoder
+        val videoFormat = MediaFormat.createVideoFormat(codec.mimeType, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second GOP for cinema scrubbing
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
 
+            if (codec.mimeType == MediaFormat.MIMETYPE_VIDEO_HEVC) {
+                if (codec.is10Bit || colorProfile == ColorProfile.HLG_10BIT) {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
+                } else {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+                }
+            } else if (codec.mimeType == MediaFormat.MIMETYPE_VIDEO_AVC) {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            }
+
             if (colorProfile == ColorProfile.HLG_10BIT) {
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
                 setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
             } else {
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
             }
         }
 
-        videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC).apply {
+        videoEncoder = MediaCodec.createEncoderByType(codec.mimeType).apply {
             configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = createInputSurface()
         }

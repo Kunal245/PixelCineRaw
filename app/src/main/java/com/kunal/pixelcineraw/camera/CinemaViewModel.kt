@@ -70,19 +70,20 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     private fun startRecording(state: CinemaState) {
         try {
             when (state.recordingFormat) {
-                RecordingFormat.HEVC_10BIT -> {
-                    // Prepare 10-bit HEVC encoder and get recording surface
+                RecordingFormat.VIDEO_PRO -> {
+                    // Prepare hardware video encoder and get recording surface
                     val surface = hevcRecorder.prepare(
                         resolution = state.videoResolution,
                         fps = state.targetFps,
                         bitrateMbps = state.targetBitrateMbps,
-                        colorProfile = state.colorProfile
+                        colorProfile = state.colorProfile,
+                        codec = state.videoCodec
                     )
 
                     val fileName = hevcRecorder.start()
 
                     cameraController.startRecordingSession(surface, fileName) {
-                        Log.i(TAG, "Camera2 session active and streaming to HEVC encoder: $fileName")
+                        Log.i(TAG, "Camera2 session active and streaming to encoder: $fileName")
                     }
                 }
                 RecordingFormat.RAW_DNG -> {
@@ -107,12 +108,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     private fun stopRecording(format: RecordingFormat) {
         try {
             when (format) {
-                RecordingFormat.HEVC_10BIT -> {
+                RecordingFormat.VIDEO_PRO -> {
                     cameraController.stopRecordingSession {
                         Log.i(TAG, "Camera2 session restored to clean preview mode")
                     }
                     hevcRecorder.stop()
-                    Log.i(TAG, "Stopped HEVC recording successfully")
+                    Log.i(TAG, "Stopped video recording successfully")
                 }
                 RecordingFormat.RAW_DNG -> {
                     cameraController.onRawFrameAvailable = null

@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
 import com.kunal.pixelcineraw.camera.ColorMath
+import com.kunal.pixelcineraw.camera.RecordingFormat
 import com.kunal.pixelcineraw.camera.ShutterUnit
 import com.kunal.pixelcineraw.camera.ThermalStatus
 import java.util.Locale
@@ -96,6 +97,15 @@ fun TopStatusBar(
             CinemaStatusPill(
                 label = "PROFILE",
                 value = state.colorProfile.label,
+                highlight = true,
+                onClick = onColorProfileClick
+            )
+
+            // Resolution / Format Pill (Blackmagic style)
+            CinemaStatusPill(
+                label = if (state.recordingFormat == RecordingFormat.RAW_DNG) "RAW" else state.videoCodec.label.substringBefore(" "),
+                value = state.videoResolution.aspectLabel,
+                subText = "${state.videoResolution.width}p",
                 highlight = true,
                 onClick = onColorProfileClick
             )

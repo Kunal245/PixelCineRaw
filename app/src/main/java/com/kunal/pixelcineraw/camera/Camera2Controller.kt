@@ -181,12 +181,52 @@ class Camera2Controller(
                 }
             }
 
-            // Default to Main Wide
+            // Build list of supported cinema custom resolutions from selected sensor capabilities
             val initialSpec = mainWideSpec ?: _probedSensors.firstOrNull()
+            val probedResolutions = mutableListOf<CustomResolution>()
+
+            if (initialSpec != null) {
+                val allVideoSizes: List<Size> = (initialSpec.previewSizes + initialSpec.videoSizes)
+                    .distinctBy { "${it.width}x${it.height}" }
+
+                // Check for 4K UHD
+                if (allVideoSizes.any { it.width == 3840 && it.height == 2160 }) {
+                    probedResolutions.add(CustomResolution.UHD_4K)
+                }
+                // Check for 4K DCI
+                if (allVideoSizes.any { it.width == 4096 && it.height == 2160 }) {
+                    probedResolutions.add(CustomResolution.DCI_4K)
+                }
+                // Check for 2.5K QHD
+                if (allVideoSizes.any { it.width == 2560 && it.height == 1440 }) {
+                    probedResolutions.add(CustomResolution.QHD_1440P)
+                }
+                // Check for 1080p FHD
+                if (allVideoSizes.any { it.width == 1920 && it.height == 1080 }) {
+                    probedResolutions.add(CustomResolution.FHD_1080P)
+                }
+                // Check for 720p HD
+                if (allVideoSizes.any { it.width == 1280 && it.height == 720 }) {
+                    probedResolutions.add(CustomResolution.HD_720P)
+                }
+                // Check for 4:3 Open Gate
+                val max43 = allVideoSizes.filter { it.width * 3 == it.height * 4 }.maxByOrNull { it.width * it.height }
+                if (max43 != null) {
+                    probedResolutions.add(CustomResolution("4:3 Open Gate (${max43.width}×${max43.height})", max43.width, max43.height, "4:3"))
+                }
+            }
+
+            if (probedResolutions.isEmpty()) {
+                probedResolutions.add(CustomResolution.FHD_1080P)
+                probedResolutions.add(CustomResolution.UHD_4K)
+            }
+
             if (initialSpec != null) {
                 _state.update {
                     it.copy(
                         currentSensorSpec = initialSpec,
+                        supportedResolutions = probedResolutions,
+                        videoResolution = probedResolutions.firstOrNull { r -> r.width == 3840 && r.height == 2160 } ?: probedResolutions.first(),
                         iso = initialSpec.isoRange.lower.coerceAtLeast(100),
                         focusDistance = 0.0f // Infinity
                     )
@@ -268,10 +308,26 @@ class Camera2Controller(
     val optimalPreviewSize: Size
         get() {
             val spec = _state.value.currentSensorSpec ?: return Size(1920, 1080)
+            val selectedRes = _state.value.videoResolution
+            val targetRatio = selectedRes.width.toFloat() / selectedRes.height.toFloat()
+
+            // 1. Try finding exact matching preview size
+            val exactMatch = spec.previewSizes.firstOrNull {
+                it.width == selectedRes.width && it.height == selectedRes.height
+            }
+            if (exactMatch != null) return exactMatch
+
+            // 2. Try finding same aspect ratio matching preview size
+            val matchingAspect = spec.previewSizes
+                .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio) < 0.05f }
+                .maxByOrNull { it.width * it.height }
+            if (matchingAspect != null) return matchingAspect
+
+            // 3. Fallback to 16:9 maximum supported preview size
             return spec.previewSizes
                 .filter { it.width * 9 == it.height * 16 }
                 .maxByOrNull { it.width * it.height }
-                ?: Size(1920, 1080)
+                ?: (spec.previewSizes.firstOrNull() ?: Size(1920, 1080))
         }
 
     /**
@@ -784,8 +840,13 @@ class Camera2Controller(
     /**
      * User Action: Video Resolution & Bitrate
      */
-    fun setVideoResolution(res: VideoResolution) {
+    fun setVideoResolution(res: CustomResolution) {
         _state.update { it.copy(videoResolution = res) }
+        startCaptureSession()
+    }
+
+    fun setVideoCodec(codec: VideoCodec) {
+        _state.update { it.copy(videoCodec = codec) }
     }
 
     fun setBitrateMbps(mbps: Int) {

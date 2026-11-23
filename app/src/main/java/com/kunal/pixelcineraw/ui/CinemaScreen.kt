@@ -3,9 +3,12 @@ package com.kunal.pixelcineraw.ui
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -277,7 +280,7 @@ fun CinemaScreen(
             }
         }
 
-        // 6. Cinema Settings Dialog (Format, Bitrate, Profile)
+        // 6. Cinema Settings Dialog (Format, Codec, Bitrate, Profile, Resolution)
         if (showSettingsDialog) {
             CinemaSettingsDialog(
                 state = state,
@@ -285,7 +288,8 @@ fun CinemaScreen(
                 onSelectResolution = { viewModel.cameraController.setVideoResolution(it) },
                 onSelectBitrate = { viewModel.cameraController.setBitrateMbps(it) },
                 onSelectProfile = { viewModel.cameraController.setColorProfile(it) },
-                onSelectFormat = { viewModel.cameraController.setRecordingFormat(it) }
+                onSelectFormat = { viewModel.cameraController.setRecordingFormat(it) },
+                onSelectCodec = { viewModel.cameraController.setVideoCodec(it) }
             )
         }
     }
@@ -295,16 +299,17 @@ fun CinemaScreen(
 fun CinemaSettingsDialog(
     state: CinemaState,
     onDismiss: () -> Unit,
-    onSelectResolution: (VideoResolution) -> Unit,
+    onSelectResolution: (CustomResolution) -> Unit,
     onSelectBitrate: (Int) -> Unit,
     onSelectProfile: (ColorProfile) -> Unit,
-    onSelectFormat: (RecordingFormat) -> Unit
+    onSelectFormat: (RecordingFormat) -> Unit,
+    onSelectCodec: (VideoCodec) -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "CINEMA RECORDING SETTINGS",
+                text = "CINEMA RECORDING & FORMAT SETTINGS",
                 color = Color(0xFFFFD700),
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Black,
@@ -312,46 +317,109 @@ fun CinemaSettingsDialog(
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                // Recording Format
-                Text("RECORDING ENGINE", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // 1. Recording Container / Pipeline
+                Text("RECORDING CONTAINER", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RecordingFormat.entries.forEach { fmt ->
                         FilterChip(
                             selected = state.recordingFormat == fmt,
                             onClick = { onSelectFormat(fmt) },
-                            label = { Text(fmt.label, fontSize = 11.sp) }
+                            label = { Text(fmt.label, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
                         )
                     }
                 }
 
-                // Resolution
-                Text("RESOLUTION", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    VideoResolution.entries.forEach { res ->
-                        FilterChip(
-                            selected = state.videoResolution == res,
+                // 2. Video Codec (HEVC 10-bit / HEVC 8-bit / H.264)
+                if (state.recordingFormat == RecordingFormat.VIDEO_PRO) {
+                    Text("VIDEO CODEC (COLOR DEPTH)", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        VideoCodec.entries.forEach { codec ->
+                            FilterChip(
+                                selected = state.videoCodec == codec,
+                                onClick = { onSelectCodec(codec) },
+                                label = { Text(codec.label, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+                }
+
+                // 3. Sensor Video Resolution (Blackmagic Custom List)
+                Text("RESOLUTION & ASPECT RATIO", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    state.supportedResolutions.forEach { res ->
+                        val isSelected = state.videoResolution.width == res.width && state.videoResolution.height == res.height
+                        Surface(
                             onClick = { onSelectResolution(res) },
-                            label = { Text(res.label, fontSize = 11.sp) }
-                        )
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) Color(0xFF2A2A10) else Color(0xFF222428),
+                            border = androidx.compose.foundation.BorderStroke(
+                                width = 1.dp,
+                                color = if (isSelected) Color(0xFFFFD700) else Color(0x22FFFFFF)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = res.label,
+                                        color = if (isSelected) Color(0xFFFFD700) else Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "${res.width} × ${res.height} • ${res.aspectLabel}",
+                                        color = Color(0x88FFFFFF),
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                                if (isSelected) {
+                                    Text("ACTIVE", color = Color(0xFFFFD700), fontSize = 10.sp, fontWeight = FontWeight.Black)
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Bitrate
-                Text("BITRATE (HEVC 10-BIT)", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(50, 100, 150, 200).forEach { mbps ->
-                        FilterChip(
-                            selected = state.targetBitrateMbps == mbps,
-                            onClick = { onSelectBitrate(mbps) },
-                            label = { Text("${mbps} Mbps", fontSize = 11.sp) }
-                        )
+                // 4. Bitrate (HEVC / H.264)
+                if (state.recordingFormat == RecordingFormat.VIDEO_PRO) {
+                    Text("TARGET BITRATE", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(50, 100, 150, 200).forEach { mbps ->
+                            FilterChip(
+                                selected = state.targetBitrateMbps == mbps,
+                                onClick = { onSelectBitrate(mbps) },
+                                label = { Text("${mbps} Mbps", fontSize = 11.sp) }
+                            )
+                        }
                     }
                 }
 
-                // Color Profile
-                Text("COLOR PROFILE & LOG", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 5. Color Profile
+                Text("COLOR PROFILE & TONE CURVE", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     ColorProfile.entries.forEach { prof ->
                         FilterChip(
                             selected = state.colorProfile == prof,
@@ -367,7 +435,7 @@ fun CinemaSettingsDialog(
                 Text("DONE", color = Color(0xFFFFD700), fontWeight = FontWeight.Bold)
             }
         },
-        containerColor = Color(0xFF181818),
+        containerColor = Color(0xFF141518),
         shape = RoundedCornerShape(12.dp)
     )
 }

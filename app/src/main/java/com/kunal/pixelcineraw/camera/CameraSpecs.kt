@@ -62,9 +62,15 @@ enum class ColorProfile(val label: String, val description: String) {
     HLG_10BIT("HLG 10-Bit", "Hybrid Log-Gamma 10-bit HDR (BT.2020)")
 }
 
-enum class RecordingFormat(val label: String) {
-    HEVC_10BIT("10-Bit HEVC (Pro)"),
-    RAW_DNG("RAW Bayer DNG (12-bit)")
+enum class VideoCodec(val label: String, val mimeType: String, val is10Bit: Boolean) {
+    HEVC_10BIT("HEVC (H.265) 10-Bit", "video/hevc", true),
+    HEVC_8BIT("HEVC (H.265) 8-Bit", "video/hevc", false),
+    AVC_8BIT("H.264 (AVC) 8-Bit", "video/avc", false)
+}
+
+enum class RecordingFormat(val label: String, val description: String) {
+    VIDEO_PRO("Compressed Cinema Video (MP4)", "Hardware accelerated video recording (HEVC/H.264) with AAC audio"),
+    RAW_DNG("RAW Bayer DNG (CinemaDNG)", "Uncompressed 10/12-bit sensor Bayer DNG frame sequences")
 }
 
 enum class FocusMode {

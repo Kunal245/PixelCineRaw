@@ -30,10 +30,18 @@ data class CinemaState(
 
     // Video Specs
     val targetFps: Int = 24, // 24, 30, 60
-    val videoResolution: VideoResolution = VideoResolution.UHD_4K,
+    val videoResolution: CustomResolution = CustomResolution.UHD_4K,
+    val supportedResolutions: List<CustomResolution> = listOf(
+        CustomResolution.UHD_4K,
+        CustomResolution.DCI_4K,
+        CustomResolution.QHD_1440P,
+        CustomResolution.FHD_1080P,
+        CustomResolution.OPEN_GATE_4_3
+    ),
+    val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
     val targetBitrateMbps: Int = 100, // 50 to 200 Mbps
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
-    val recordingFormat: RecordingFormat = RecordingFormat.HEVC_10BIT,
+    val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,
     val oisEnabed: Boolean = true,
     val eisEnabled: Boolean = false,
 
@@ -68,9 +76,23 @@ data class CinemaState(
     val isExternalMicConnected: Boolean = false
 )
 
-enum class VideoResolution(val label: String, val width: Int, val height: Int) {
-    UHD_4K("4K UHD", 3840, 2160),
-    FHD_1080P("1080p FHD", 1920, 1080)
+/**
+ * Blackmagic-style customizable resolutions with aspect ratio categorization
+ */
+data class CustomResolution(
+    val label: String,
+    val width: Int,
+    val height: Int,
+    val aspectLabel: String
+) {
+    companion object {
+        val UHD_4K = CustomResolution("4K UHD (3840×2160)", 3840, 2160, "16:9")
+        val DCI_4K = CustomResolution("4K DCI (4096×2160)", 4096, 2160, "1.90:1")
+        val QHD_1440P = CustomResolution("2.5K QHD (2560×1440)", 2560, 1440, "16:9")
+        val FHD_1080P = CustomResolution("1080p FHD (1920×1080)", 1920, 1080, "16:9")
+        val HD_720P = CustomResolution("720p HD (1280×720)", 1280, 720, "16:9")
+        val OPEN_GATE_4_3 = CustomResolution("4:3 Open Gate (3840×2880)", 3840, 2880, "4:3")
+    }
 }
 
 enum class FrameGuide(val label: String, val aspectRatio: Float?) {

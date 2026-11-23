@@ -57,12 +57,13 @@ fun Viewfinder(
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
 
     // Reapply matrix transform whenever sensor spec or optimal preview size changes
-    LaunchedEffect(state.currentSensorSpec) {
+    LaunchedEffect(state.currentSensorSpec, state.videoResolution) {
         textureViewRef?.let { tv ->
             val w = tv.width
             val h = tv.height
             if (w > 0 && h > 0) {
                 val previewSize = viewModel.cameraController.optimalPreviewSize
+                tv.surfaceTexture?.setDefaultBufferSize(previewSize.width, previewSize.height)
                 applyViewfinderTransform(
                     textureView = tv,
                     viewWidth = w,
@@ -281,37 +282,39 @@ fun applyViewfinderTransform(
         else -> 90
     }
 
-    // Official Android Camera2 formula for back-facing camera:
-    // (sensorOrientation + surfaceRotationDegrees) % 360
-    val relativeRotation = (sensorOrientation + surfaceRotationDegrees) % 360
+    // Relative rotation required to make the camera sensor buffer upright on screen
+    // Back sensor: (sensorOrientation - surfaceRotationDegrees + 360) % 360
+    val relativeRotation = (sensorOrientation - surfaceRotationDegrees + 360) % 360
 
     val matrix = Matrix()
-    val centerX = viewWidth / 2f
-    val centerY = viewHeight / 2f
+    val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
+    val bufferRect = android.graphics.RectF(0f, 0f, previewHeight.toFloat(), previewWidth.toFloat())
 
-    // 16:9 buffer aspect ratio
-    val bufferAspect = previewWidth.toFloat() / previewHeight.toFloat()
-    val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+    val centerX = viewRect.centerX()
+    val centerY = viewRect.centerY()
 
-    val scaleX: Float
-    val scaleY: Float
-
-    if (viewAspect > bufferAspect) {
-        // View is wider than 16:9 (e.g. 20:9 phone screen) -> Pillarbox (bars on left/right)
-        scaleX = (viewHeight * bufferAspect) / viewWidth
-        scaleY = 1.0f
-    } else {
-        // View is taller than 16:9 -> Letterbox (bars on top/bottom)
-        scaleX = 1.0f
-        scaleY = (viewWidth / bufferAspect) / viewHeight
-    }
-
-    // 1. Center and scale to preserve 16:9 without stretching
-    matrix.setScale(scaleX, scaleY, centerX, centerY)
-
-    // 2. Rotate around center to keep upright in both landscape orientations
-    if (relativeRotation != 0) {
+    if (relativeRotation == 90 || relativeRotation == 270) {
+        bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+        matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+        val scale = Math.min(
+            viewWidth.toFloat() / previewHeight.toFloat(),
+            viewHeight.toFloat() / previewWidth.toFloat()
+        )
+        matrix.postScale(scale, scale, centerX, centerY)
         matrix.postRotate(relativeRotation.toFloat(), centerX, centerY)
+    } else if (relativeRotation == 180) {
+        val scale = Math.min(
+            viewWidth.toFloat() / previewWidth.toFloat(),
+            viewHeight.toFloat() / previewHeight.toFloat()
+        )
+        matrix.postScale(scale, scale, centerX, centerY)
+        matrix.postRotate(180f, centerX, centerY)
+    } else {
+        val scale = Math.min(
+            viewWidth.toFloat() / previewWidth.toFloat(),
+            viewHeight.toFloat() / previewHeight.toFloat()
+        )
+        matrix.postScale(scale, scale, centerX, centerY)
     }
 
     textureView.setTransform(matrix)
