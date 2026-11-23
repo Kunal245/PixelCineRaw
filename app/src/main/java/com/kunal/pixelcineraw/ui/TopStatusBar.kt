@@ -1,5 +1,6 @@
 package com.kunal.pixelcineraw.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,9 +11,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -20,26 +20,31 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.kunal.pixelcineraw.camera.CinemaState
-import com.kunal.pixelcineraw.camera.ColorProfile
-import com.kunal.pixelcineraw.camera.ThermalStatus
+import com.kunal.pixelcineraw.camera.*
 
 /**
  * Modern dark-glassmorphism top status bar (inspired by Blackmagic Camera & Final Cut Camera).
  *
- * Consolidates Resolution, FPS, Color Profile, Codec, Bitrate, ISP, and System Telemetry
- * into frosted dark translucent pills with tabular monospaced numbers.
+ * Features separate interactive popover menus for:
+ * - FORMAT (Resolution, Frame Rate, Aspect Ratio)
+ * - CODEC (Compression Mode, Bitrate)
  */
 @Composable
 fun TopStatusBar(
     state: CinemaState,
-    onFormatClick: () -> Unit,
+    onResolutionSelected: (CustomResolution) -> Unit,
+    onFpsSelected: (Int) -> Unit,
     onColorProfileClick: () -> Unit,
-    onBitrateClick: () -> Unit,
+    onIntraModeSelected: (IntraFrameMode) -> Unit,
+    onBitrateSelected: (Int) -> Unit,
     onIspClick: () -> Unit,
     onAudioWavClick: () -> Unit,
+    onAdvancedSettingsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showFormatPopover by remember { mutableStateOf(false) }
+    var showCodecPopover by remember { mutableStateOf(false) }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -54,20 +59,51 @@ fun TopStatusBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // 1. Resolution & FPS Pill (e.g. "4K · 24 FPS")
+            // 1. Resolution & FPS Pill with Dedicated Format Popover Menu
             val resTitle = when {
-                state.videoResolution.width >= 3840 -> "4K"
-                state.videoResolution.width >= 2560 -> "2.5K"
+                state.videoResolution.width >= 3800 || state.videoResolution.height >= 2160 -> "4K"
+                state.videoResolution.width in 2400..3200 || state.videoResolution.height in 1400..1800 -> "2.5K"
                 state.videoResolution.width >= 1920 -> "1080p"
                 else -> "${state.videoResolution.width}p"
             }
-            FrostedPill(
-                label = "FORMAT",
-                value = "$resTitle · ${state.targetFps}p",
-                subText = state.videoResolution.aspectLabel,
-                highlight = true,
-                onClick = onFormatClick
-            )
+
+            Box {
+                FrostedPill(
+                    label = "FORMAT",
+                    value = "$resTitle · ${state.targetFps}p",
+                    subText = state.videoResolution.aspectLabel,
+                    highlight = true,
+                    onClick = {
+                        showCodecPopover = false
+                        showFormatPopover = true
+                    }
+                )
+
+                DropdownMenu(
+                    expanded = showFormatPopover,
+                    onDismissRequest = { showFormatPopover = false },
+                    shape = RoundedCornerShape(12.dp),
+                    containerColor = Color(0xF20A0C10),
+                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                    modifier = Modifier.width(310.dp)
+                ) {
+                    FormatPopoverContent(
+                        state = state,
+                        onResolutionSelected = { res ->
+                            onResolutionSelected(res)
+                            showFormatPopover = false
+                        },
+                        onFpsSelected = { fps ->
+                            onFpsSelected(fps)
+                            showFormatPopover = false
+                        },
+                        onOpenAdvanced = {
+                            showFormatPopover = false
+                            onAdvancedSettingsClick()
+                        }
+                    )
+                }
+            }
 
             // 2. Color Profile Pill (HLG10, HDR10+, PIXEL-LOG, REC.709 with color indicator dot)
             val profileDotColor = when (state.colorProfile) {
@@ -84,21 +120,47 @@ fun TopStatusBar(
                 onClick = onColorProfileClick
             )
 
-            // 3. Codec & Bitrate Pill (e.g. "10B ALL-I · 280M")
-            val codecLabel = if (state.intraFrameMode == com.kunal.pixelcineraw.camera.IntraFrameMode.ALL_INTRA) "ALL-I" else "GOP"
-            FrostedPill(
-                label = "CODEC",
-                value = "$codecLabel · ${state.targetBitrateMbps}M",
-                subText = if (state.videoCodec == com.kunal.pixelcineraw.camera.VideoCodec.HEVC_10BIT) "10-BIT" else "8-BIT",
-                highlight = false,
-                onClick = onBitrateClick
-            )
+            // 3. Codec & Bitrate Pill with Dedicated Codec Popover Menu
+            val codecLabel = if (state.intraFrameMode == IntraFrameMode.ALL_INTRA) "ALL-I" else "GOP"
+            Box {
+                FrostedPill(
+                    label = "CODEC",
+                    value = "$codecLabel · ${state.targetBitrateMbps}M",
+                    subText = if (state.videoCodec == VideoCodec.HEVC_10BIT) "10-BIT" else "8-BIT",
+                    highlight = false,
+                    onClick = {
+                        showFormatPopover = false
+                        showCodecPopover = true
+                    }
+                )
+
+                DropdownMenu(
+                    expanded = showCodecPopover,
+                    onDismissRequest = { showCodecPopover = false },
+                    shape = RoundedCornerShape(12.dp),
+                    containerColor = Color(0xF20A0C10),
+                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                    modifier = Modifier.width(310.dp)
+                ) {
+                    CodecPopoverContent(
+                        state = state,
+                        onIntraModeSelected = { mode ->
+                            onIntraModeSelected(mode)
+                            showCodecPopover = false
+                        },
+                        onBitrateSelected = { mbps ->
+                            onBitrateSelected(mbps)
+                            showCodecPopover = false
+                        }
+                    )
+                }
+            }
 
             // 4. Clean Cinema ISP Pill
             FrostedPill(
                 label = "ISP",
                 value = state.ispMode.name,
-                highlight = state.ispMode == com.kunal.pixelcineraw.camera.IspMode.CLEAN,
+                highlight = state.ispMode == IspMode.CLEAN,
                 onClick = onIspClick
             )
 
@@ -179,6 +241,292 @@ fun TopStatusBar(
 
             // Tensor G4 Real Live Thermal Badge
             ThermalIndicator(status = state.thermalStatus)
+        }
+    }
+}
+
+/**
+ * Format Popover Menu Content with dedicated segmented chips for Resolution, FPS, and Aspect Ratio.
+ */
+@Composable
+private fun FormatPopoverContent(
+    state: CinemaState,
+    onResolutionSelected: (CustomResolution) -> Unit,
+    onFpsSelected: (Int) -> Unit,
+    onOpenAdvanced: () -> Unit
+) {
+    val currentTier = when {
+        state.videoResolution.width >= 3800 || state.videoResolution.height >= 2160 -> "4K"
+        state.videoResolution.width in 2400..3200 || state.videoResolution.height in 1400..1800 -> "2.5K"
+        else -> "1080p"
+    }
+
+    val currentAspect = when {
+        Math.abs(state.videoResolution.aspectRatio - (4f / 3f)) < 0.05f -> "4:3 Open Gate"
+        Math.abs(state.videoResolution.aspectRatio - 2.39f) < 0.08f -> "2.39:1"
+        else -> "16:9"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "FORMAT & SENSOR",
+                color = Color(0xFFFFCC00),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = "${state.videoResolution.width}×${state.videoResolution.height}",
+                color = Color(0x88FFFFFF),
+                fontSize = 9.5.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 1. Resolution: 4K | 2.5K | 1080p
+        val resTiers = listOf("4K", "2.5K", "1080p")
+        val selectedResIdx = resTiers.indexOf(currentTier).coerceAtLeast(0)
+        PopoverSegmentedRow(
+            title = "RESOLUTION",
+            items = resTiers,
+            selectedIndex = selectedResIdx,
+            onItemSelected = { idx ->
+                val newTier = resTiers[idx]
+                val res = resolveCinemaResolution(newTier, currentAspect, state.supportedResolutions)
+                onResolutionSelected(res)
+            }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 2. Frame Rate (FPS): 24 fps | 30 fps | 60 fps
+        val fpsOptions = listOf(24, 30, 60)
+        val selectedFpsIdx = fpsOptions.indexOf(state.targetFps).let { if (it >= 0) it else 0 }
+        PopoverSegmentedRow(
+            title = "FRAME RATE (FPS)",
+            items = listOf("24 fps", "30 fps", "60 fps"),
+            selectedIndex = selectedFpsIdx,
+            onItemSelected = { idx ->
+                onFpsSelected(fpsOptions[idx])
+            }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 3. Aspect Ratio: 16:9 | 4:3 Open Gate | 2.39:1
+        val aspectOptions = listOf("16:9", "4:3 Open Gate", "2.39:1")
+        val selectedAspectIdx = aspectOptions.indexOf(currentAspect).let { if (it >= 0) it else 0 }
+        PopoverSegmentedRow(
+            title = "ASPECT RATIO",
+            items = aspectOptions,
+            selectedIndex = selectedAspectIdx,
+            onItemSelected = { idx ->
+                val newAspect = aspectOptions[idx]
+                val res = resolveCinemaResolution(currentTier, newAspect, state.supportedResolutions)
+                onResolutionSelected(res)
+            }
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Full Settings Dialog entry point
+        Text(
+            text = "ADVANCED SENSOR PRESETS...",
+            color = Color(0xFF00E5FF),
+            fontSize = 9.5.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier
+                .align(Alignment.End)
+                .clickable(onClick = onOpenAdvanced)
+                .padding(4.dp)
+        )
+    }
+}
+
+/**
+ * Codec Popover Menu Content with dedicated chips for Compression Mode and Bitrate.
+ */
+@Composable
+private fun CodecPopoverContent(
+    state: CinemaState,
+    onIntraModeSelected: (IntraFrameMode) -> Unit,
+    onBitrateSelected: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "CODEC & BITRATE",
+                color = Color(0xFFFFCC00),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = state.encoderChromaBadge,
+                color = Color(0x88FFFFFF),
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 1. Compression Mode: ALL-I (Max Quality) | GOP (Smaller Size)
+        val modeOptions = listOf(IntraFrameMode.ALL_INTRA, IntraFrameMode.GOP_LONG)
+        val selectedModeIdx = if (state.intraFrameMode == IntraFrameMode.ALL_INTRA) 0 else 1
+        PopoverSegmentedRow(
+            title = "COMPRESSION MODE",
+            items = listOf("ALL-I (Max Quality)", "GOP (Smaller Size)"),
+            selectedIndex = selectedModeIdx,
+            onItemSelected = { idx ->
+                onIntraModeSelected(modeOptions[idx])
+            }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 2. Bitrate Selector: 80M | 150M | 200M | 280M
+        val bitrateOptions = listOf(80, 150, 200, 280)
+        val selectedBitrateIdx = when {
+            state.targetBitrateMbps <= 90 -> 0
+            state.targetBitrateMbps in 91..175 -> 1
+            state.targetBitrateMbps in 176..240 -> 2
+            else -> 3
+        }
+        PopoverSegmentedRow(
+            title = "BITRATE (MBPS)",
+            items = listOf("80M", "150M", "200M", "280M"),
+            selectedIndex = selectedBitrateIdx,
+            onItemSelected = { idx ->
+                onBitrateSelected(bitrateOptions[idx])
+            }
+        )
+    }
+}
+
+/**
+ * Sleek tactile segmented row for popover options with gold highlight.
+ */
+@Composable
+private fun PopoverSegmentedRow(
+    title: String,
+    items: List<String>,
+    selectedIndex: Int,
+    onItemSelected: (Int) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = title,
+            color = Color(0x99FFFFFF),
+            fontSize = 8.5.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0x40000000), RoundedCornerShape(8.dp))
+                .border(0.5.dp, Color(0x26FFFFFF), RoundedCornerShape(8.dp))
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            items.forEachIndexed { index, item ->
+                val isSelected = index == selectedIndex
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(
+                            if (isSelected) Color(0xFFFFCC00) else Color.Transparent,
+                            RoundedCornerShape(6.dp)
+                        )
+                        .clickable { onItemSelected(index) }
+                        .padding(vertical = 6.dp, horizontal = 2.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = item,
+                        color = if (isSelected) Color(0xFF08090C) else Color(0xDDFFFFFF),
+                        fontSize = 10.sp,
+                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Resolves optimal CustomResolution based on selected tier and aspect ratio.
+ */
+fun resolveCinemaResolution(
+    tier: String,
+    aspect: String,
+    supported: List<CustomResolution>
+): CustomResolution {
+    val targetRatio = when (aspect) {
+        "4:3 Open Gate" -> 4f / 3f
+        "2.39:1" -> 2.39f
+        else -> 16f / 9f
+    }
+
+    // 1. Check supported resolutions for close aspect ratio match
+    val matchingAspect = supported.filter { Math.abs(it.aspectRatio - targetRatio) < 0.05f }
+    if (matchingAspect.isNotEmpty()) {
+        val match = when (tier) {
+            "4K" -> matchingAspect.filter { it.width >= 3800 || it.height >= 2160 }.maxByOrNull { it.width * it.height }
+                ?: matchingAspect.maxByOrNull { it.width * it.height }
+            "2.5K" -> matchingAspect.filter { it.width in 2400..3200 || it.height in 1400..1800 }.minByOrNull { Math.abs(it.width - 2560) }
+                ?: matchingAspect.minByOrNull { Math.abs(it.width - 2560) }
+            "1080p" -> matchingAspect.filter { it.width in 1800..2048 || it.height in 1000..1200 }.minByOrNull { Math.abs(it.width - 1920) }
+                ?: matchingAspect.minByOrNull { Math.abs(it.width - 1920) }
+            else -> matchingAspect.firstOrNull()
+        }
+        if (match != null) return match
+    }
+
+    // 2. Fallbacks for custom cinema ratios
+    return when (aspect) {
+        "2.39:1" -> when (tier) {
+            "4K" -> CustomResolution.fromSize(3840, 1608)
+            "2.5K" -> CustomResolution.fromSize(2560, 1072)
+            "1080p" -> CustomResolution.fromSize(1920, 804)
+            else -> CustomResolution.fromSize(3840, 1608)
+        }
+        "4:3 Open Gate" -> when (tier) {
+            "4K" -> supported.filter { Math.abs(it.aspectRatio - (4f / 3f)) < 0.05f }.maxByOrNull { it.width * it.height }
+                ?: CustomResolution.fromSize(4032, 3024)
+            "2.5K" -> CustomResolution.fromSize(2560, 1920)
+            "1080p" -> CustomResolution.fromSize(1920, 1440)
+            else -> CustomResolution.fromSize(4032, 3024)
+        }
+        else -> when (tier) {
+            "4K" -> CustomResolution.UHD_4K
+            "2.5K" -> CustomResolution.QHD_1440P
+            "1080p" -> CustomResolution.FHD_1080P
+            else -> CustomResolution.UHD_4K
         }
     }
 }

@@ -104,6 +104,14 @@ fun Viewfinder(
     }
 
     var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
+    val pinchAnimatable = remember { Animatable(ZoomMath.zoomToNormalized(state.zoomRatio, state.minZoomRatio, state.maxZoomRatio)) }
+
+    LaunchedEffect(state.zoomRatio) {
+        val norm = ZoomMath.zoomToNormalized(state.zoomRatio, state.minZoomRatio, state.maxZoomRatio)
+        if (kotlin.math.abs(pinchAnimatable.value - norm) > 0.005f) {
+            pinchAnimatable.snapTo(norm)
+        }
+    }
 
     Box(
         modifier = modifier
@@ -113,18 +121,34 @@ fun Viewfinder(
     ) {
         AndroidView(
             modifier = Modifier
-                .pointerInput(Unit) {
+                .pointerInput(state.minZoomRatio, state.maxZoomRatio) {
                     detectTransformGestures { _, _, zoom, _ ->
                         if (zoom != 1.0f) {
-                            val currentZoom = viewModel.state.value.zoomRatio
-                            val newZoom = currentZoom * zoom
-                            viewModel.cameraController.setZoomRatio(newZoom)
-                            viewModel.cameraController.setZoomSliderVisibility(true)
+                            // Logarithmic scale factor with 0.75x precision gear ratio
+                            val scaleFactor = 1.0f + (zoom - 1.0f) * 0.75f
+                            val currentNorm = pinchAnimatable.targetValue
+                            val currentZoom = ZoomMath.normalizedToZoom(currentNorm, state.minZoomRatio, state.maxZoomRatio)
+                            val nextZoom = (currentZoom * scaleFactor).coerceIn(state.minZoomRatio, state.maxZoomRatio)
+                            val nextNorm = ZoomMath.zoomToNormalized(nextZoom, state.minZoomRatio, state.maxZoomRatio)
 
+                            viewModel.cameraController.setZoomSliderVisibility(true)
                             pinchAutoHideJob?.cancel()
                             pinchAutoHideJob = coroutineScope.launch {
-                                delay(1500L)
+                                delay(1200L)
                                 viewModel.cameraController.setZoomSliderVisibility(false)
+                            }
+
+                            coroutineScope.launch {
+                                pinchAnimatable.animateTo(
+                                    targetValue = nextNorm,
+                                    animationSpec = androidx.compose.animation.core.spring(
+                                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
+                                        stiffness = 220f
+                                    )
+                                ) {
+                                    val z = ZoomMath.normalizedToZoom(value, state.minZoomRatio, state.maxZoomRatio)
+                                    viewModel.cameraController.setZoomRatio(z)
+                                }
                             }
                         }
                     }

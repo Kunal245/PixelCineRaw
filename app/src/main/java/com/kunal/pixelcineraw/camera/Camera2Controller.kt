@@ -1254,6 +1254,11 @@ class Camera2Controller(
         _state.update { it.copy(intraFrameMode = nextMode, encoderChromaBadge = badge) }
     }
 
+    fun setIntraFrameMode(mode: IntraFrameMode) {
+        val badge = updateChromaBadgeString(_state.value.encoderChromaBadge, mode)
+        _state.update { it.copy(intraFrameMode = mode, encoderChromaBadge = badge) }
+    }
+
     /**
      * User Action: 48kHz WAV PCM Sidecar Recording Toggle
      */

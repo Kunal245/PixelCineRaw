@@ -158,7 +158,8 @@ fun CinemaScreen(
         ) {
             TopStatusBar(
                 state = state,
-                onFormatClick = { showSettingsDialog = true },
+                onResolutionSelected = { res -> viewModel.cameraController.setVideoResolution(res) },
+                onFpsSelected = { fps -> viewModel.cameraController.setTargetFps(fps) },
                 onColorProfileClick = {
                     val nextProfile = when (state.colorProfile) {
                         ColorProfile.REC709 -> ColorProfile.FLAT_LOG
@@ -168,11 +169,11 @@ fun CinemaScreen(
                     }
                     viewModel.cameraController.setColorProfile(nextProfile)
                 },
-                onBitrateClick = {
-                    activeDial = if (activeDial == ActiveDial.BITRATE) ActiveDial.NONE else ActiveDial.BITRATE
-                },
+                onIntraModeSelected = { mode -> viewModel.cameraController.setIntraFrameMode(mode) },
+                onBitrateSelected = { mbps -> viewModel.cameraController.setBitrateMbps(mbps) },
                 onIspClick = { viewModel.cameraController.toggleIspMode() },
-                onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() }
+                onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() },
+                onAdvancedSettingsClick = { showSettingsDialog = true }
             )
         }
 
