@@ -60,7 +60,7 @@ data class CinemaState(
     val showZebras: Boolean = false,
     val zebraIreThreshold: Int = 95, // 70 to 100%
     val showLutPreview: Boolean = true,
-    val frameGuide: FrameGuide = FrameGuide.RATIO_2_39,
+    val frameGuide: FrameGuide = FrameGuide.NONE,
     val showGrid: Boolean = true,
 
     // System Telemetry
