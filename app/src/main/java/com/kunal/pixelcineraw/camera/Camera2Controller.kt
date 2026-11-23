@@ -166,9 +166,9 @@ class Camera2Controller(
                 val physicalIds = chars.physicalCameraIds
 
                 val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                val previewSizes = map?.getOutputSizes(android.view.SurfaceHolder::class.java)?.toList()
-                    ?: map?.getOutputSizes(SurfaceTexture::class.java)?.toList()
-                    ?: emptyList()
+                val stSizes = map?.getOutputSizes(SurfaceTexture::class.java)?.toList() ?: emptyList()
+                val shSizes = map?.getOutputSizes(android.view.SurfaceHolder::class.java)?.toList() ?: emptyList()
+                val previewSizes = if (stSizes.isNotEmpty()) stSizes else shSizes
                 val videoSizes = map?.getOutputSizes(android.media.MediaRecorder::class.java)?.toList() ?: emptyList()
 
                 // Check for 10-bit dynamic range profile (Android 13+)
@@ -185,6 +185,9 @@ class Camera2Controller(
                 val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) ?: Range(1.0f, 8.0f)
                 val isLogicalMultiCam = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) &&
                         zoomRange.lower <= 0.6f
+
+                val nrModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: intArrayOf()
+                val edgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: intArrayOf()
 
                 val spec = CameraSensorSpec(
                     cameraId = id,
@@ -205,7 +208,10 @@ class Camera2Controller(
                     supportsEis = supportsEis,
                     physicalCameraIds = physicalIds,
                     previewSizes = previewSizes,
+                    surfaceTextureSizes = stSizes,
                     videoSizes = videoSizes,
+                    supportedNoiseReductionModes = nrModes,
+                    supportedEdgeModes = edgeModes,
                     isUltraWide = isUltraWide,
                     isMainWide = isMain,
                     isLogicalMultiCamera = isLogicalMultiCam,
@@ -357,14 +363,18 @@ class Camera2Controller(
             val selectedRes = _state.value.videoResolution
             val targetRatio = selectedRes.width.toFloat() / selectedRes.height.toFloat()
 
-            // 1. Exact match with selected video resolution (e.g. 3840x2160, 1920x1080, 2000x1500)
-            val exactMatch = spec.previewSizes.firstOrNull {
+            // Strictly restrict to SurfaceTexture output sizes supported on hardware and <= 3840x2160
+            val validSizes = (if (spec.surfaceTextureSizes.isNotEmpty()) spec.surfaceTextureSizes else spec.previewSizes)
+                .filter { it.width <= 3840 && it.height <= 2160 }
+
+            // 1. Exact match with selected video resolution (e.g. 3840x2160, 1920x1080)
+            val exactMatch = validSizes.firstOrNull {
                 it.width == selectedRes.width && it.height == selectedRes.height
             }
             if (exactMatch != null) return exactMatch
 
             // 2. Stream with matching aspect ratio (tolerance 0.02)
-            val matchingAspect = spec.previewSizes
+            val matchingAspect = validSizes
                 .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio) < 0.02f }
                 .sortedByDescending { it.width * it.height }
             if (matchingAspect.isNotEmpty()) {
@@ -373,17 +383,17 @@ class Camera2Controller(
                     ?: matchingAspect.first()
             }
 
-            // 3. For custom aspect ratios (e.g. 2.39:1 Scope, 1.90:1 DCI, 1:1 Square, 3:2):
-            // Always pick native 4:3 full sensor stream (e.g. 4000x3000, 4032x3024)
-            val fourThreeStreams = spec.previewSizes
+            // 3. For custom aspect ratios (e.g. 2.39:1 Scope, 1.90:1 DCI, 1:1 Square, 4:3 Open Gate):
+            // Pick native 4:3 stream <= 3840x2160 (e.g. 2048x1536, 1920x1440, 1600x1200)
+            val fourThreeStreams = validSizes
                 .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - (4f / 3f)) < 0.05f }
                 .sortedByDescending { it.width * it.height }
             if (fourThreeStreams.isNotEmpty()) {
                 return fourThreeStreams.first()
             }
 
-            // 4. Fallback: largest available stream size
-            return spec.previewSizes.maxByOrNull { it.width * it.height } ?: Size(3840, 2160)
+            // 4. Fallback: largest valid SurfaceTexture stream size <= 3840x2160
+            return validSizes.maxByOrNull { it.width * it.height } ?: Size(1920, 1080)
         }
 
     val optimalPreviewSize: Size
@@ -723,15 +733,38 @@ class Camera2Controller(
 
         // 8. Clean Cinema ISP vs Stock Processing
         if (state.ispMode == IspMode.CLEAN) {
-            builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
-            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
-            builder.set(CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_HIGH_QUALITY)
-            builder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
-            builder.set(CaptureRequest.HOT_PIXEL_MODE, CaptureRequest.HOT_PIXEL_MODE_HIGH_QUALITY)
-            builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+            val edgeMode = when {
+                spec.supportedEdgeModes.contains(CaptureRequest.EDGE_MODE_OFF) -> CaptureRequest.EDGE_MODE_OFF
+                spec.supportedEdgeModes.contains(CaptureRequest.EDGE_MODE_FAST) -> CaptureRequest.EDGE_MODE_FAST
+                else -> CaptureRequest.EDGE_MODE_HIGH_QUALITY
+            }
+            builder.set(CaptureRequest.EDGE_MODE, edgeMode)
+
+            val nrMode = when {
+                spec.supportedNoiseReductionModes.contains(CaptureRequest.NOISE_REDUCTION_MODE_OFF) -> CaptureRequest.NOISE_REDUCTION_MODE_OFF
+                spec.supportedNoiseReductionModes.contains(CaptureRequest.NOISE_REDUCTION_MODE_FAST) -> CaptureRequest.NOISE_REDUCTION_MODE_FAST
+                else -> CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+            }
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, nrMode)
+
+            try {
+                builder.set(CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_HIGH_QUALITY)
+                builder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
+                builder.set(CaptureRequest.HOT_PIXEL_MODE, CaptureRequest.HOT_PIXEL_MODE_HIGH_QUALITY)
+                builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+            } catch (e: Exception) {
+                Log.w(TAG, "Optional ISP quality modes not supported on this sensor", e)
+            }
         } else {
-            builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
-            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+            val edgeMode = if (spec.supportedEdgeModes.contains(CaptureRequest.EDGE_MODE_HIGH_QUALITY)) {
+                CaptureRequest.EDGE_MODE_HIGH_QUALITY
+            } else CaptureRequest.EDGE_MODE_FAST
+            builder.set(CaptureRequest.EDGE_MODE, edgeMode)
+
+            val nrMode = if (spec.supportedNoiseReductionModes.contains(CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)) {
+                CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+            } else CaptureRequest.NOISE_REDUCTION_MODE_FAST
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, nrMode)
         }
     }
 

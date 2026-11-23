@@ -111,52 +111,37 @@ vec3 encodePq(vec3 rgb) {
     return vec3(pqOetf(rgb.r), pqOetf(rgb.g), pqOetf(rgb.b));
 }
 
-// 4-tap Catmull-Rom Bicubic Supersampling (samples 16 taps in 4 hardware bilinear lookups)
+// Safe 4-tap supersampling filter around vTextureCoord (avoids NaN, infinite loops, and negative weights)
 vec4 sampleBicubic(samplerExternalOES tex, vec2 uv, vec2 texelSize) {
     if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
         return texture2D(tex, uv);
     }
-    vec2 tc = uv / texelSize - 0.5;
-    vec2 f = fract(tc);
-    vec2 f2 = f * f;
-    vec2 f3 = f2 * f;
-
-    vec2 w0 = f2 - 0.5 * (f3 + f);
-    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
-    vec2 w3 = 0.5 * (f3 - f2);
-    vec2 w2 = 1.0 - w0 - w1 - w3;
-
-    vec2 s12 = w1 + w2;
-    vec2 tc12 = (tc - f + 1.0 + w2 / s12) * texelSize;
-    vec2 tc0 = (tc - f - 1.0) * texelSize;
-    vec2 tc3 = (tc - f + 2.0) * texelSize;
-
-    vec4 c0 = texture2D(tex, vec2(tc12.x, tc0.y));
-    vec4 c1 = texture2D(tex, vec2(tc0.x, tc12.y));
-    vec4 c2 = texture2D(tex, vec2(tc12.x, tc12.y));
-    vec4 c3 = texture2D(tex, vec2(tc3.x, tc12.y));
-
-    float wTotal = w0.y + w0.x + s12.x * s12.y + w3.x;
-    return (c0 * w0.y + c1 * w0.x + c2 * (s12.x * s12.y) + c3 * w3.x) / max(1e-4, wTotal);
+    vec2 halfTex = texelSize * 0.5;
+    vec4 s0 = texture2D(tex, uv - halfTex);
+    vec4 s1 = texture2D(tex, uv + vec2(halfTex.x, -halfTex.y));
+    vec4 s2 = texture2D(tex, uv + vec2(-halfTex.x, halfTex.y));
+    vec4 s3 = texture2D(tex, uv + halfTex);
+    return (s0 + s1 + s2 + s3) * 0.25;
 }
 
 void main() {
     vec4 src = sampleBicubic(sTexture, vTextureCoord, uTexelSize);
+
     if (uColorMode == 2) {
         // HLG / BT.2020 Mode
         vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
-        gl_FragColor = vec4(hlgRgb, src.a);
+        gl_FragColor = vec4(hlgRgb, 1.0);
     } else if (uColorMode == 3) {
         // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode)
         vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 pqRgb = clamp(encodePq(rec2020), 0.0, 1.0);
-        gl_FragColor = vec4(pqRgb, src.a);
+        gl_FragColor = vec4(pqRgb, 1.0);
     } else {
         // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1)
-        gl_FragColor = src;
+        gl_FragColor = vec4(src.rgb, 1.0);
     }
 }
 """
@@ -537,17 +522,27 @@ void main() {
                 GLES30.GL_TEXTURE_2D, fboTexId, 0
             )
 
-            val status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+            var status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+            if (status != GLES30.GL_FRAMEBUFFER_COMPLETE) {
+                Log.w(TAG, "GL_RGBA16F FBO incomplete (0x${Integer.toHexString(status)}), falling back to GL_RGBA8")
+                GLES30.glTexImage2D(
+                    GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8,
+                    width, height, 0,
+                    GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null
+                )
+                status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+            }
+
             if (status == GLES30.GL_FRAMEBUFFER_COMPLETE) {
                 fboWidth = width
                 fboHeight = height
-                Log.i(TAG, "GL_RGBA16F half-float FBO allocated: ${width}x${height}")
+                Log.i(TAG, "GL FBO allocated successfully: ${width}x${height} (GL_FRAMEBUFFER_COMPLETE)")
             } else {
-                Log.w(TAG, "GL_RGBA16F FBO incomplete: status=0x${Integer.toHexString(status)}")
+                Log.w(TAG, "GL FBO incomplete (0x${Integer.toHexString(status)}), bypassing intermediate FBO")
                 destroyFbo()
             }
         } catch (e: Throwable) {
-            Log.w(TAG, "Failed to create GL_RGBA16F FBO", e)
+            Log.w(TAG, "Failed to create GL FBO, bypassing intermediate FBO", e)
             destroyFbo()
         } finally {
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
@@ -780,7 +775,9 @@ void main() {
         GLES20.glUniformMatrix4fv(uAspectMatrixLoc, 1, false, aspectMatrix, 0)
         GLES20.glUniform1i(uColorModeLoc, currentColorMode)
         if (uTexelSizeLoc != -1) {
-            GLES20.glUniform2f(uTexelSizeLoc, 1.0f / streamWidth.toFloat(), 1.0f / streamHeight.toFloat())
+            val tw = maxOf(1, streamWidth).toFloat()
+            val th = maxOf(1, streamHeight).toFloat()
+            GLES20.glUniform2f(uTexelSizeLoc, 1.0f / tw, 1.0f / th)
         }
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
