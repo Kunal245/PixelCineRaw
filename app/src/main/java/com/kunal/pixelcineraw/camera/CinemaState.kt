@@ -42,7 +42,7 @@ data class CinemaState(
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
     val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,
     val oisEnabed: Boolean = true,
-    val eisEnabled: Boolean = false,
+    val eisEnabled: Boolean = true,
 
     // Recording Runtime
     val isRecording: Boolean = false,
