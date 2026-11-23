@@ -79,12 +79,6 @@ fun Viewfinder(
         }
     }
 
-    // Configure 10-bit HDR or 8-bit SDR surface mode on AutoFitSurfaceView
-    LaunchedEffect(state.colorProfile) {
-        val isHdr = state.colorProfile == ColorProfile.HLG_10BIT
-        surfaceViewRef?.setHdrMode(isHdr)
-    }
-
     var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
 
     Box(
@@ -133,12 +127,10 @@ fun Viewfinder(
                     val initialSize = viewModel.cameraController.optimalPreviewSize
                     setAspectRatio(initialSize.width, initialSize.height)
                     holder.setFixedSize(initialSize.width, initialSize.height)
-                    setHdrMode(state.colorProfile == ColorProfile.HLG_10BIT)
 
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             surfaceViewRef = this@apply
-                            applyCurrentDataSpace()
                             val surface = holder.surface
                             if (surface.isValid) {
                                 viewModel.attachPreviewSurface(surface)
@@ -148,7 +140,6 @@ fun Viewfinder(
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                             val pSize = viewModel.cameraController.optimalPreviewSize
                             setAspectRatio(pSize.width, pSize.height)
-                            applyCurrentDataSpace()
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -162,8 +153,6 @@ fun Viewfinder(
                 val currentSize = viewModel.cameraController.optimalPreviewSize
                 view.holder.setFixedSize(currentSize.width, currentSize.height)
                 view.setAspectRatio(currentSize.width, currentSize.height)
-                view.setHdrMode(state.colorProfile == ColorProfile.HLG_10BIT)
-                view.applyCurrentDataSpace()
             }
         )
 

@@ -73,9 +73,8 @@ class Camera2Controller(
     private var lastIso: Int? = null
     private var lastColorGains: RggbChannelVector? = null
 
-    // HLG Fallback & Stalled HAL Watchdog
+    // HLG Fallback
     private var hardwareHlgFallback = false
-    private var hlgWatchdogRunnable: Runnable? = null
 
     // State flow
     private val _state = MutableStateFlow(CinemaState())
@@ -343,40 +342,35 @@ class Camera2Controller(
 
     /**
      * Creates a deterministic Camera2 CaptureSession supporting:
-     * 1. Viewfinder preview Surface
-     * 2. Video recording Surface (when active)
-     * 3. RAW ImageReader Surface (when in RAW mode)
-     */
-    private fun armHlgWatchdog() {
-        disarmHlgWatchdog()
-        hlgWatchdogRunnable = Runnable {
-            if (_state.value.colorProfile == ColorProfile.HLG_10BIT && !hardwareHlgFallback) {
-                Log.w(TAG, "No HLG10 frame arrived within 500ms! Stalled HAL detected. Falling back to STANDARD preview + 64-point BT.2100 HLG TonemapCurve")
-                hardwareHlgFallback = true
-                startCaptureSession()
-            }
-        }
-        cameraHandler?.postDelayed(hlgWatchdogRunnable!!, 500L)
-    }
-
-    private fun disarmHlgWatchdog() {
-        hlgWatchdogRunnable?.let {
-            cameraHandler?.removeCallbacks(it)
-            hlgWatchdogRunnable = null
-        }
-    }
-
-    /**
-     * Creates a deterministic Camera2 CaptureSession supporting:
      * 1. Viewfinder preview Surface (10-bit HLG or SDR)
      * 2. Video recording Surface (when active)
-     * 3. Automatic onConfigureFailed / 500ms timeout fallback to 64-point BT.2100 HLG curve
+     * 3. Automatic onConfigureFailed fallback to 64-point BT.2100 HLG curve
      */
     fun startCaptureSession(onConfigured: () -> Unit = {}) {
         val device = cameraDevice ?: return
         val surface = previewSurface ?: return
         val handler = cameraHandler ?: return
         val spec = _state.value.currentSensorSpec ?: return
+
+        // If HLG10 HDR is selected and current camera does not support HLG10,
+        // automatically switch to physical camera "0" before configuring session
+        if (_state.value.colorProfile == ColorProfile.HLG_10BIT && !spec.isHlg10Supported) {
+            val hlgSpec = _probedSensors.find { it.cameraId == "0" && it.isHlg10Supported }
+                ?: _probedSensors.find { it.isHlg10Supported && it.isMainWide }
+                ?: _probedSensors.find { it.isHlg10Supported }
+            if (hlgSpec != null && hlgSpec.cameraId != cameraDevice?.id) {
+                Log.d(TAG, "Switching to physical camera ${hlgSpec.cameraId} for HLG10 HDR support")
+                _state.update {
+                    it.copy(
+                        currentSensorSpec = hlgSpec,
+                        selectedLens = LensSelection.WIDE_1X,
+                        zoomRatio = 1.0f
+                    )
+                }
+                openCamera(hlgSpec.cameraId)
+                return
+            }
+        }
 
         try {
             // Properly close existing capture session before reconfiguring
@@ -541,14 +535,6 @@ class Camera2Controller(
             applySensorParameters(builder, spec, stateVal)
 
             previewRequestBuilder = builder
-
-            val isHlg = stateVal.colorProfile == ColorProfile.HLG_10BIT
-            val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
-            if (useHardwareHlg) {
-                armHlgWatchdog()
-            } else {
-                disarmHlgWatchdog()
-            }
 
             session.setRepeatingRequest(builder.build(), captureCallback, handler)
         } catch (e: Exception) {
@@ -749,8 +735,6 @@ class Camera2Controller(
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
-            disarmHlgWatchdog()
-
             lastCaptureResult = result
             lastExposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
             lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY)
@@ -1117,6 +1101,30 @@ class Camera2Controller(
         _state.update { it.copy(colorProfile = profile) }
         val isPrevHlg = prevProfile == ColorProfile.HLG_10BIT
         val isNewHlg = profile == ColorProfile.HLG_10BIT
+
+        if (isNewHlg) {
+            val currentSpec = _state.value.currentSensorSpec
+            if (currentSpec?.isHlg10Supported != true) {
+                // Find physical camera "0" or another probed rear camera with HLG10 support
+                val hlgSpec = _probedSensors.find { it.cameraId == "0" && it.isHlg10Supported }
+                    ?: _probedSensors.find { it.isHlg10Supported && it.isMainWide }
+                    ?: _probedSensors.find { it.isHlg10Supported }
+
+                if (hlgSpec != null && hlgSpec.cameraId != cameraDevice?.id) {
+                    Log.d(TAG, "Switching to physical camera ${hlgSpec.cameraId} for HLG10 HDR support")
+                    _state.update {
+                        it.copy(
+                            currentSensorSpec = hlgSpec,
+                            selectedLens = LensSelection.WIDE_1X,
+                            zoomRatio = 1.0f
+                        )
+                    }
+                    openCamera(hlgSpec.cameraId)
+                    return
+                }
+            }
+        }
+
         if (isPrevHlg != isNewHlg) {
             // Reconfigure CameraCaptureSession to attach or detach DynamicRangeProfiles.HLG10
             startCaptureSession()
