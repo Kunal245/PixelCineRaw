@@ -263,8 +263,7 @@ fun Viewfinder(
 
 /**
  * Configures the matrix transformation for TextureView:
- * Since the TextureView is already sized to the exact aspect ratio of the preview,
- * this transform purely aligns the rotated sensor buffer to the view without stretching.
+ * Correctly aligns the camera sensor buffer with the TextureView layout.
  */
 fun applyViewfinderTransform(
     textureView: TextureView,
@@ -289,11 +288,6 @@ fun applyViewfinderTransform(
     if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
         bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
         matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-        val scale = Math.max(
-            viewHeight.toFloat() / previewHeight.toFloat(),
-            viewWidth.toFloat() / previewWidth.toFloat()
-        )
-        matrix.postScale(scale, scale, centerX, centerY)
         matrix.postRotate((90 * (rotation - 2)).toFloat(), centerX, centerY)
     } else if (Surface.ROTATION_180 == rotation) {
         matrix.postRotate(180f, centerX, centerY)

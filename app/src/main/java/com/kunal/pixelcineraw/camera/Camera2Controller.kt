@@ -300,17 +300,19 @@ class Camera2Controller(
             }
             if (exactMatch != null) return exactMatch
 
-            // 2. Try finding same aspect ratio matching preview size
+            // 2. Try finding same aspect ratio preview size <= 1080p for 60fps performance
             val matchingAspect = spec.previewSizes
                 .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio) < 0.05f }
-                .maxByOrNull { it.width * it.height }
-            if (matchingAspect != null) return matchingAspect
+                .sortedByDescending { it.width * it.height }
+            if (matchingAspect.isNotEmpty()) {
+                // Prefer FHD / 1080p if available to save GPU memory and match display, otherwise max
+                return matchingAspect.firstOrNull { it.width <= 1920 && it.height <= 1920 } ?: matchingAspect.first()
+            }
 
-            // 3. Fallback to 16:9 maximum supported preview size
-            return spec.previewSizes
-                .filter { it.width * 9 == it.height * 16 }
-                .maxByOrNull { it.width * it.height }
-                ?: (spec.previewSizes.firstOrNull() ?: Size(1920, 1080))
+            // 3. Fallback to closest aspect ratio
+            return spec.previewSizes.minByOrNull {
+                Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio)
+            } ?: Size(1920, 1080)
         }
 
     /**
