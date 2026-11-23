@@ -86,7 +86,9 @@ fun CinemaScreen(
 
         // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Live Movable Histogram)
         // Strictly positioned between TopStatusBar and BottomControlBar so nothing is clipped
-        val previewSize = viewModel.cameraController.optimalPreviewSize
+        val vRes = state.videoResolution
+        val resWidth = maxOf(vRes.width, vRes.height)
+        val resHeight = minOf(vRes.width, vRes.height)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -97,7 +99,7 @@ fun CinemaScreen(
                 state = state,
                 modifier = Modifier
                     .fillMaxHeight()
-                    .aspectRatio(previewSize.width.toFloat() / previewSize.height.toFloat(), matchHeightConstraintsFirst = true)
+                    .aspectRatio(resWidth.toFloat() / resHeight.toFloat(), matchHeightConstraintsFirst = true)
             )
         }
 

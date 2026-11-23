@@ -72,10 +72,12 @@ fun Viewfinder(
 
     // Dynamically update AutoFitSurfaceView aspect ratio whenever sensor spec or video resolution changes
     LaunchedEffect(state.currentSensorSpec, state.videoResolution) {
-        val previewSize = viewModel.cameraController.optimalPreviewSize
+        val vRes = state.videoResolution
+        val w = maxOf(vRes.width, vRes.height)
+        val h = minOf(vRes.width, vRes.height)
         surfaceViewRef?.let { sv ->
-            sv.holder.setFixedSize(previewSize.width, previewSize.height)
-            sv.setAspectRatio(previewSize.width, previewSize.height)
+            sv.setAspectRatio(w, h)
+            sv.holder.setFixedSize(w, h)
         }
     }
 
@@ -146,9 +148,11 @@ fun Viewfinder(
             factory = { ctx ->
                 AutoFitSurfaceView(ctx).apply {
                     surfaceViewRef = this
-                    val initialSize = viewModel.cameraController.optimalPreviewSize
-                    setAspectRatio(initialSize.width, initialSize.height)
-                    holder.setFixedSize(initialSize.width, initialSize.height)
+                    val vRes = state.videoResolution
+                    val w = maxOf(vRes.width, vRes.height)
+                    val h = minOf(vRes.width, vRes.height)
+                    setAspectRatio(w, h)
+                    holder.setFixedSize(w, h)
                     setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
 
                     holder.addCallback(object : SurfaceHolder.Callback {
@@ -163,8 +167,10 @@ fun Viewfinder(
                         }
 
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                            val pSize = viewModel.cameraController.optimalPreviewSize
-                            setAspectRatio(pSize.width, pSize.height)
+                            val curRes = viewModel.state.value.videoResolution
+                            val curW = maxOf(curRes.width, curRes.height)
+                            val curH = minOf(curRes.width, curRes.height)
+                            setAspectRatio(curW, curH)
                             setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
                             display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                         }
@@ -177,9 +183,11 @@ fun Viewfinder(
             },
             update = { view ->
                 surfaceViewRef = view
-                val currentSize = viewModel.cameraController.optimalPreviewSize
-                view.holder.setFixedSize(currentSize.width, currentSize.height)
-                view.setAspectRatio(currentSize.width, currentSize.height)
+                val vRes = state.videoResolution
+                val w = maxOf(vRes.width, vRes.height)
+                val h = minOf(vRes.width, vRes.height)
+                view.setAspectRatio(w, h)
+                view.holder.setFixedSize(w, h)
                 view.setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
                 view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
             }

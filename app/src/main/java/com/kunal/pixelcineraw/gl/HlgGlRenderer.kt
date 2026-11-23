@@ -47,13 +47,14 @@ class HlgGlRenderer {
 
         private const val VERTEX_SHADER_CODE = """
 uniform mat4 uSTMatrix;
+uniform mat4 uAspectMatrix;
 attribute vec4 aPosition;
 attribute vec4 aTextureCoord;
 varying vec2 vTextureCoord;
 
 void main() {
     gl_Position = aPosition;
-    vTextureCoord = (uSTMatrix * aTextureCoord).xy;
+    vTextureCoord = (uSTMatrix * uAspectMatrix * aTextureCoord).xy;
 }
 """
 
@@ -136,12 +137,21 @@ void main() {
     private var aPositionLoc: Int = -1
     private var aTextureCoordLoc: Int = -1
     private var uSTMatrixLoc: Int = -1
+    private var uAspectMatrixLoc: Int = -1
     private var uColorModeLoc: Int = -1
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
 
-    // Surface Dimensions
+    // Stream and Surface Dimensions (always landscape width >= height)
+    @Volatile
+    var streamWidth: Int = 3840
+        private set
+
+    @Volatile
+    var streamHeight: Int = 2160
+        private set
+
     private var previewWidth = 1920
     private var previewHeight = 1080
 
@@ -167,6 +177,8 @@ void main() {
     }
 
     private val previewMatrix = FloatArray(16)
+    private val previewAspectMatrix = FloatArray(16)
+    private val encoderAspectMatrix = FloatArray(16)
 
     private fun computePreviewMatrix(stMatrix: FloatArray, rotation: Int): FloatArray {
         System.arraycopy(stMatrix, 0, previewMatrix, 0, 16)
@@ -182,6 +194,45 @@ void main() {
             Matrix.translateM(previewMatrix, 0, -0.5f, -0.5f, 0.0f)
         }
         return previewMatrix
+    }
+
+    /**
+     * Computes the 1:1 square-pixel aspect ratio center-crop matrix (uAspectMatrix).
+     * Compares incomingBufferAspect against targetOutputAspect without stretching horizontally or squeezing vertically.
+     */
+    private fun computeAspectMatrix(
+        result: FloatArray,
+        streamW: Int,
+        streamH: Int,
+        outW: Int,
+        outH: Int
+    ): FloatArray {
+        Matrix.setIdentityM(result, 0)
+        if (streamW <= 0 || streamH <= 0 || outW <= 0 || outH <= 0) {
+            return result
+        }
+
+        val incomingBufferAspect = streamW.toFloat() / streamH.toFloat()
+        val targetOutputAspect = outW.toFloat() / outH.toFloat()
+
+        var scaleU = 1.0f
+        var scaleV = 1.0f
+
+        if (incomingBufferAspect > targetOutputAspect) {
+            // Incoming buffer is wider than target (e.g. 16:9 stream into 4:3 target):
+            // Scale U coordinates by targetOutputAspect / incomingBufferAspect around center 0.5f (crops left/right)
+            scaleU = targetOutputAspect / incomingBufferAspect
+        } else if (incomingBufferAspect < targetOutputAspect) {
+            // Incoming buffer is taller than target (e.g. 4:3 full sensor stream into 16:9 or 2.39:1 Scope target):
+            // Scale V coordinates by incomingBufferAspect / targetOutputAspect around center 0.5f (crops top/bottom)
+            scaleV = incomingBufferAspect / targetOutputAspect
+        }
+
+        Matrix.translateM(result, 0, 0.5f, 0.5f, 0.0f)
+        Matrix.scaleM(result, 0, scaleU, scaleV, 1.0f)
+        Matrix.translateM(result, 0, -0.5f, -0.5f, 0.0f)
+
+        return result
     }
 
     init {
@@ -223,8 +274,14 @@ void main() {
         streamHeight: Int,
         onReady: () -> Unit = {}
     ) {
-        previewWidth = viewWidth
-        previewHeight = viewHeight
+        val sW = maxOf(streamWidth, streamHeight)
+        val sH = minOf(streamWidth, streamHeight)
+        val vW = maxOf(viewWidth, viewHeight)
+        val vH = minOf(viewWidth, viewHeight)
+        this.streamWidth = sW
+        this.streamHeight = sH
+        this.previewWidth = vW
+        this.previewHeight = vH
         ensureGlThreadStarted()
         val handler = glHandler ?: return
 
@@ -233,9 +290,9 @@ void main() {
                 if (!isReady || (eglContext == EGL14.EGL_NO_CONTEXT)) {
                     initEGL()
                     initShaders()
-                    initOesTexture(streamWidth, streamHeight)
+                    initOesTexture(sW, sH)
                     isReady = true
-                    Log.i(TAG, "HlgGlRenderer initialized successfully (${streamWidth}x$streamHeight, standard 8-bit RGBA8888)")
+                    Log.i(TAG, "HlgGlRenderer initialized successfully (${sW}x$sH, standard 8-bit RGBA8888)")
                 }
 
                 if (previewSurface != null && previewSurface.isValid) {
@@ -245,7 +302,7 @@ void main() {
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
-                        Log.i(TAG, "Preview surface initialized (${viewWidth}x$viewHeight)")
+                        Log.i(TAG, "Preview surface initialized (${vW}x$vH, stream=${sW}x$sH)")
                     }
                 }
 
@@ -381,6 +438,7 @@ void main() {
         aPositionLoc = GLES20.glGetAttribLocation(programId, "aPosition")
         aTextureCoordLoc = GLES20.glGetAttribLocation(programId, "aTextureCoord")
         uSTMatrixLoc = GLES20.glGetUniformLocation(programId, "uSTMatrix")
+        uAspectMatrixLoc = GLES20.glGetUniformLocation(programId, "uAspectMatrix")
         uColorModeLoc = GLES20.glGetUniformLocation(programId, "uColorMode")
         checkGlError("initShaders")
     }
@@ -437,24 +495,30 @@ void main() {
         streamWidth: Int,
         streamHeight: Int
     ) {
+        val sW = maxOf(streamWidth, streamHeight)
+        val sH = minOf(streamWidth, streamHeight)
+        val vW = maxOf(viewWidth, viewHeight)
+        val vH = minOf(viewWidth, viewHeight)
+        this.streamWidth = sW
+        this.streamHeight = sH
+        this.previewWidth = vW
+        this.previewHeight = vH
+        surfaceTexture?.setDefaultBufferSize(sW, sH)
+
         val handler = glHandler ?: return
         handler.post {
             try {
                 if (currentSurface == surface && previewEglSurface != null && previewEglSurface != EGL14.EGL_NO_SURFACE) {
-                    previewWidth = viewWidth
-                    previewHeight = viewHeight
                     return@post
                 }
                 destroyPreviewSurface()
                 if (surface != null && surface.isValid && isReady) {
                     currentSurface = surface
-                    previewWidth = viewWidth
-                    previewHeight = viewHeight
                     val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
-                        Log.i(TAG, "Preview EGL surface set successfully (${viewWidth}x$viewHeight)")
+                        Log.i(TAG, "Preview EGL surface set successfully (${vW}x$vH, stream=${sW}x$sH)")
                     }
                 }
             } catch (e: Throwable) {
@@ -554,7 +618,8 @@ void main() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
             val pMatrix = computePreviewMatrix(texMatrix, displayRotation)
-            drawQuad(pMatrix)
+            val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h)
+            drawQuad(pMatrix, pAspect)
             checkGlError("drawQuad preview")
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
 
@@ -572,7 +637,8 @@ void main() {
                     GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                    drawQuad(pMatrix)
+                    val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH)
+                    drawQuad(pMatrix, eAspect)
                     checkGlError("drawQuad encoder")
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, timestampNs)
                     EGL14.eglSwapBuffers(eglDisplay, eSurf)
@@ -583,10 +649,11 @@ void main() {
         }
     }
 
-    private fun drawQuad(matrix: FloatArray) {
+    private fun drawQuad(matrix: FloatArray, aspectMatrix: FloatArray) {
         GLES20.glUseProgram(programId)
 
         GLES20.glUniformMatrix4fv(uSTMatrixLoc, 1, false, matrix, 0)
+        GLES20.glUniformMatrix4fv(uAspectMatrixLoc, 1, false, aspectMatrix, 0)
         GLES20.glUniform1i(uColorModeLoc, currentColorMode)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)

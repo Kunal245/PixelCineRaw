@@ -351,32 +351,43 @@ class Camera2Controller(
         rawImageReader = null
     }
 
-    val optimalPreviewSize: Size
+    val optimalStreamSize: Size
         get() {
-            val spec = _state.value.currentSensorSpec ?: return Size(1920, 1080)
+            val spec = _state.value.currentSensorSpec ?: return Size(3840, 2160)
             val selectedRes = _state.value.videoResolution
             val targetRatio = selectedRes.width.toFloat() / selectedRes.height.toFloat()
 
-            // 1. Try finding exact matching preview size
+            // 1. Exact match with selected video resolution (e.g. 3840x2160, 1920x1080, 2000x1500)
             val exactMatch = spec.previewSizes.firstOrNull {
                 it.width == selectedRes.width && it.height == selectedRes.height
             }
             if (exactMatch != null) return exactMatch
 
-            // 2. Try finding same aspect ratio preview size <= 1080p for 60fps performance
+            // 2. Stream with matching aspect ratio (tolerance 0.02)
             val matchingAspect = spec.previewSizes
-                .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio) < 0.05f }
+                .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio) < 0.02f }
                 .sortedByDescending { it.width * it.height }
             if (matchingAspect.isNotEmpty()) {
-                // Prefer FHD / 1080p if available to save GPU memory and match display, otherwise max
-                return matchingAspect.firstOrNull { it.width <= 1920 && it.height <= 1920 } ?: matchingAspect.first()
+                val targetPixels = selectedRes.width * selectedRes.height
+                return matchingAspect.firstOrNull { it.width * it.height >= targetPixels }
+                    ?: matchingAspect.first()
             }
 
-            // 3. Fallback to closest aspect ratio
-            return spec.previewSizes.minByOrNull {
-                Math.abs((it.width.toFloat() / it.height.toFloat()) - targetRatio)
-            } ?: Size(1920, 1080)
+            // 3. For custom aspect ratios (e.g. 2.39:1 Scope, 1.90:1 DCI, 1:1 Square, 3:2):
+            // Always pick native 4:3 full sensor stream (e.g. 4000x3000, 4032x3024)
+            val fourThreeStreams = spec.previewSizes
+                .filter { Math.abs((it.width.toFloat() / it.height.toFloat()) - (4f / 3f)) < 0.05f }
+                .sortedByDescending { it.width * it.height }
+            if (fourThreeStreams.isNotEmpty()) {
+                return fourThreeStreams.first()
+            }
+
+            // 4. Fallback: largest available stream size
+            return spec.previewSizes.maxByOrNull { it.width * it.height } ?: Size(3840, 2160)
         }
+
+    val optimalPreviewSize: Size
+        get() = optimalStreamSize
 
     /**
      * Creates a deterministic Camera2 CaptureSession supporting:
@@ -421,17 +432,17 @@ class Camera2Controller(
                 captureSession = null
             }
 
-            val pSize = optimalPreviewSize
+            val streamSize = optimalStreamSize
             val vRes = _state.value.videoResolution
             val renderer = hlgGlRenderer ?: HlgGlRenderer().also { hlgGlRenderer = it }
 
             if (!renderer.isReady) {
                 renderer.initialize(
                     previewSurface = surface,
-                    viewWidth = pSize.width,
-                    viewHeight = pSize.height,
-                    streamWidth = pSize.width,
-                    streamHeight = pSize.height
+                    viewWidth = vRes.width,
+                    viewHeight = vRes.height,
+                    streamWidth = streamSize.width,
+                    streamHeight = streamSize.height
                 ) {
                     cameraHandler?.post {
                         startCaptureSession(onConfigured)
@@ -441,7 +452,7 @@ class Camera2Controller(
             }
 
             renderer.setDisplayRotation(getDisplayRotation())
-            renderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
+            renderer.setPreviewSurface(surface, vRes.width, vRes.height, streamSize.width, streamSize.height)
             renderer.setColorMode(_state.value.colorProfile)
 
             if (videoRecordingSurface != null) {
