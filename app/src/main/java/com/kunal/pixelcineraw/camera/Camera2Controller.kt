@@ -711,14 +711,27 @@ class Camera2Controller(
             builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
         }
 
-        // 7. Tone Curves: HLG BT.2100 vs Flat Log vs SDR
-        val isHlgProfile = state.colorProfile == ColorProfile.HLG_10BIT
-        if (isHlgProfile) {
+        // 7. Tone Curves: HLG BT.2100 / HDR10+ PQ vs Flat Log vs SDR
+        val isHdrProfile = state.colorProfile == ColorProfile.HLG_10BIT || state.colorProfile == ColorProfile.HDR10_PLUS
+        if (isHdrProfile) {
             applyHlgToneCurve(builder)
         } else if (state.colorProfile == ColorProfile.FLAT_LOG) {
             applyLogToneCurve(builder)
         } else {
             builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
+        }
+
+        // 8. Clean Cinema ISP vs Stock Processing
+        if (state.ispMode == IspMode.CLEAN) {
+            builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
+            builder.set(CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_HIGH_QUALITY)
+            builder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
+            builder.set(CaptureRequest.HOT_PIXEL_MODE, CaptureRequest.HOT_PIXEL_MODE_HIGH_QUALITY)
+            builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+        } else {
+            builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
         }
     }
 
@@ -1139,8 +1152,11 @@ class Camera2Controller(
      * with ZERO CameraCaptureSession restart and ZERO SurfaceView recreation!
      */
     fun setColorProfile(profile: ColorProfile) {
-        val isNewHlg = profile == ColorProfile.HLG_10BIT
-        val status = if (isNewHlg) HdrPipelineStatus.CURVE_HLG10 else HdrPipelineStatus.NONE
+        val status = when (profile) {
+            ColorProfile.HLG_10BIT -> HdrPipelineStatus.CURVE_HLG10
+            ColorProfile.HDR10_PLUS -> HdrPipelineStatus.HDR10_PLUS
+            else -> HdrPipelineStatus.NONE
+        }
 
         _state.update { it.copy(colorProfile = profile, hdrPipelineStatus = status) }
 
@@ -1165,6 +1181,40 @@ class Camera2Controller(
     }
 
     /**
+     * User Action: Cinema ISP Mode (Clean vs Stock)
+     */
+    fun toggleIspMode() {
+        val nextMode = if (_state.value.ispMode == IspMode.CLEAN) IspMode.STOCK else IspMode.CLEAN
+        _state.update { it.copy(ispMode = nextMode) }
+        createAndSetRepeatingRequest()
+    }
+
+    /**
+     * User Action: Intra-Frame Encoding Mode (ALL-I vs Long GOP)
+     */
+    fun toggleIntraFrameMode() {
+        val nextMode = if (_state.value.intraFrameMode == IntraFrameMode.ALL_INTRA) IntraFrameMode.GOP_LONG else IntraFrameMode.ALL_INTRA
+        val badge = updateChromaBadgeString(_state.value.encoderChromaBadge, nextMode)
+        _state.update { it.copy(intraFrameMode = nextMode, encoderChromaBadge = badge) }
+    }
+
+    /**
+     * User Action: 48kHz WAV PCM Sidecar Recording Toggle
+     */
+    fun toggleRecordWavSidecar() {
+        _state.update { it.copy(recordWavSidecar = !it.recordWavSidecar) }
+    }
+
+    fun setEncoderChromaBadge(badge: String) {
+        _state.update { it.copy(encoderChromaBadge = badge) }
+    }
+
+    private fun updateChromaBadgeString(current: String, mode: IntraFrameMode): String {
+        val base = if (current.contains("4:2:2")) "10B 4:2:2" else "10B 4:2:0"
+        return if (mode == IntraFrameMode.ALL_INTRA) "$base ALL-I" else "$base GOP"
+    }
+
+    /**
      * User Action: Video Resolution & Bitrate
      */
     fun setVideoResolution(res: CustomResolution) {
@@ -1177,7 +1227,7 @@ class Camera2Controller(
     }
 
     fun setBitrateMbps(mbps: Int) {
-        _state.update { it.copy(targetBitrateMbps = mbps.coerceIn(20, 250)) }
+        _state.update { it.copy(targetBitrateMbps = mbps.coerceIn(20, 280)) }
     }
 
     fun setRecordingFormat(format: RecordingFormat) {

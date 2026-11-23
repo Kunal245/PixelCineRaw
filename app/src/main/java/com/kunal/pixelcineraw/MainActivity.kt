@@ -49,10 +49,10 @@ class MainActivity : ComponentActivity() {
             PixelCineRawTheme {
                 val state by cinemaViewModel.state.collectAsStateWithLifecycle()
 
-                // True HDR Display Mode: Boost Pixel 9a OLED peak brightness when HLG mode is active
+                // True HDR Display Mode: Boost Pixel 9a OLED peak brightness when HLG or HDR10+ mode is active
                 LaunchedEffect(state.colorProfile) {
-                    val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
-                    window.colorMode = if (isHlg) {
+                    val isHdr = state.colorProfile == ColorProfile.HLG_10BIT || state.colorProfile == ColorProfile.HDR10_PLUS
+                    window.colorMode = if (isHdr) {
                         ActivityInfo.COLOR_MODE_HDR
                     } else {
                         ActivityInfo.COLOR_MODE_DEFAULT

@@ -38,6 +38,9 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         audioEngine.start()
         telemetryMonitor.start()
 
+        val initialBadge = HevcLogRecorder.getChromaBadge(cameraController.state.value.intraFrameMode)
+        cameraController.setEncoderChromaBadge(initialBadge)
+
         hevcRecorder.onMetricsUpdate = { secs, bytes, dropped ->
             cameraController.updateRecordingMetrics(secs, bytes, dropped)
         }
@@ -77,7 +80,9 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                         fps = state.targetFps,
                         bitrateMbps = state.targetBitrateMbps,
                         colorProfile = state.colorProfile,
-                        codec = state.videoCodec
+                        codec = state.videoCodec,
+                        intraFrameMode = state.intraFrameMode,
+                        recordWavSidecar = state.recordWavSidecar
                     )
 
                     val fileName = hevcRecorder.start()

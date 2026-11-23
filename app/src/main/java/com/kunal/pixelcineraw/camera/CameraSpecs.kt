@@ -62,7 +62,18 @@ enum class ShutterUnit {
 enum class ColorProfile(val label: String, val description: String) {
     REC709("REC.709", "Standard Dynamic Range (8-bit SDR)"),
     FLAT_LOG("PIXEL-LOG", "Flat Log Contrast Curve for Grading"),
-    HLG_10BIT("HLG10 HDR", "Hybrid Log-Gamma 10-bit HDR (BT.2020)")
+    HLG_10BIT("HLG10 HDR", "Hybrid Log-Gamma 10-bit HDR (BT.2020)"),
+    HDR10_PLUS("HDR10+ PQ", "SMPTE ST.2084 PQ Dynamic HDR (BT.2020)")
+}
+
+enum class IspMode(val label: String, val description: String) {
+    CLEAN("CLEAN", "Natural cinema texture: minimal noise reduction, zero artificial sharpening"),
+    STOCK("STOCK", "Standard OEM processing with sharpening and heavy noise reduction")
+}
+
+enum class IntraFrameMode(val label: String) {
+    ALL_INTRA("ALL-I"),
+    GOP_LONG("GOP")
 }
 
 enum class VideoCodec(val label: String, val mimeType: String, val is10Bit: Boolean) {

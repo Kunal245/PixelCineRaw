@@ -63,7 +63,8 @@ void main() {
 precision highp float;
 
 uniform samplerExternalOES sTexture;
-uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020
+uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020, 3 = HDR10+ PQ
+uniform vec2 uTexelSize;
 varying vec2 vTextureCoord;
 
 // Rec.709 to Rec.2020 3x3 color conversion matrix (column-major in GLSL)
@@ -91,19 +92,70 @@ vec3 encodeHlg(vec3 rgb) {
     return vec3(hlgOetf(rgb.r), hlgOetf(rgb.g), hlgOetf(rgb.b));
 }
 
+// SMPTE ST 2084 PQ (Perceptual Quantizer) transfer function constants
+const float m1 = 0.1593017578125;
+const float m2 = 78.84375;
+const float c1 = 0.8359375;
+const float c2 = 18.8515625;
+const float c3 = 18.6875;
+
+float pqOetf(float E) {
+    float L = clamp(E * 0.1, 0.0, 1.0);
+    float Lm1 = pow(L, m1);
+    float num = c1 + c2 * Lm1;
+    float den = 1.0 + c3 * Lm1;
+    return pow(num / den, m2);
+}
+
+vec3 encodePq(vec3 rgb) {
+    return vec3(pqOetf(rgb.r), pqOetf(rgb.g), pqOetf(rgb.b));
+}
+
+// 4-tap Catmull-Rom Bicubic Supersampling (samples 16 taps in 4 hardware bilinear lookups)
+vec4 sampleBicubic(samplerExternalOES tex, vec2 uv, vec2 texelSize) {
+    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
+        return texture2D(tex, uv);
+    }
+    vec2 tc = uv / texelSize - 0.5;
+    vec2 f = fract(tc);
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+
+    vec2 w0 = f2 - 0.5 * (f3 + f);
+    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    vec2 w3 = 0.5 * (f3 - f2);
+    vec2 w2 = 1.0 - w0 - w1 - w3;
+
+    vec2 s12 = w1 + w2;
+    vec2 tc12 = (tc - f + 1.0 + w2 / s12) * texelSize;
+    vec2 tc0 = (tc - f - 1.0) * texelSize;
+    vec2 tc3 = (tc - f + 2.0) * texelSize;
+
+    vec4 c0 = texture2D(tex, vec2(tc12.x, tc0.y));
+    vec4 c1 = texture2D(tex, vec2(tc0.x, tc12.y));
+    vec4 c2 = texture2D(tex, vec2(tc12.x, tc12.y));
+    vec4 c3 = texture2D(tex, vec2(tc3.x, tc12.y));
+
+    float wTotal = w0.y + w0.x + s12.x * s12.y + w3.x;
+    return (c0 * w0.y + c1 * w0.x + c2 * (s12.x * s12.y) + c3 * w3.x) / max(1e-4, wTotal);
+}
+
 void main() {
-    vec4 src = texture2D(sTexture, vTextureCoord);
+    vec4 src = sampleBicubic(sTexture, vTextureCoord, uTexelSize);
     if (uColorMode == 2) {
-        // HLG / BT.2020 Mode (mcpro24fps architecture):
-        // 1. Linearize Rec.709 input (gamma 2.2 approximation) to scene light
+        // HLG / BT.2020 Mode
         vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
-        // 2. Expand color primaries to Rec.2020 gamut
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
-        // 3. Apply smooth ITU-R BT.2100 HLG OETF to expand highlight & shadow dynamic range
         vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
-        gl_FragColor = vec4(hlgRgb, 1.0);
+        gl_FragColor = vec4(hlgRgb, src.a);
+    } else if (uColorMode == 3) {
+        // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode)
+        vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
+        vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
+        vec3 pqRgb = clamp(encodePq(rec2020), 0.0, 1.0);
+        gl_FragColor = vec4(pqRgb, src.a);
     } else {
-        // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1): direct passthrough
+        // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1)
         gl_FragColor = src;
     }
 }
@@ -138,10 +190,17 @@ void main() {
     private var aTextureCoordLoc: Int = -1
     private var uSTMatrixLoc: Int = -1
     private var uAspectMatrixLoc: Int = -1
+    private var uTexelSizeLoc: Int = -1
     private var uColorModeLoc: Int = -1
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
+
+    // Intermediate 16-Bit Half-Float Framebuffer (GL_RGBA16F)
+    private var fboId: Int = 0
+    private var fboTexId: Int = 0
+    private var fboWidth: Int = 0
+    private var fboHeight: Int = 0
 
     // Stream and Surface Dimensions (always landscape width >= height)
     @Volatile
@@ -291,6 +350,7 @@ void main() {
                     initEGL()
                     initShaders()
                     initOesTexture(sW, sH)
+                    initFbo(sW, sH)
                     isReady = true
                     Log.i(TAG, "HlgGlRenderer initialized successfully (${sW}x$sH, standard 8-bit RGBA8888)")
                 }
@@ -325,6 +385,7 @@ void main() {
             ColorProfile.REC709 -> 0
             ColorProfile.FLAT_LOG -> 1
             ColorProfile.HLG_10BIT -> 2
+            ColorProfile.HDR10_PLUS -> 3
         }
         currentColorMode = mode
         val handler = glHandler ?: return
@@ -440,7 +501,70 @@ void main() {
         uSTMatrixLoc = GLES20.glGetUniformLocation(programId, "uSTMatrix")
         uAspectMatrixLoc = GLES20.glGetUniformLocation(programId, "uAspectMatrix")
         uColorModeLoc = GLES20.glGetUniformLocation(programId, "uColorMode")
+        uTexelSizeLoc = GLES20.glGetUniformLocation(programId, "uTexelSize")
         checkGlError("initShaders")
+    }
+
+    /**
+     * Initializes intermediate 16-Bit Half-Float Framebuffer (GL_RGBA16F) for cinema supersampling.
+     */
+    private fun initFbo(width: Int, height: Int) {
+        if (fboId != 0 && fboWidth == width && fboHeight == height) return
+        destroyFbo()
+        try {
+            val fbos = IntArray(1)
+            GLES30.glGenFramebuffers(1, fbos, 0)
+            fboId = fbos[0]
+
+            val texs = IntArray(1)
+            GLES30.glGenTextures(1, texs, 0)
+            fboTexId = texs[0]
+
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fboTexId)
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F,
+                width, height, 0,
+                GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT, null
+            )
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
+            GLES30.glFramebufferTexture2D(
+                GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
+                GLES30.GL_TEXTURE_2D, fboTexId, 0
+            )
+
+            val status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+            if (status == GLES30.GL_FRAMEBUFFER_COMPLETE) {
+                fboWidth = width
+                fboHeight = height
+                Log.i(TAG, "GL_RGBA16F half-float FBO allocated: ${width}x${height}")
+            } else {
+                Log.w(TAG, "GL_RGBA16F FBO incomplete: status=0x${Integer.toHexString(status)}")
+                destroyFbo()
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to create GL_RGBA16F FBO", e)
+            destroyFbo()
+        } finally {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        }
+    }
+
+    private fun destroyFbo() {
+        if (fboId != 0) {
+            GLES30.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
+            fboId = 0
+        }
+        if (fboTexId != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(fboTexId), 0)
+            fboTexId = 0
+        }
+        fboWidth = 0
+        fboHeight = 0
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
@@ -655,6 +779,9 @@ void main() {
         GLES20.glUniformMatrix4fv(uSTMatrixLoc, 1, false, matrix, 0)
         GLES20.glUniformMatrix4fv(uAspectMatrixLoc, 1, false, aspectMatrix, 0)
         GLES20.glUniform1i(uColorModeLoc, currentColorMode)
+        if (uTexelSizeLoc != -1) {
+            GLES20.glUniform2f(uTexelSizeLoc, 1.0f / streamWidth.toFloat(), 1.0f / streamHeight.toFloat())
+        }
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
@@ -739,6 +866,8 @@ void main() {
                     GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
                     oesTextureId = 0
                 }
+
+                destroyFbo()
 
                 surfaceTexture?.release()
                 surfaceTexture = null

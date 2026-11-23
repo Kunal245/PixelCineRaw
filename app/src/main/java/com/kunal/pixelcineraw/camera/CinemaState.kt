@@ -47,7 +47,11 @@ data class CinemaState(
         CustomResolution.FHD_1080P
     ),
     val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
-    val targetBitrateMbps: Int = 100, // 50 to 240 Mbps
+    val targetBitrateMbps: Int = 280, // Default 280 Mbps peak VBR
+    val ispMode: IspMode = IspMode.CLEAN,
+    val intraFrameMode: IntraFrameMode = IntraFrameMode.ALL_INTRA,
+    val encoderChromaBadge: String = "10B 4:2:0 ALL-I",
+    val recordWavSidecar: Boolean = true,
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
     val hdrPipelineStatus: HdrPipelineStatus = HdrPipelineStatus.NONE,
     val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,
@@ -183,5 +187,6 @@ data class HistogramData(
 enum class HdrPipelineStatus(val label: String) {
     NONE(""),
     HW_HLG10("HW-HLG10"),
-    CURVE_HLG10("10B-CURVE-HLG")
+    CURVE_HLG10("10B-CURVE-HLG"),
+    HDR10_PLUS("HDR10+ PQ")
 }

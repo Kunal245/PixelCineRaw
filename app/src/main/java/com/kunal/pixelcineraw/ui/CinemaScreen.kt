@@ -122,12 +122,22 @@ fun CinemaScreen(
                 val nextProfile = when (state.colorProfile) {
                     ColorProfile.REC709 -> ColorProfile.FLAT_LOG
                     ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
-                    ColorProfile.HLG_10BIT -> ColorProfile.REC709
+                    ColorProfile.HLG_10BIT -> ColorProfile.HDR10_PLUS
+                    ColorProfile.HDR10_PLUS -> ColorProfile.REC709
                 }
                 viewModel.cameraController.setColorProfile(nextProfile)
             },
             onFormatClick = {
                 showSettingsDialog = true
+            },
+            onIspClick = {
+                viewModel.cameraController.toggleIspMode()
+            },
+            onChromaClick = {
+                viewModel.cameraController.toggleIntraFrameMode()
+            },
+            onWavClick = {
+                viewModel.cameraController.toggleRecordWavSidecar()
             },
             modifier = Modifier.align(Alignment.TopCenter)
         )
@@ -454,7 +464,7 @@ fun CinemaSettingsDialog(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        listOf(50, 100, 150, 200, 240).forEach { mbps ->
+                        listOf(50, 100, 150, 200, 240, 280).forEach { mbps ->
                             FilterChip(
                                 selected = state.targetBitrateMbps == mbps,
                                 onClick = { onSelectBitrate(mbps) },

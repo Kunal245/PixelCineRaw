@@ -66,13 +66,13 @@ class AutoFitSurfaceView @JvmOverloads constructor(
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (isHdrEnabled) {
-            post { applyHdrBoostInternal(true) }
+            post { applyHdrBoostInternal(activeProfile) }
         }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         if (isHdrEnabled) {
-            post { applyHdrBoostInternal(true) }
+            post { applyHdrBoostInternal(activeProfile) }
         }
     }
 
@@ -85,27 +85,43 @@ class AutoFitSurfaceView @JvmOverloads constructor(
      * On Pixel 9a (Android 14+), SurfaceFlinger utilizes extended range brightness to boost
      * OLED specular highlights up to 4.0x peak Actua luminance.
      */
+    private var activeProfile: com.kunal.pixelcineraw.camera.ColorProfile = com.kunal.pixelcineraw.camera.ColorProfile.REC709
+
     fun setHdrBoost(enabled: Boolean) {
-        isHdrEnabled = enabled
-        applyHdrBoostInternal(enabled)
-        post { applyHdrBoostInternal(enabled) }
+        val profile = if (enabled) com.kunal.pixelcineraw.camera.ColorProfile.HLG_10BIT else com.kunal.pixelcineraw.camera.ColorProfile.REC709
+        setHdrMode(profile)
     }
 
-    private fun applyHdrBoostInternal(enabled: Boolean) {
+    fun setHdrMode(profile: com.kunal.pixelcineraw.camera.ColorProfile) {
+        activeProfile = profile
+        isHdrEnabled = profile == com.kunal.pixelcineraw.camera.ColorProfile.HLG_10BIT || profile == com.kunal.pixelcineraw.camera.ColorProfile.HDR10_PLUS
+        applyHdrBoostInternal(profile)
+        post { applyHdrBoostInternal(profile) }
+    }
+
+    private fun applyHdrBoostInternal(profile: com.kunal.pixelcineraw.camera.ColorProfile) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             try {
                 val sc = surfaceControl
                 if (sc != null && sc.isValid) {
                     val transaction = SurfaceControl.Transaction()
-                    if (enabled) {
-                        transaction.setDataSpace(sc, DataSpace.DATASPACE_BT2020_HLG)
-                        transaction.setExtendedRangeBrightness(sc, 4.0f, 4.0f)
-                    } else {
-                        transaction.setDataSpace(sc, DataSpace.DATASPACE_SRGB)
-                        transaction.setExtendedRangeBrightness(sc, 1.0f, 1.0f)
+                    when (profile) {
+                        com.kunal.pixelcineraw.camera.ColorProfile.HLG_10BIT -> {
+                            transaction.setDataSpace(sc, DataSpace.DATASPACE_BT2020_HLG)
+                            transaction.setExtendedRangeBrightness(sc, 4.0f, 4.0f)
+                            Log.i(TAG, "Applied HDR boost on SurfaceControl: HLG10, dataspace=BT2020_HLG")
+                        }
+                        com.kunal.pixelcineraw.camera.ColorProfile.HDR10_PLUS -> {
+                            transaction.setDataSpace(sc, DataSpace.DATASPACE_BT2020_PQ)
+                            transaction.setExtendedRangeBrightness(sc, 4.0f, 4.0f)
+                            Log.i(TAG, "Applied HDR boost on SurfaceControl: HDR10+, dataspace=BT2020_PQ")
+                        }
+                        else -> {
+                            transaction.setDataSpace(sc, DataSpace.DATASPACE_SRGB)
+                            transaction.setExtendedRangeBrightness(sc, 1.0f, 1.0f)
+                        }
                     }
                     transaction.apply()
-                    Log.i(TAG, "Applied HDR boost on SurfaceControl: enabled=$enabled, dataspace=${if (enabled) "BT2020_HLG" else "SRGB"}")
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "Failed to set HDR boost on SurfaceControl", e)

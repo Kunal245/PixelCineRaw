@@ -81,9 +81,9 @@ fun Viewfinder(
         }
     }
 
-    // Apply native HDR extended range brightness and BT.2020 HLG data space on Pixel 9a OLED
+    // Apply native HDR extended range brightness and BT.2020 HLG/PQ data space on Pixel 9a OLED
     LaunchedEffect(state.colorProfile) {
-        surfaceViewRef?.setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+        surfaceViewRef?.setHdrMode(state.colorProfile)
     }
 
     val context = LocalContext.current
@@ -153,12 +153,12 @@ fun Viewfinder(
                     val h = minOf(vRes.width, vRes.height)
                     setAspectRatio(w, h)
                     holder.setFixedSize(w, h)
-                    setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                    setHdrMode(state.colorProfile)
 
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             surfaceViewRef = this@apply
-                            setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                            setHdrMode(state.colorProfile)
                             display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                             val surface = holder.surface
                             if (surface.isValid) {
@@ -171,7 +171,7 @@ fun Viewfinder(
                             val curW = maxOf(curRes.width, curRes.height)
                             val curH = minOf(curRes.width, curRes.height)
                             setAspectRatio(curW, curH)
-                            setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                            setHdrMode(state.colorProfile)
                             display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                         }
 
@@ -188,7 +188,7 @@ fun Viewfinder(
                 val h = minOf(vRes.width, vRes.height)
                 view.setAspectRatio(w, h)
                 view.holder.setFixedSize(w, h)
-                view.setHdrBoost(state.colorProfile == ColorProfile.HLG_10BIT)
+                view.setHdrMode(state.colorProfile)
                 view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
             }
         )

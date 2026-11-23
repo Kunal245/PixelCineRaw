@@ -41,6 +41,9 @@ fun TopStatusBar(
     onFpsClick: () -> Unit,
     onColorProfileClick: () -> Unit,
     onFormatClick: () -> Unit = onColorProfileClick,
+    onIspClick: () -> Unit = {},
+    onChromaClick: () -> Unit = {},
+    onWavClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -95,7 +98,7 @@ fun TopStatusBar(
                 onClick = onWbClick
             )
 
-            // Color Profile Pill (Selector: REC.709 8-bit, PIXEL-LOG, and HLG10 HDR 10-bit)
+            // Color Profile Pill (Selector: REC.709 8-bit, PIXEL-LOG, HLG10, and HDR10+ PQ)
             val isHlgProfile = state.colorProfile == ColorProfile.HLG_10BIT
             val profileSubText = when (state.colorProfile) {
                 ColorProfile.REC709 -> "8-bit"
@@ -105,10 +108,12 @@ fun TopStatusBar(
                 } else {
                     "10-bit"
                 }
+                ColorProfile.HDR10_PLUS -> "ST2084"
             }
             val profileSubColor = when {
                 state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.HW_HLG10 -> Color(0xFF00FF66)
                 state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.CURVE_HLG10 -> Color(0xFF00E5FF)
+                state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.HDR10_PLUS -> Color(0xFFFF007F)
                 isHlgProfile -> Color(0xFFFFD700)
                 else -> Color(0xAAFFFFFF)
             }
@@ -119,6 +124,30 @@ fun TopStatusBar(
                 subTextColor = profileSubColor,
                 highlight = true,
                 onClick = onColorProfileClick
+            )
+
+            // Clean Cinema ISP vs Stock Processing Pill
+            CinemaStatusPill(
+                label = "ISP",
+                value = state.ispMode.name,
+                highlight = state.ispMode == com.kunal.pixelcineraw.camera.IspMode.CLEAN,
+                onClick = onIspClick
+            )
+
+            // Chroma / Intra-Frame Mode Badge Pill
+            CinemaStatusPill(
+                label = "ENCODER",
+                value = state.encoderChromaBadge,
+                highlight = state.intraFrameMode == com.kunal.pixelcineraw.camera.IntraFrameMode.ALL_INTRA,
+                onClick = onChromaClick
+            )
+
+            // WAV 48kHz Sidecar Pill
+            CinemaStatusPill(
+                label = "AUDIO",
+                value = if (state.recordWavSidecar) "48k WAV" else "AAC",
+                highlight = state.recordWavSidecar,
+                onClick = onWavClick
             )
 
             // Resolution / Format Pill (Blackmagic style)
