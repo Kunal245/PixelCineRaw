@@ -50,6 +50,11 @@ fun MonitoringOverlays(
             GridOverlay()
         }
 
+        // 2b. Electronic Horizon Leveler
+        if (state.showHorizonLeveler) {
+            HorizonLeveler()
+        }
+
         // 3. Exposure Zebras (Diagonal striped shader simulation for IRE >= threshold, 75% diffuse white in HLG)
         if (state.showZebras) {
             val isHlg = state.colorProfile == ColorProfile.HLG_10BIT

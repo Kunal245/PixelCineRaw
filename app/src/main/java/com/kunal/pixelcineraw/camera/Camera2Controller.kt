@@ -611,16 +611,20 @@ class Camera2Controller(
         val fpsRange = Range(safeFps, safeFps)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
-        // 2. Exposure & Sensitivity (Shutter & ISO)
+        // 2. Exposure & Sensitivity (Shutter & ISO & EV)
         if (state.isManualExposure) {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
 
             // Calculate exposure time in nanoseconds
-            val exposureNs = if (state.shutterUnit == ShutterUnit.ANGLE) {
+            val baseExposureNs = if (state.shutterUnit == ShutterUnit.ANGLE) {
                 ColorMath.shutterAngleToNanos(state.shutterAngle, state.targetFps)
             } else {
                 state.shutterSpeedNs
-            }.coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+            }
+            // Apply EV compensation bias in manual mode: 2^ev multiplier
+            val evMultiplier = Math.pow(2.0, state.evCompensation.toDouble()).toFloat()
+            val exposureNs = (baseExposureNs * evMultiplier).toLong()
+                .coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
 
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
 
@@ -632,7 +636,15 @@ class Camera2Controller(
             builder.set(CaptureRequest.SENSOR_FRAME_DURATION, minFrameDurationNs)
         } else {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            builder.set(CaptureRequest.CONTROL_AE_LOCK, false)
+            builder.set(CaptureRequest.CONTROL_AE_LOCK, state.isAeAfLocked)
+
+            // Set hardware EV compensation index for auto exposure
+            val chars = getCameraCharacteristics(spec.cameraId)
+            val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP) ?: android.util.Rational(1, 3)
+            val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(-6, 6)
+            val stepVal = step.toFloat().coerceAtLeast(0.01f)
+            val evIndex = (state.evCompensation / stepVal).toInt().coerceIn(range.lower, range.upper)
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evIndex)
 
             // Pre-match exposure from previous sensor during physical transition to eliminate brightness flash
             if (state.isTransitioningLens) {
@@ -647,19 +659,30 @@ class Camera2Controller(
             }
         }
 
+        // 2b. Torch / Continuous Video Light
+        val chars = getCameraCharacteristics(spec.cameraId)
+        val flashAvailable = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        if (flashAvailable) {
+            val flashMode = if (state.isTorchOn) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF
+            builder.set(CaptureRequest.FLASH_MODE, flashMode)
+        }
+
         // 3. Manual Focus / Tap to Focus
-        when (state.focusMode) {
-            FocusMode.MANUAL -> {
+        when {
+            state.isAeAfLocked -> {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
+            }
+            state.focusMode == FocusMode.MANUAL -> {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                 val clampedDist = state.focusDistance.coerceIn(0.0f, max(0.1f, spec.minimumFocusDistance))
                 builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, clampedDist)
             }
-            FocusMode.AUTO_CONTINUOUS -> {
+            state.focusMode == FocusMode.AUTO_CONTINUOUS -> {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             }
-            FocusMode.LOCKED -> {
+            else -> {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-                builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
             }
         }
 
@@ -1268,7 +1291,7 @@ class Camera2Controller(
         startCaptureSession()
     }
 
-    // Monitoring Overlays toggles
+    // Monitoring Overlays & Cinema Controls toggles
     fun toggleHistogram() = _state.update { it.copy(showHistogram = !it.showHistogram) }
     fun toggleFocusPeaking() = _state.update { it.copy(showFocusPeaking = !it.showFocusPeaking) }
     fun setPeakingColor(color: PeakingColor) = _state.update { it.copy(peakingColor = color) }
@@ -1278,6 +1301,38 @@ class Camera2Controller(
     fun toggleLutPreview() = _state.update { it.copy(showLutPreview = !it.showLutPreview) }
     fun setFrameGuide(guide: FrameGuide) = _state.update { it.copy(frameGuide = guide) }
     fun toggleGrid() = _state.update { it.copy(showGrid = !it.showGrid) }
+    fun toggleHorizonLeveler() = _state.update { it.copy(showHorizonLeveler = !it.showHorizonLeveler) }
+    fun toggleCleanViewfinder() = _state.update { it.copy(isCleanViewfinder = !it.isCleanViewfinder) }
+
+    fun toggleTorch() {
+        val nextTorch = !_state.value.isTorchOn
+        _state.update { it.copy(isTorchOn = nextTorch) }
+        createAndSetRepeatingRequest()
+    }
+
+    fun setTorchLevel(level: Float) {
+        _state.update { it.copy(torchLevel = level.coerceIn(0.1f, 1.0f), isTorchOn = true) }
+        createAndSetRepeatingRequest()
+    }
+
+    fun setEvCompensation(ev: Float) {
+        _state.update { it.copy(evCompensation = ev.coerceIn(-2.0f, 2.0f)) }
+        createAndSetRepeatingRequest()
+    }
+
+    fun toggleAeAfLock() {
+        val nextLock = !_state.value.isAeAfLocked
+        _state.update { it.copy(isAeAfLocked = nextLock) }
+        createAndSetRepeatingRequest()
+    }
+
+    fun setRecordingPaused(paused: Boolean) {
+        _state.update { it.copy(isRecordingPaused = paused) }
+    }
+
+    fun setLastRecordedClip(uri: String?, thumbnail: Bitmap?) {
+        _state.update { it.copy(lastRecordedClipUri = uri, lastRecordedClipThumbnail = thumbnail) }
+    }
 
     fun updateTelemetry(
         battery: Int,

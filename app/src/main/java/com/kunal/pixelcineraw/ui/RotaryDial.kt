@@ -31,7 +31,9 @@ enum class ActiveDial {
     SHUTTER,
     ISO,
     FOCUS,
-    WHITE_BALANCE
+    WHITE_BALANCE,
+    EV,
+    BITRATE
 }
 
 /**

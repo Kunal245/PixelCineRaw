@@ -1,31 +1,33 @@
 package com.kunal.pixelcineraw.ui
 
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
+import com.kunal.pixelcineraw.camera.ColorMath
 import com.kunal.pixelcineraw.camera.FocusMode
-import com.kunal.pixelcineraw.camera.FrameGuide
 import com.kunal.pixelcineraw.camera.LensSelection
+import com.kunal.pixelcineraw.camera.ShutterUnit
+import java.util.Locale
 
 /**
- * Bottom cinema control bar containing Lens Selection (0.5x, 1x, 2x),
- * Quick Overlay Toggles, Manual Focus trigger, and the Cinema Record Button.
+ * Sleek bottom cinema exposure deck and optical lens selector.
+ *
+ * Houses Lens Pills (0.5x, 1x, 2x with mm equivalent), 5 Precision Exposure Pills
+ * (SHUTTER, ISO, WB, FOCUS, EV) with Auto/Manual dots, and Stereo Audio VU meters.
  */
 @Composable
 fun BottomControlBar(
@@ -33,155 +35,148 @@ fun BottomControlBar(
     onLensSelected: (LensSelection) -> Unit,
     onZoomChanged: (Float) -> Unit,
     onZoomSliderVisibilityChanged: (Boolean) -> Unit,
-    onFocusDialClick: () -> Unit,
-    onToggleLut: () -> Unit,
-    onTogglePeaking: () -> Unit,
-    onToggleZebras: () -> Unit,
-    onToggleHistogram: () -> Unit,
-    onCycleGuide: () -> Unit,
-    onToggleStabilization: () -> Unit,
-    onRecordClick: () -> Unit,
+    onShutterClick: () -> Unit,
+    onIsoClick: () -> Unit,
+    onWbClick: () -> Unit,
+    onFocusClick: () -> Unit,
+    onEvClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xCC0D0D0D))
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .background(Color(0xB30A0C10))
+            .border(width = 0.5.dp, color = Color(0x26FFFFFF))
+            .padding(horizontal = 68.dp, vertical = 7.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 1. Cinema Zoom Hub (Quick-Tap Lens Pills: 0.5x, 1x, 2x, 5x + mm Readout + Expandable Slider)
+        // 1. Lens & Zoom Cluster (0.5x, 1x, 2x with 35mm equivalent focal lengths)
         CinemaZoomHub(
             state = state,
             onZoomChanged = onZoomChanged,
             onSliderVisibilityChanged = onZoomSliderVisibilityChanged
         )
 
-        // 2. Monitoring & Tools Toolbar
+        // 2. 5 Precision Exposure Pills (SHUTTER, ISO, WB, FOCUS, EV)
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ToolButton(
+            // SHUTTER
+            val shutterVal = if (state.shutterUnit == ShutterUnit.ANGLE) {
+                "${state.shutterAngle.toInt()}°"
+            } else {
+                ColorMath.formatShutterSpeed(state.shutterSpeedNs)
+            }
+            ExposurePill(
+                label = if (state.shutterUnit == ShutterUnit.ANGLE) "SHUTTER ∠" else "SHUTTER SPD",
+                value = shutterVal,
+                isAuto = !state.isManualExposure,
+                onClick = onShutterClick
+            )
+
+            // ISO
+            val isoVal = if (state.isAutoIso) "AUTO ${state.iso}" else "ISO ${state.iso}"
+            ExposurePill(
+                label = "SENSITIVITY",
+                value = isoVal,
+                isAuto = state.isAutoIso || !state.isManualExposure,
+                onClick = onIsoClick
+            )
+
+            // WHITE BALANCE
+            val wbVal = if (state.isManualWb) "${state.wbKelvin}K" else "AWB"
+            ExposurePill(
+                label = "WHITE BAL",
+                value = wbVal,
+                isAuto = !state.isManualWb,
+                onClick = onWbClick
+            )
+
+            // FOCUS
+            val focusVal = when (state.focusMode) {
+                FocusMode.AUTO_CONTINUOUS -> "AF CONTINUOUS"
+                FocusMode.LOCKED -> "AF LOCKED"
+                FocusMode.MANUAL -> {
+                    if (state.focusDistance <= 0.05f) "MF ∞"
+                    else String.format(Locale.US, "MF %.1fm", 1.0f / state.focusDistance)
+                }
+            }
+            ExposurePill(
                 label = "FOCUS",
-                isActive = state.focusMode == FocusMode.MANUAL,
-                onClick = onFocusDialClick
+                value = focusVal,
+                isAuto = state.focusMode != FocusMode.MANUAL,
+                onClick = onFocusClick
             )
-            ToolButton(
-                label = "LUT",
-                isActive = state.showLutPreview,
-                onClick = onToggleLut
-            )
-            ToolButton(
-                label = "PEAK",
-                isActive = state.showFocusPeaking,
-                onClick = onTogglePeaking
-            )
-            ToolButton(
-                label = "ZEBRA",
-                isActive = state.showZebras,
-                onClick = onToggleZebras
-            )
-            ToolButton(
-                label = "HIST",
-                isActive = state.showHistogram,
-                onClick = onToggleHistogram
-            )
-            ToolButton(
-                label = if (state.frameGuide == FrameGuide.NONE) "GUIDE" else state.frameGuide.label.substringBefore(" "),
-                isActive = state.frameGuide != FrameGuide.NONE,
-                onClick = onCycleGuide
-            )
-            ToolButton(
-                label = if (state.oisEnabed) "OIS" else "STAB OFF",
-                isActive = state.oisEnabed,
-                onClick = onToggleStabilization
+
+            // EV BIAS
+            val evVal = if (state.evCompensation > 0f) "+%.1f EV".format(state.evCompensation)
+            else "%.1f EV".format(state.evCompensation)
+            ExposurePill(
+                label = "EXPOSURE",
+                value = evVal,
+                isAuto = false,
+                highlightColor = if (state.evCompensation != 0f) Color(0xFFFFCC00) else null,
+                onClick = onEvClick
             )
         }
 
-        // 3. Audio Meter + Record Shutter Button
+        // 3. Stereo Audio VU Meter
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Stereo VU meters
             AudioVuMeter(peakL = state.audioPeakDbL, peakR = state.audioPeakDbR)
-
-            // Large Record Button
-            RecordShutterButton(
-                isRecording = state.isRecording,
-                onClick = onRecordClick
-            )
         }
     }
 }
 
 @Composable
-fun LensPill(
+fun ExposurePill(
     label: String,
-    subText: String? = null,
-    isSelected: Boolean,
-    onClick: () -> Unit
+    value: String,
+    isAuto: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    highlightColor: Color? = null
 ) {
-    Box(
-        modifier = Modifier
-            .background(
-                if (isSelected) Color(0xFFFFD700) else Color(0xFF222222),
+    Column(
+        modifier = modifier
+            .background(Color(0xB312141A), RoundedCornerShape(6.dp))
+            .border(
+                0.8.dp,
+                highlightColor?.copy(alpha = 0.6f) ?: Color(0x26FFFFFF),
                 RoundedCornerShape(6.dp)
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 7.dp),
-        contentAlignment = Alignment.Center
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Text(
                 text = label,
-                color = if (isSelected) Color.Black else Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Black,
+                color = Color(0x88FFFFFF),
+                fontSize = 7.5.sp,
+                fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
-            if (subText != null) {
-                Spacer(modifier = Modifier.width(2.dp))
-                Text(
-                    text = subText,
-                    color = if (isSelected) Color(0x99000000) else Color(0xFFFFD700),
-                    fontSize = 8.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
+            // Mode dot (Green for AUTO, Amber for MANUAL)
+            Box(
+                modifier = Modifier
+                    .size(4.5.dp)
+                    .clip(CircleShape)
+                    .background(if (isAuto) Color(0xFF00FF66) else Color(0xFFFFCC00))
+            )
         }
-    }
-}
-
-@Composable
-fun ToolButton(
-    label: String,
-    isActive: Boolean,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .background(
-                if (isActive) Color(0x3300E5FF) else Color(0xFF1E1E1E),
-                RoundedCornerShape(6.dp)
-            )
-            .border(
-                1.dp,
-                if (isActive) Color(0xFF00E5FF) else Color(0x22FFFFFF),
-                RoundedCornerShape(6.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center
-    ) {
         Text(
-            text = label,
-            color = if (isActive) Color(0xFF00E5FF) else Color(0xCCFFFFFF),
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
+            text = value,
+            color = highlightColor ?: Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace
         )
     }
@@ -193,76 +188,38 @@ fun AudioVuMeter(peakL: Float, peakR: Float) {
         verticalArrangement = Arrangement.spacedBy(3.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        VuBar(peakDb = peakL)
-        VuBar(peakDb = peakR)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("L", color = Color(0x88FFFFFF), fontSize = 7.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Spacer(modifier = Modifier.width(3.dp))
+            VuBar(peakDb = peakL)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("R", color = Color(0x88FFFFFF), fontSize = 7.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Spacer(modifier = Modifier.width(3.dp))
+            VuBar(peakDb = peakR)
+        }
     }
 }
 
 @Composable
 fun VuBar(peakDb: Float) {
-    // peakDb ranges from -60dB (silence) to 0dB (clipping)
-    val norm = ((peakDb + 60f) / 60f).coerceIn(0.05f, 1.0f)
-
+    val norm = ((peakDb + 60f) / 60f).coerceIn(0.04f, 1.0f)
     Row(
         modifier = Modifier
-            .width(42.dp)
+            .width(44.dp)
             .height(5.dp)
-            .background(Color(0xFF1A1A1A), RoundedCornerShape(2.dp))
+            .background(Color(0xFF16181D), RoundedCornerShape(2.dp))
     ) {
         val barColor = when {
-            peakDb > -6f -> Color(0xFFFF2222) // Clip red
-            peakDb > -18f -> Color(0xFFFFD700) // Caution yellow
-            else -> Color(0xFF00FF66) // Green nominal
+            peakDb > -6f -> Color(0xFFFF2222)
+            peakDb > -18f -> Color(0xFFFFCC00)
+            else -> Color(0xFF00FF66)
         }
-
         Box(
             modifier = Modifier
                 .fillMaxHeight()
                 .fillMaxWidth(norm)
                 .background(barColor, RoundedCornerShape(2.dp))
         )
-    }
-}
-
-@Composable
-fun RecordShutterButton(
-    isRecording: Boolean,
-    onClick: () -> Unit
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "RecPulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "RecScale"
-    )
-
-    Box(
-        modifier = Modifier
-            .size(54.dp)
-            .border(3.dp, Color.White, CircleShape)
-            .clickable(onClick = onClick)
-            .padding(4.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        if (isRecording) {
-            // Square stop indicator pulsing
-            Box(
-                modifier = Modifier
-                    .size(22.dp)
-                    .scale(pulseScale)
-                    .background(Color(0xFFFF0033), RoundedCornerShape(4.dp))
-            )
-        } else {
-            // Circle red record trigger
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFFFF0033), CircleShape)
-            )
-        }
     }
 }

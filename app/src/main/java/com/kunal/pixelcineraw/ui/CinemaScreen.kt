@@ -1,12 +1,15 @@
 package com.kunal.pixelcineraw.ui
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -21,9 +24,19 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.*
 import java.util.Locale
+import kotlin.math.abs
 
 /**
- * Full landscape cinema viewfinder and dark HUD with expandable rotary controls.
+ * Modern, flagship cinema camera interface (inspired by Blackmagic Camera & Final Cut Camera).
+ *
+ * Features:
+ * - Edge-to-edge #08090C canvas with 90%+ unobstructed viewfinder
+ * - One-tap Clean Viewfinder mode (smoothly hides all HUD overlays)
+ * - Compact frosted-glass top pill bar with tabular telemetry
+ * - Left-side pro assist monitoring rail (Peaking, Zebras, Guides, Horizon Leveler, Histogram, LUT, OIS)
+ * - Right-side ergonomic thumb rail (Torch, Shutter, Timecode, MB counter, Pause, Clip preview, AE/AF lock)
+ * - Bottom tactile exposure deck (0.5x/1x/2x Lens Hub, SHUTTER, ISO, WB, FOCUS, EV)
+ * - Shared high-precision rotary tick wheel with haptic detents
  */
 @Composable
 fun CinemaScreen(
@@ -35,7 +48,7 @@ fun CinemaScreen(
     var activeDial by remember { mutableStateOf(ActiveDial.NONE) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
-    // Cinema standard presets
+    // Precision presets
     val fpsValues = remember { listOf(24, 25, 30, 48, 50, 60) }
     val shutterAngles = remember { listOf(11.2f, 22.5f, 45f, 90f, 144f, 172.8f, 180f, 270f, 360f) }
     val shutterSpeedsNs = remember {
@@ -59,23 +72,31 @@ fun CinemaScreen(
         listOf(50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 6400)
     }
     val focusDistances = remember {
-        // 0.0 (Infinity) to 10.0 (Macro 10cm) in 40 fine steps
         (0..40).map { i -> (i / 40f) * 10f }
     }
     val kelvinValues = remember {
         (2300..8000 step 100).toList()
     }
+    val evValues = remember {
+        listOf(-2.0f, -1.7f, -1.3f, -1.0f, -0.7f, -0.3f, 0.0f, 0.3f, 0.7f, 1.0f, 1.3f, 1.7f, 2.0f)
+    }
+    val bitrateValues = remember {
+        listOf(50, 80, 100, 120, 150, 180, 200, 240, 280)
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Color(0xFF08090C))
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() }
             ) {
-                // Tapping anywhere dismisses active dial to keep 85%+ screen unobstructed
-                activeDial = ActiveDial.NONE
+                if (activeDial != ActiveDial.NONE) {
+                    activeDial = ActiveDial.NONE
+                } else {
+                    viewModel.cameraController.toggleCleanViewfinder()
+                }
             }
     ) {
         // 1. Live Camera2 Viewfinder Surface with AutoFitSurfaceView (Universal Zero-Stretch)
@@ -84,15 +105,14 @@ fun CinemaScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Live Movable Histogram)
-        // Strictly positioned between TopStatusBar and BottomControlBar so nothing is clipped
+        // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Horizon Leveler, Histogram)
         val vRes = state.videoResolution
         val resWidth = maxOf(vRes.width, vRes.height)
         val resHeight = minOf(vRes.width, vRes.height)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 48.dp, bottom = 68.dp),
+                .padding(top = 44.dp, bottom = 54.dp),
             contentAlignment = Alignment.Center
         ) {
             MonitoringOverlays(
@@ -103,81 +123,144 @@ fun CinemaScreen(
             )
         }
 
-        // 3. Top Cinema Status Bar (Tap values to open tactile scrubbers)
-        TopStatusBar(
-            state = state,
-            onFpsClick = {
-                activeDial = if (activeDial == ActiveDial.FPS) ActiveDial.NONE else ActiveDial.FPS
-            },
-            onShutterClick = {
-                activeDial = if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER
-            },
-            onIsoClick = {
-                activeDial = if (activeDial == ActiveDial.ISO) ActiveDial.NONE else ActiveDial.ISO
-            },
-            onWbClick = {
-                activeDial = if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE
-            },
-            onColorProfileClick = {
-                val nextProfile = when (state.colorProfile) {
-                    ColorProfile.REC709 -> ColorProfile.FLAT_LOG
-                    ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
-                    ColorProfile.HLG_10BIT -> ColorProfile.HDR10_PLUS
-                    ColorProfile.HDR10_PLUS -> ColorProfile.REC709
-                }
-                viewModel.cameraController.setColorProfile(nextProfile)
-            },
-            onFormatClick = {
-                showSettingsDialog = true
-            },
-            onIspClick = {
-                viewModel.cameraController.toggleIspMode()
-            },
-            onChromaClick = {
-                viewModel.cameraController.toggleIntraFrameMode()
-            },
-            onWavClick = {
-                viewModel.cameraController.toggleRecordWavSidecar()
-            },
-            modifier = Modifier.align(Alignment.TopCenter)
-        )
+        // 3. Clean Viewfinder Mode Glowing REC Indicator (Visible even when HUD is hidden)
+        if (state.isCleanViewfinder && state.isRecording) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 20.dp, top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .background(Color(0xFFFF0033), CircleShape)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                val mins = state.recordingTimeSeconds / 60
+                val secs = state.recordingTimeSeconds % 60
+                Text(
+                    text = "REC %02d:%02d".format(mins, secs),
+                    color = Color.White,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
 
-        // 4. Bottom Tactile Control Bar
-        BottomControlBar(
-            state = state,
-            onLensSelected = { lens -> viewModel.cameraController.selectLens(lens) },
-            onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
-            onZoomSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) },
-            onFocusDialClick = {
-                activeDial = if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS
-            },
-            onToggleLut = { viewModel.cameraController.toggleLutPreview() },
-            onTogglePeaking = { viewModel.cameraController.toggleFocusPeaking() },
-            onToggleZebras = { viewModel.cameraController.toggleZebras() },
-            onToggleHistogram = { viewModel.cameraController.toggleHistogram() },
-            onCycleGuide = {
-                val nextGuide = when (state.frameGuide) {
-                    FrameGuide.NONE -> FrameGuide.RATIO_2_39
-                    FrameGuide.RATIO_2_39 -> FrameGuide.RATIO_16_9
-                    FrameGuide.RATIO_16_9 -> FrameGuide.RATIO_4_3
-                    FrameGuide.RATIO_4_3 -> FrameGuide.NONE
-                    else -> FrameGuide.NONE
-                }
-                viewModel.cameraController.setFrameGuide(nextGuide)
-            },
-            onToggleStabilization = { viewModel.cameraController.toggleOis() },
-            onRecordClick = onRecordToggle,
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
-
-        // 5. Expandable Rotary Dial Bottom Sheet Overlay with Haptic Ticks
+        // 4. Modern Frosted Glass Top Bar
         AnimatedVisibility(
-            visible = activeDial != ActiveDial.NONE,
+            visible = !state.isCleanViewfinder,
+            enter = slideInVertically { -it } + fadeIn(tween(150)),
+            exit = slideOutVertically { -it } + fadeOut(tween(150)),
+            modifier = Modifier.align(Alignment.TopCenter)
+        ) {
+            TopStatusBar(
+                state = state,
+                onFormatClick = { showSettingsDialog = true },
+                onColorProfileClick = {
+                    val nextProfile = when (state.colorProfile) {
+                        ColorProfile.REC709 -> ColorProfile.FLAT_LOG
+                        ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
+                        ColorProfile.HLG_10BIT -> ColorProfile.HDR10_PLUS
+                        ColorProfile.HDR10_PLUS -> ColorProfile.REC709
+                    }
+                    viewModel.cameraController.setColorProfile(nextProfile)
+                },
+                onBitrateClick = {
+                    activeDial = if (activeDial == ActiveDial.BITRATE) ActiveDial.NONE else ActiveDial.BITRATE
+                },
+                onIspClick = { viewModel.cameraController.toggleIspMode() },
+                onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() }
+            )
+        }
+
+        // 5. Left-Side Pro Assist Monitoring Rail
+        AnimatedVisibility(
+            visible = !state.isCleanViewfinder,
+            enter = slideInHorizontally { -it } + fadeIn(tween(150)),
+            exit = slideOutHorizontally { -it } + fadeOut(tween(150)),
+            modifier = Modifier.align(Alignment.CenterStart)
+        ) {
+            LeftMonitoringRail(
+                state = state,
+                onCleanViewfinderToggle = { viewModel.cameraController.toggleCleanViewfinder() },
+                onPeakingToggle = { viewModel.cameraController.toggleFocusPeaking() },
+                onZebrasToggle = { viewModel.cameraController.toggleZebras() },
+                onGuidesCycle = {
+                    val nextGuide = when (state.frameGuide) {
+                        FrameGuide.NONE -> FrameGuide.RATIO_2_39
+                        FrameGuide.RATIO_2_39 -> FrameGuide.RATIO_16_9
+                        FrameGuide.RATIO_16_9 -> FrameGuide.RATIO_4_3
+                        FrameGuide.RATIO_4_3 -> FrameGuide.RATIO_1_1
+                        FrameGuide.RATIO_1_1 -> FrameGuide.NONE
+                    }
+                    viewModel.cameraController.setFrameGuide(nextGuide)
+                },
+                onHorizonToggle = { viewModel.cameraController.toggleHorizonLeveler() },
+                onHistogramToggle = { viewModel.cameraController.toggleHistogram() },
+                onLutToggle = { viewModel.cameraController.toggleLutPreview() },
+                onStabilizationToggle = { viewModel.cameraController.toggleOis() }
+            )
+        }
+
+        // 6. Right-Side Cinema Action Rail (Thumb Controls)
+        AnimatedVisibility(
+            visible = !state.isCleanViewfinder,
+            enter = slideInHorizontally { it } + fadeIn(tween(150)),
+            exit = slideOutHorizontally { it } + fadeOut(tween(150)),
+            modifier = Modifier.align(Alignment.CenterEnd)
+        ) {
+            RightActionRail(
+                state = state,
+                onRecordToggle = onRecordToggle,
+                onPauseToggle = {
+                    viewModel.cameraController.setRecordingPaused(!state.isRecordingPaused)
+                },
+                onTorchToggle = { viewModel.cameraController.toggleTorch() },
+                onAeAfLockToggle = { viewModel.cameraController.toggleAeAfLock() }
+            )
+        }
+
+        // 7. Bottom Tactile Exposure Deck & Lens Hub
+        AnimatedVisibility(
+            visible = !state.isCleanViewfinder,
+            enter = slideInVertically { it } + fadeIn(tween(150)),
+            exit = slideOutVertically { it } + fadeOut(tween(150)),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            BottomControlBar(
+                state = state,
+                onLensSelected = { lens -> viewModel.cameraController.selectLens(lens) },
+                onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
+                onZoomSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) },
+                onShutterClick = {
+                    activeDial = if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER
+                },
+                onIsoClick = {
+                    activeDial = if (activeDial == ActiveDial.ISO) ActiveDial.NONE else ActiveDial.ISO
+                },
+                onWbClick = {
+                    activeDial = if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE
+                },
+                onFocusClick = {
+                    activeDial = if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS
+                },
+                onEvClick = {
+                    activeDial = if (activeDial == ActiveDial.EV) ActiveDial.NONE else ActiveDial.EV
+                }
+            )
+        }
+
+        // 8. Shared Expandable Rotary Dial Wheel (Pops up directly above the bottom deck)
+        AnimatedVisibility(
+            visible = activeDial != ActiveDial.NONE && !state.isCleanViewfinder,
             enter = slideInVertically { it } + fadeIn(),
             exit = slideOutVertically { it } + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 68.dp)
+                .padding(bottom = 58.dp)
         ) {
             when (activeDial) {
                 ActiveDial.FPS -> {
@@ -196,7 +279,7 @@ fun CinemaScreen(
                 ActiveDial.SHUTTER -> {
                     if (state.shutterUnit == ShutterUnit.ANGLE) {
                         val currentAngle = state.shutterAngle
-                        val nearestIdx = shutterAngles.indices.minByOrNull { Math.abs(shutterAngles[it] - currentAngle) } ?: 6
+                        val nearestIdx = shutterAngles.indices.minByOrNull { abs(shutterAngles[it] - currentAngle) } ?: 6
                         RotaryWheelScrubber(
                             title = "Shutter Angle",
                             items = shutterAngles,
@@ -213,7 +296,7 @@ fun CinemaScreen(
                         )
                     } else {
                         val currentNs = state.shutterSpeedNs
-                        val nearestIdx = shutterSpeedsNs.indices.minByOrNull { Math.abs(shutterSpeedsNs[it] - currentNs) } ?: 10
+                        val nearestIdx = shutterSpeedsNs.indices.minByOrNull { abs(shutterSpeedsNs[it] - currentNs) } ?: 10
                         RotaryWheelScrubber(
                             title = "Shutter Speed",
                             items = shutterSpeedsNs,
@@ -232,7 +315,7 @@ fun CinemaScreen(
                 }
                 ActiveDial.ISO -> {
                     val currentIso = state.iso
-                    val nearestIdx = isoValues.indices.minByOrNull { Math.abs(isoValues[it] - currentIso) } ?: 3
+                    val nearestIdx = isoValues.indices.minByOrNull { abs(isoValues[it] - currentIso) } ?: 3
                     RotaryWheelScrubber(
                         title = "ISO Sensitivity",
                         items = isoValues,
@@ -255,7 +338,7 @@ fun CinemaScreen(
                 }
                 ActiveDial.FOCUS -> {
                     val currentDist = state.focusDistance
-                    val nearestIdx = focusDistances.indices.minByOrNull { Math.abs(focusDistances[it] - currentDist) } ?: 0
+                    val nearestIdx = focusDistances.indices.minByOrNull { abs(focusDistances[it] - currentDist) } ?: 0
                     RotaryWheelScrubber(
                         title = "Manual Focus Wheel",
                         items = focusDistances,
@@ -288,7 +371,7 @@ fun CinemaScreen(
                 }
                 ActiveDial.WHITE_BALANCE -> {
                     val currentK = state.wbKelvin
-                    val nearestIdx = kelvinValues.indices.minByOrNull { Math.abs(kelvinValues[it] - currentK) } ?: 33
+                    val nearestIdx = kelvinValues.indices.minByOrNull { abs(kelvinValues[it] - currentK) } ?: 33
                     RotaryWheelScrubber(
                         title = "White Balance Kelvin",
                         items = kelvinValues,
@@ -309,11 +392,44 @@ fun CinemaScreen(
                         }
                     )
                 }
+                ActiveDial.EV -> {
+                    val currentEv = state.evCompensation
+                    val nearestIdx = evValues.indices.minByOrNull { abs(evValues[it] - currentEv) } ?: 6
+                    RotaryWheelScrubber(
+                        title = "Exposure Compensation (EV)",
+                        items = evValues,
+                        selectedIndex = nearestIdx,
+                        onItemSelected = { _, ev -> viewModel.cameraController.setEvCompensation(ev) },
+                        formatItem = { ev ->
+                            if (ev > 0f) "+%.1f EV".format(ev) else "%.1f EV".format(ev)
+                        },
+                        onClose = { activeDial = ActiveDial.NONE },
+                        presets = listOf("-2.0" to 0, "-1.0" to 3, "0.0" to 6, "+1.0" to 9, "+2.0" to 12),
+                        headerActions = {
+                            TextButton(onClick = { viewModel.cameraController.setEvCompensation(0.0f) }) {
+                                Text("RESET 0 EV", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    )
+                }
+                ActiveDial.BITRATE -> {
+                    val currentBitrate = state.targetBitrateMbps
+                    val nearestIdx = bitrateValues.indices.minByOrNull { abs(bitrateValues[it] - currentBitrate) } ?: 8
+                    RotaryWheelScrubber(
+                        title = "Target Video Bitrate",
+                        items = bitrateValues,
+                        selectedIndex = nearestIdx,
+                        onItemSelected = { _, mbps -> viewModel.cameraController.setBitrateMbps(mbps) },
+                        formatItem = { "$it Mbps" },
+                        onClose = { activeDial = ActiveDial.NONE },
+                        presets = listOf("50M" to 0, "100M" to 2, "150M" to 4, "200M" to 6, "280M" to 8)
+                    )
+                }
                 ActiveDial.NONE -> {}
             }
         }
 
-        // 6. Cinema Settings Dialog (Format, Codec, Bitrate, Profile, Resolution)
+        // 9. Cinema Settings Dialog (Format, Codec, Bitrate, Profile, Resolution)
         if (showSettingsDialog) {
             CinemaSettingsDialog(
                 state = state,

@@ -21,177 +21,100 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
-import com.kunal.pixelcineraw.camera.ColorMath
 import com.kunal.pixelcineraw.camera.ColorProfile
-import com.kunal.pixelcineraw.camera.RecordingFormat
-import com.kunal.pixelcineraw.camera.ShutterUnit
 import com.kunal.pixelcineraw.camera.ThermalStatus
-import java.util.Locale
 
 /**
- * Sleek Blackmagic / Arri inspired cinema top status bar displaying real-time
- * camera parameters and live hardware telemetry without number jitter.
+ * Modern dark-glassmorphism top status bar (inspired by Blackmagic Camera & Final Cut Camera).
+ *
+ * Consolidates Resolution, FPS, Color Profile, Codec, Bitrate, ISP, and System Telemetry
+ * into frosted dark translucent pills with tabular monospaced numbers.
  */
 @Composable
 fun TopStatusBar(
     state: CinemaState,
-    onShutterClick: () -> Unit,
-    onIsoClick: () -> Unit,
-    onWbClick: () -> Unit,
-    onFpsClick: () -> Unit,
+    onFormatClick: () -> Unit,
     onColorProfileClick: () -> Unit,
-    onFormatClick: () -> Unit = onColorProfileClick,
-    onIspClick: () -> Unit = {},
-    onChromaClick: () -> Unit = {},
-    onWavClick: () -> Unit = {},
+    onBitrateClick: () -> Unit,
+    onIspClick: () -> Unit,
+    onAudioWavClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xD90D0F12))
-            .border(width = 0.5.dp, color = Color(0x33FFFFFF))
-            .padding(horizontal = 14.dp, vertical = 6.dp),
+            .background(Color(0xB30A0C10))
+            .border(width = 0.5.dp, color = Color(0x26FFFFFF))
+            .padding(horizontal = 68.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Left: FPS, Shutter, ISO, WB, Profile (Tap to open tactile rotary scrubbers)
+        // Left: Consolidated Cinema Format & Engine Pills
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // FPS Pill
-            CinemaStatusPill(
-                label = "FPS",
-                value = "${state.targetFps}",
-                subText = "${state.measuredFps.toInt()} ACT",
-                onClick = onFpsClick
-            )
-
-            // Shutter Speed / Angle Pill
-            val shutterVal = if (state.shutterUnit == ShutterUnit.ANGLE) {
-                "${state.shutterAngle.toInt()}°"
-            } else {
-                ColorMath.formatShutterSpeed(state.shutterSpeedNs)
+            // 1. Resolution & FPS Pill (e.g. "4K · 24 FPS")
+            val resTitle = when {
+                state.videoResolution.width >= 3840 -> "4K"
+                state.videoResolution.width >= 2560 -> "2.5K"
+                state.videoResolution.width >= 1920 -> "1080p"
+                else -> "${state.videoResolution.width}p"
             }
-            CinemaStatusPill(
-                label = if (state.shutterUnit == ShutterUnit.ANGLE) "SHUTTER ∠" else "SHUTTER SPD",
-                value = shutterVal,
-                highlight = state.isManualExposure,
-                onClick = onShutterClick
+            FrostedPill(
+                label = "FORMAT",
+                value = "$resTitle · ${state.targetFps}p",
+                subText = state.videoResolution.aspectLabel,
+                highlight = true,
+                onClick = onFormatClick
             )
 
-            // ISO Pill
-            CinemaStatusPill(
-                label = "ISO",
-                value = if (state.isAutoIso) "AUTO ${state.iso}" else "${state.iso}",
-                highlight = state.isManualExposure,
-                onClick = onIsoClick
-            )
-
-            // White Balance Pill
-            CinemaStatusPill(
-                label = "WB",
-                value = if (state.isManualWb) "${state.wbKelvin}K" else "AWB",
-                subText = if (state.wbTint != 0) "${state.wbTint}T" else null,
-                highlight = state.isManualWb,
-                onClick = onWbClick
-            )
-
-            // Color Profile Pill (Selector: REC.709 8-bit, PIXEL-LOG, HLG10, and HDR10+ PQ)
-            val isHlgProfile = state.colorProfile == ColorProfile.HLG_10BIT
-            val profileSubText = when (state.colorProfile) {
-                ColorProfile.REC709 -> "8-bit"
-                ColorProfile.FLAT_LOG -> "Log"
-                ColorProfile.HLG_10BIT -> if (state.hdrPipelineStatus != com.kunal.pixelcineraw.camera.HdrPipelineStatus.NONE) {
-                    state.hdrPipelineStatus.label
-                } else {
-                    "10-bit"
-                }
-                ColorProfile.HDR10_PLUS -> "ST2084"
+            // 2. Color Profile Pill (HLG10, HDR10+, PIXEL-LOG, REC.709 with color indicator dot)
+            val profileDotColor = when (state.colorProfile) {
+                ColorProfile.HLG_10BIT -> Color(0xFFFFD700)
+                ColorProfile.HDR10_PLUS -> Color(0xFFFF007F)
+                ColorProfile.FLAT_LOG -> Color(0xFF00E5FF)
+                ColorProfile.REC709 -> Color(0xFF00FF66)
             }
-            val profileSubColor = when {
-                state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.HW_HLG10 -> Color(0xFF00FF66)
-                state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.CURVE_HLG10 -> Color(0xFF00E5FF)
-                state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.HDR10_PLUS -> Color(0xFFFF007F)
-                isHlgProfile -> Color(0xFFFFD700)
-                else -> Color(0xAAFFFFFF)
-            }
-            CinemaStatusPill(
+            FrostedPill(
                 label = "PROFILE",
                 value = state.colorProfile.label,
-                subText = profileSubText,
-                subTextColor = profileSubColor,
+                dotColor = profileDotColor,
                 highlight = true,
                 onClick = onColorProfileClick
             )
 
-            // Clean Cinema ISP vs Stock Processing Pill
-            CinemaStatusPill(
+            // 3. Codec & Bitrate Pill (e.g. "10B ALL-I · 280M")
+            val codecLabel = if (state.intraFrameMode == com.kunal.pixelcineraw.camera.IntraFrameMode.ALL_INTRA) "ALL-I" else "GOP"
+            FrostedPill(
+                label = "CODEC",
+                value = "$codecLabel · ${state.targetBitrateMbps}M",
+                subText = if (state.videoCodec == com.kunal.pixelcineraw.camera.VideoCodec.HEVC_10BIT) "10-BIT" else "8-BIT",
+                highlight = false,
+                onClick = onBitrateClick
+            )
+
+            // 4. Clean Cinema ISP Pill
+            FrostedPill(
                 label = "ISP",
                 value = state.ispMode.name,
                 highlight = state.ispMode == com.kunal.pixelcineraw.camera.IspMode.CLEAN,
                 onClick = onIspClick
             )
 
-            // Chroma / Intra-Frame Mode Badge Pill
-            CinemaStatusPill(
-                label = "ENCODER",
-                value = state.encoderChromaBadge,
-                highlight = state.intraFrameMode == com.kunal.pixelcineraw.camera.IntraFrameMode.ALL_INTRA,
-                onClick = onChromaClick
-            )
-
-            // WAV 48kHz Sidecar Pill
-            CinemaStatusPill(
+            // 5. Audio Sidecar Pill
+            FrostedPill(
                 label = "AUDIO",
                 value = if (state.recordWavSidecar) "48k WAV" else "AAC",
                 highlight = state.recordWavSidecar,
-                onClick = onWavClick
-            )
-
-            // Resolution / Format Pill (Blackmagic style)
-            CinemaStatusPill(
-                label = if (state.recordingFormat == RecordingFormat.RAW_DNG) "RAW" else state.videoCodec.label.substringBefore(" "),
-                value = state.videoResolution.aspectLabel,
-                subText = "${state.videoResolution.width}p",
-                highlight = true,
-                onClick = onFormatClick
+                onClick = onAudioWavClick
             )
         }
 
-        // Center: High-contrast Recording Badge & Timecode
-        if (state.isRecording) {
-            val mins = state.recordingTimeSeconds / 60
-            val secs = state.recordingTimeSeconds % 60
-            val timeString = String.format(Locale.US, "%02d:%02d", mins, secs)
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .background(Color(0xDDFF0033), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 10.dp, vertical = 3.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .background(Color.White, CircleShape)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "REC $timeString",
-                    color = Color.White,
-                    fontWeight = FontWeight.Black,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-        }
-
-        // Right: Real Live Telemetry (USB-C Mic, Internal Storage, Battery %, Tensor G4 Thermal)
+        // Right: Real Live Telemetry Cluster (Storage, Battery %, Tensor G4 Thermal)
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // USB-C External Mic Indicator
             if (state.isExternalMicConnected) {
@@ -219,12 +142,13 @@ fun TopStatusBar(
                 }
             }
 
-            // Real Live Free Internal Storage
+            // Internal Storage Remaining (GB and time)
+            val storageText = "${state.remainingStorageGb.toInt()}GB · ${state.remainingRecordingMinutes}m"
             Text(
-                text = "${state.remainingStorageGb.toInt()}GB • ${state.remainingRecordingMinutes}m",
-                color = if (state.remainingRecordingMinutes < 15) Color(0xFFFF3333) else Color(0xCCFFFFFF),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
+                text = storageText,
+                color = Color(0xCCFFFFFF),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
                 fontFamily = FontFamily.Monospace
             )
 
@@ -241,13 +165,13 @@ fun TopStatusBar(
                     imageVector = batteryIcon,
                     contentDescription = "Battery",
                     tint = batteryColor,
-                    modifier = Modifier.size(14.dp)
+                    modifier = Modifier.size(13.dp)
                 )
-                Spacer(modifier = Modifier.width(3.dp))
+                Spacer(modifier = Modifier.width(2.dp))
                 Text(
                     text = "${state.batteryPercent}%",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
@@ -260,21 +184,21 @@ fun TopStatusBar(
 }
 
 @Composable
-fun CinemaStatusPill(
+fun FrostedPill(
     label: String,
     value: String,
     subText: String? = null,
-    subTextColor: Color = Color(0xAAFFFFFF),
+    dotColor: Color? = null,
     highlight: Boolean = false,
     onClick: () -> Unit
 ) {
     Column(
         modifier = Modifier
-            .background(Color(0xFF181A1D), RoundedCornerShape(5.dp))
+            .background(Color(0xB312141A), RoundedCornerShape(6.dp))
             .border(
-                0.7.dp,
-                if (highlight) Color(0xFFFFCC00).copy(alpha = 0.6f) else Color(0x22FFFFFF),
-                RoundedCornerShape(5.dp)
+                0.8.dp,
+                if (highlight) Color(0xFFFFCC00).copy(alpha = 0.5f) else Color(0x26FFFFFF),
+                RoundedCornerShape(6.dp)
             )
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 3.dp),
@@ -282,26 +206,34 @@ fun CinemaStatusPill(
     ) {
         Text(
             text = label,
-            color = Color(0x99FFFFFF),
-            fontSize = 8.sp,
-            fontWeight = FontWeight.SemiBold,
+            color = Color(0x88FFFFFF),
+            fontSize = 7.5.sp,
+            fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
+            if (dotColor != null) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .background(dotColor, CircleShape)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
             Text(
                 text = value,
                 color = if (highlight) Color(0xFFFFCC00) else Color.White,
-                fontSize = 11.sp,
+                fontSize = 10.5.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
             if (subText != null) {
-                Spacer(modifier = Modifier.width(2.dp))
+                Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     text = subText,
-                    color = subTextColor,
+                    color = Color(0x99FFFFFF),
                     fontSize = 8.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     fontFamily = FontFamily.Monospace
                 )
             }
@@ -320,20 +252,20 @@ fun ThermalIndicator(status: ThermalStatus) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .background(Color(0xFF181A1D), RoundedCornerShape(4.dp))
-            .border(0.5.dp, dotColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
-            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .background(Color(0xB312141A), RoundedCornerShape(4.dp))
+            .border(0.5.dp, dotColor.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 2.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(6.dp)
+                .size(5.dp)
                 .background(dotColor, CircleShape)
         )
-        Spacer(modifier = Modifier.width(4.dp))
+        Spacer(modifier = Modifier.width(3.dp))
         Text(
             text = text,
             color = dotColor,
-            fontSize = 9.sp,
+            fontSize = 8.5.sp,
             fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace
         )

@@ -18,7 +18,7 @@ data class CinemaState(
     val transitionScale: Float = 1.0f,
     val transitionBitmap: Bitmap? = null,
 
-    // Exposure (Shutter & ISO)
+    // Exposure (Shutter & ISO & EV)
     val isManualExposure: Boolean = true,
     val shutterUnit: ShutterUnit = ShutterUnit.ANGLE,
     val shutterAngle: Float = 180f, // 180 degree rule default
@@ -26,6 +26,8 @@ data class CinemaState(
     val iso: Int = 100,
     val isAutoIso: Boolean = false,
     val autoIsoCap: Int = 3200,
+    val evCompensation: Float = 0.0f, // -2.0 to +2.0 EV bias
+    val isAeAfLocked: Boolean = false,
 
     // Focus
     val focusMode: FocusMode = FocusMode.AUTO_CONTINUOUS,
@@ -37,7 +39,9 @@ data class CinemaState(
     val wbKelvin: Int = 5600,
     val wbTint: Int = 0,
 
-    // Video Specs
+    // Video Specs & Hardware Lights
+    val isTorchOn: Boolean = false,
+    val torchLevel: Float = 1.0f,
     val targetFps: Int = 24, // 24, 30, 60
     val videoResolution: CustomResolution = CustomResolution.UHD_4K,
     val supportedResolutions: List<CustomResolution> = listOf(
@@ -60,12 +64,16 @@ data class CinemaState(
 
     // Recording Runtime
     val isRecording: Boolean = false,
+    val isRecordingPaused: Boolean = false,
     val recordingTimeSeconds: Long = 0L,
     val recordedBytes: Long = 0L,
     val droppedFramesCount: Int = 0,
     val currentSavedFilePath: String? = null,
+    val lastRecordedClipUri: String? = null,
+    val lastRecordedClipThumbnail: Bitmap? = null,
 
-    // Monitoring Overlays
+    // Monitoring Overlays & Clean Viewfinder Mode
+    val isCleanViewfinder: Boolean = false,
     val showHistogram: Boolean = true,
     val histogramData: HistogramData = HistogramData(),
     val showFocusPeaking: Boolean = false,
@@ -76,6 +84,7 @@ data class CinemaState(
     val showLutPreview: Boolean = true,
     val frameGuide: FrameGuide = FrameGuide.NONE,
     val showGrid: Boolean = true,
+    val showHorizonLeveler: Boolean = false,
 
     // System Telemetry
     val batteryPercent: Int = 100,

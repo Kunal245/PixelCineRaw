@@ -1,6 +1,9 @@
 package com.kunal.pixelcineraw.camera
 
 import android.app.Application
+import android.content.ContentUris
+import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
@@ -8,7 +11,10 @@ import androidx.lifecycle.viewModelScope
 import com.kunal.pixelcineraw.audio.AudioEngine
 import com.kunal.pixelcineraw.raw.RawDngRecorder
 import com.kunal.pixelcineraw.video.HevcLogRecorder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 /**
  * ViewModel managing the cinema camera lifecycle, manual controls, monitoring telemetry,
@@ -47,6 +53,45 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
         rawDngRecorder.onMetricsUpdate = { secs, bytes, dropped ->
             cameraController.updateRecordingMetrics(secs, bytes, dropped)
+        }
+
+        loadLatestClipThumbnail()
+    }
+
+    fun loadLatestClipThumbnail() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val projection = arrayOf(
+                    MediaStore.Video.Media._ID,
+                    MediaStore.Video.Media.DATE_ADDED
+                )
+                val selection = "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?"
+                val selectionArgs = arrayOf("%Movies/PixelCineRaw%")
+                val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
+
+                val resolver = getApplication<Application>().contentResolver
+                val queryUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+
+                resolver.query(queryUri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+                        val id = cursor.getLong(idColumn)
+                        val contentUri = ContentUris.withAppendedId(queryUri, id)
+
+                        val thumbnail = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            try {
+                                resolver.loadThumbnail(contentUri, android.util.Size(160, 160), null)
+                            } catch (e: Exception) {
+                                null
+                            }
+                        } else null
+
+                        cameraController.setLastRecordedClip(contentUri.toString(), thumbnail)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load latest clip thumbnail", e)
+            }
         }
     }
 
@@ -119,6 +164,10 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     hevcRecorder.stop()
                     Log.i(TAG, "Stopped video recording successfully")
+                    viewModelScope.launch {
+                        delay(600L)
+                        loadLatestClipThumbnail()
+                    }
                 }
                 RecordingFormat.RAW_DNG -> {
                     cameraController.onRawFrameAvailable = null
