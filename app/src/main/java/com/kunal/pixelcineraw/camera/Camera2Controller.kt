@@ -400,83 +400,45 @@ class Camera2Controller(
                 captureSession = null
             }
 
-            val outputConfigs = mutableListOf<OutputConfiguration>()
-            val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
-            val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
-            val useGlPipeline = isHlg && !useHardwareHlg
+            val pSize = optimalPreviewSize
+            val vRes = _state.value.videoResolution
+            val renderer = hlgGlRenderer ?: HlgGlRenderer().also { hlgGlRenderer = it }
 
-            if (useGlPipeline) {
-                val pSize = optimalPreviewSize
-                val vRes = _state.value.videoResolution
-                val renderer = hlgGlRenderer ?: HlgGlRenderer().also { hlgGlRenderer = it }
-
-                if (!renderer.isReady) {
-                    renderer.initialize(
-                        previewSurface = surface,
-                        viewWidth = pSize.width,
-                        viewHeight = pSize.height,
-                        streamWidth = pSize.width,
-                        streamHeight = pSize.height
-                    ) {
-                        cameraHandler?.post {
-                            startCaptureSession(onConfigured)
-                        }
-                    }
-                    return
-                }
-
-                renderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
-                if (videoRecordingSurface != null) {
-                    renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
-                } else {
-                    renderer.setEncoderSurface(null, 0, 0)
-                }
-
-                val glInputSurface = renderer.getCameraInputSurface()
-                if (glInputSurface != null && glInputSurface.isValid) {
-                    outputConfigs.add(OutputConfiguration(glInputSurface))
-                } else {
-                    Log.w(TAG, "GL input surface invalid, falling back to direct SurfaceView")
-                    outputConfigs.add(OutputConfiguration(surface))
-                }
-            } else {
-                hlgGlRenderer?.release()
-                hlgGlRenderer = null
-
-                // Inspect HLG10 constraints on Tensor G4 HAL
-                if (useHardwareHlg) {
-                    try {
-                        val chars = cameraManager.getCameraCharacteristics(spec.cameraId)
-                        val dynamicProfiles = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
-                        val constraints = dynamicProfiles?.getProfileCaptureRequestConstraints(DynamicRangeProfiles.HLG10) ?: emptySet()
-                        Log.d(TAG, "HLG10 capture request constraints: $constraints")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error querying HLG10 constraints", e)
+            if (!renderer.isReady) {
+                renderer.initialize(
+                    previewSurface = surface,
+                    viewWidth = pSize.width,
+                    viewHeight = pSize.height,
+                    streamWidth = pSize.width,
+                    streamHeight = pSize.height
+                ) {
+                    cameraHandler?.post {
+                        startCaptureSession(onConfigured)
                     }
                 }
-
-                val previewConfig = OutputConfiguration(surface).apply {
-                    if (useHardwareHlg) {
-                        setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
-                    }
-                }
-                outputConfigs.add(previewConfig)
-
-                // If video recording surface is attached, add it
-                videoRecordingSurface?.let { recSurface ->
-                    if (recSurface.isValid) {
-                        val recConfig = OutputConfiguration(recSurface).apply {
-                            if (useHardwareHlg) {
-                                setDynamicRangeProfile(DynamicRangeProfiles.HLG10)
-                            }
-                        }
-                        outputConfigs.add(recConfig)
-                    }
-                }
+                return
             }
 
-            // In HLG mode, do not attach incompatible RAW or 8-bit secondary stream
-            if (!isHlg && _state.value.recordingFormat == RecordingFormat.RAW_DNG && spec.isRawCapable) {
+            renderer.setPreviewSurface(surface, pSize.width, pSize.height, vRes.width, vRes.height)
+            renderer.setColorMode(_state.value.colorProfile)
+
+            if (videoRecordingSurface != null) {
+                renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
+            } else {
+                renderer.setEncoderSurface(null, 0, 0)
+            }
+
+            val outputConfigs = mutableListOf<OutputConfiguration>()
+            val glInputSurface = renderer.getCameraInputSurface()
+            if (glInputSurface != null && glInputSurface.isValid) {
+                outputConfigs.add(OutputConfiguration(glInputSurface))
+            } else {
+                Log.w(TAG, "GL input surface invalid, falling back to direct SurfaceView")
+                outputConfigs.add(OutputConfiguration(surface))
+            }
+
+            // In RAW mode, attach RAW_SENSOR stream
+            if (_state.value.recordingFormat == RecordingFormat.RAW_DNG && spec.isRawCapable) {
                 val rawSize = spec.pixelArraySize
                 rawImageReader = ImageReader.newInstance(
                     rawSize.width,
@@ -505,7 +467,7 @@ class Camera2Controller(
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
                         val status = if (_state.value.colorProfile == ColorProfile.HLG_10BIT) {
-                            if (useHardwareHlg) HdrPipelineStatus.HW_HLG10 else HdrPipelineStatus.CURVE_HLG10
+                            HdrPipelineStatus.CURVE_HLG10
                         } else {
                             HdrPipelineStatus.NONE
                         }
@@ -516,14 +478,6 @@ class Camera2Controller(
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         Log.e(TAG, "CaptureSession configuration failed")
-                        if (useHardwareHlg && !hardwareHlgFallback) {
-                            Log.w(TAG, "Hardware HLG10 session configuration failed! Falling back to OpenGL ES BT.2020 HLG pipeline")
-                            hardwareHlgFallback = true
-                            _state.update { it.copy(hdrPipelineStatus = HdrPipelineStatus.CURVE_HLG10) }
-                            cameraHandler?.post {
-                                startCaptureSession()
-                            }
-                        }
                     }
                 }
             )
@@ -531,11 +485,6 @@ class Camera2Controller(
             device.createCaptureSession(sessionConfig)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start capture session", e)
-            if (_state.value.colorProfile == ColorProfile.HLG_10BIT && !hardwareHlgFallback) {
-                hardwareHlgFallback = true
-                _state.update { it.copy(hdrPipelineStatus = HdrPipelineStatus.CURVE_HLG10) }
-                cameraHandler?.post { startCaptureSession() }
-            }
         }
     }
 
@@ -550,35 +499,16 @@ class Camera2Controller(
                 droppedFramesCount = 0
             )
         }
-        val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
-        val useHardwareHlg = isHlg && (_state.value.currentSensorSpec?.isHlg10Supported == true) && !hardwareHlgFallback
-        val useGlPipeline = isHlg && !useHardwareHlg
-
-        if (useGlPipeline) {
-            val vRes = _state.value.videoResolution
-            hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height)
-            onStarted()
-        } else {
-            startCaptureSession(onConfigured = onStarted)
-        }
+        val vRes = _state.value.videoResolution
+        hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height)
+        onStarted()
     }
 
     fun stopRecordingSession(onStopped: () -> Unit = {}) {
-        val isHlg = _state.value.colorProfile == ColorProfile.HLG_10BIT
-        val useHardwareHlg = isHlg && (_state.value.currentSensorSpec?.isHlg10Supported == true) && !hardwareHlgFallback
-        val useGlPipeline = isHlg && !useHardwareHlg
-
-        if (useGlPipeline) {
-            hlgGlRenderer?.setEncoderSurface(null, 0, 0)
-            videoRecordingSurface = null
-            _state.update { it.copy(isRecording = false) }
-            onStopped()
-        } else {
-            videoRecordingSurface = null
-            _state.update { it.copy(isRecording = false) }
-            createAndSetRepeatingRequest()
-            startCaptureSession(onConfigured = onStopped)
-        }
+        hlgGlRenderer?.setEncoderSurface(null, 0, 0)
+        videoRecordingSurface = null
+        _state.update { it.copy(isRecording = false) }
+        onStopped()
     }
 
     /**
@@ -599,27 +529,10 @@ class Camera2Controller(
                 CameraDevice.TEMPLATE_PREVIEW
             }
 
-            val isHlg = stateVal.colorProfile == ColorProfile.HLG_10BIT
-            val useHardwareHlg = isHlg && spec.isHlg10Supported && !hardwareHlgFallback
-            val useGlPipeline = isHlg && !useHardwareHlg
-
-            val streamSurface = if (useGlPipeline) {
-                hlgGlRenderer?.inputSurface ?: pSurface
-            } else {
-                pSurface
-            }
+            val streamSurface = hlgGlRenderer?.inputSurface ?: pSurface
 
             val builder = device.createCaptureRequest(template).apply {
                 addTarget(streamSurface)
-
-                // Add recording surface directly to Camera2 only when NOT using GL pipeline
-                if (!useGlPipeline) {
-                    videoRecordingSurface?.let { recSurface ->
-                        if (recSurface.isValid) {
-                            addTarget(recSurface)
-                        }
-                    }
-                }
 
                 // Add raw surface if in RAW mode
                 rawImageReader?.let { reader ->
@@ -1188,51 +1101,21 @@ class Camera2Controller(
 
     /**
      * User Action: Color Profile (Rec.709 8-bit, Pixel-Log, HLG10 HDR 10-bit)
+     *
+     * mcpro24fps unified architecture: updates GLSL shader uniform uColorMode instantly
+     * with ZERO CameraCaptureSession restart and ZERO SurfaceView recreation!
      */
     fun setColorProfile(profile: ColorProfile) {
-        val prevProfile = _state.value.colorProfile
-        hardwareHlgFallback = false
         val isNewHlg = profile == ColorProfile.HLG_10BIT
-        val isPrevHlg = prevProfile == ColorProfile.HLG_10BIT
-        val currentSpec = _state.value.currentSensorSpec
+        val status = if (isNewHlg) HdrPipelineStatus.CURVE_HLG10 else HdrPipelineStatus.NONE
 
-        val initialStatus = if (isNewHlg) {
-            if (currentSpec?.isHlg10Supported == true) HdrPipelineStatus.HW_HLG10 else HdrPipelineStatus.CURVE_HLG10
-        } else {
-            HdrPipelineStatus.NONE
-        }
+        _state.update { it.copy(colorProfile = profile, hdrPipelineStatus = status) }
 
-        _state.update { it.copy(colorProfile = profile, hdrPipelineStatus = initialStatus) }
+        // Instantly switch shader color mode on the running GL thread
+        hlgGlRenderer?.setColorMode(profile)
 
-        if (isNewHlg) {
-            if (currentSpec?.isHlg10Supported != true) {
-                // Find physical camera "0" or another probed rear camera with HLG10 support
-                val hlgSpec = _probedSensors.find { it.cameraId == "0" && it.isHlg10Supported }
-                    ?: _probedSensors.find { it.isHlg10Supported && it.isMainWide }
-                    ?: _probedSensors.find { it.isHlg10Supported }
-
-                if (hlgSpec != null && hlgSpec.cameraId != cameraDevice?.id) {
-                    Log.d(TAG, "Switching to physical camera ${hlgSpec.cameraId} for HLG10 HDR support")
-                    _state.update {
-                        it.copy(
-                            currentSensorSpec = hlgSpec,
-                            selectedLens = LensSelection.WIDE_1X,
-                            zoomRatio = 1.0f,
-                            hdrPipelineStatus = HdrPipelineStatus.HW_HLG10
-                        )
-                    }
-                    openCamera(hlgSpec.cameraId)
-                    return
-                }
-            }
-        }
-
-        if (isPrevHlg != isNewHlg) {
-            // Reconfigure CameraCaptureSession to attach or detach DynamicRangeProfiles.HLG10
-            startCaptureSession()
-        } else {
-            createAndSetRepeatingRequest()
-        }
+        // Update sensor tone curves on the fly without stopping repeating stream
+        createAndSetRepeatingRequest()
     }
 
     /**

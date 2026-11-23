@@ -47,7 +47,7 @@ data class CinemaState(
         CustomResolution.FHD_1080P
     ),
     val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
-    val targetBitrateMbps: Int = 100, // 50 to 200 Mbps
+    val targetBitrateMbps: Int = 100, // 50 to 240 Mbps
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
     val hdrPipelineStatus: HdrPipelineStatus = HdrPipelineStatus.NONE,
     val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,

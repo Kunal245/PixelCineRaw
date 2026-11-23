@@ -6,43 +6,43 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.kunal.pixelcineraw.camera.ColorProfile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * High-performance OpenGL ES 3.0 10-bit BT.2020 HLG Render Pipeline.
+ * Rock-solid 8-bit RGBA OpenGL ES 3.0 Cinema Render Pipeline (mcpro24fps architecture).
  *
- * Emulates the mcpro24fps architecture for devices where Camera2 DynamicRangeProfiles.HLG10
- * is restricted by firmware. Receives Camera2 frames via an offscreen SurfaceTexture (OES),
- * converts color primaries from Rec.709 to Rec.2020 via a 3x3 color matrix, applies the
- * ITU-R BT.2100 HLG OETF transfer curve, and drives both the OLED viewfinder (via EGL_GL_COLORSPACE_BT2020_HLG_EXT)
- * and the HEVCProfileMain10 video encoder.
+ * Keeps Camera2 streaming continuously into a single offscreen SurfaceTexture (OES) at 60fps.
+ * Toggling between REC.709, PIXEL-LOG, and HLG happens instantly inside the GLSL fragment
+ * shader (uColorMode uniform) with ZERO CameraCaptureSession restart and ZERO SurfaceView recreation!
  *
- * Thread-safe and lazily initialized only when HLG10 mode is requested.
+ * When HLG mode is active, the shader:
+ * 1. Linearizes input pixels
+ * 2. Applies the Rec.709 to Rec.2020 color primary transformation matrix
+ * 3. Applies the ITU-R BT.2100 HLG OETF curve to expand shadow & highlight dynamic range
+ *    alongside the OLED HDR display brightness boost.
  */
 class HlgGlRenderer {
 
     companion object {
         private const val TAG = "HlgGlRenderer"
-
-        // EGL Colorspace extensions (EGL_EXT_gl_colorspace_bt2020_hlg)
-        private const val EGL_GL_COLORSPACE_KHR = 0x309D
-        private const val EGL_GL_COLORSPACE_BT2020_HLG_EXT = 0x3540
+        private const val EGL_RECORDABLE_ANDROID = 0x3142
 
         // Full-screen Quad geometry
         private val VERTICES = floatArrayOf(
             -1.0f, -1.0f,
              1.0f, -1.0f,
             -1.0f,  1.0f,
-             1.0f,  1.0f
+             1.0f,  1.0f,
         )
 
         private val TEX_COORDS = floatArrayOf(
             0.0f, 0.0f,
             1.0f, 0.0f,
             0.0f, 1.0f,
-            1.0f, 1.0f
+            1.0f, 1.0f,
         )
 
         private const val VERTEX_SHADER_CODE = """#version 300 es
@@ -62,6 +62,7 @@ void main() {
 precision highp float;
 
 uniform samplerExternalOES sTexture;
+uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020
 in vec2 vTextureCoord;
 out vec4 fragColor;
 
@@ -90,25 +91,21 @@ vec3 encodeHlg(vec3 rgb) {
     return vec3(hlgOetf(rgb.r), hlgOetf(rgb.g), hlgOetf(rgb.b));
 }
 
-float hlgEotf(float V) {
-    V = clamp(V, 0.0, 1.0);
-    if (V <= 0.5) {
-        return (V * V) / 3.0;
-    } else {
-        return (exp((V - c) / a) + b) / 12.0;
-    }
-}
-
-vec3 decodeHlg(vec3 hlg) {
-    return vec3(hlgEotf(hlg.r), hlgEotf(hlg.g), hlgEotf(hlg.b));
-}
-
 void main() {
     vec4 src = texture(sTexture, vTextureCoord);
-    vec3 linearRgb = decodeHlg(src.rgb);
-    vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
-    vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
-    fragColor = vec4(hlgRgb, 1.0);
+    if (uColorMode == 2) {
+        // HLG / BT.2020 Mode (mcpro24fps architecture):
+        // 1. Linearize Rec.709 input (gamma 2.2 approximation) to scene light
+        vec3 linearRgb = pow(max(vec3(0.0), src.rgb), vec3(2.2));
+        // 2. Expand color primaries to Rec.2020 gamut
+        vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
+        // 3. Apply smooth ITU-R BT.2100 HLG OETF to expand highlight & shadow dynamic range
+        vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
+        fragColor = vec4(hlgRgb, 1.0);
+    } else {
+        // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1): direct passthrough
+        fragColor = src;
+    }
 }
 """
     }
@@ -121,7 +118,6 @@ void main() {
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
-    private var supportsHlgColorSpace = false
 
     // Window Surfaces
     private var previewEglSurface: EGLSurface? = null
@@ -137,6 +133,7 @@ void main() {
     // Shaders & Geometry Buffers
     private var programId: Int = 0
     private var uTexMatrixLoc: Int = -1
+    private var uColorModeLoc: Int = -1
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -156,6 +153,10 @@ void main() {
 
     @Volatile
     var isReady: Boolean = false
+        private set
+
+    @Volatile
+    var currentColorMode: Int = 0
         private set
 
     init {
@@ -186,7 +187,7 @@ void main() {
     }
 
     /**
-     * Lazily initializes EGL context with 10-bit config, binds active SurfaceView preview surface,
+     * Lazily initializes standard 8-bit RGBA_8888 EGL context, binds active preview surface,
      * and creates the Camera2 OES input surface.
      */
     fun initialize(
@@ -204,17 +205,17 @@ void main() {
 
         handler.post {
             try {
-                if (!isReady || eglContext == EGL14.EGL_NO_CONTEXT) {
+                if (!isReady || (eglContext == EGL14.EGL_NO_CONTEXT)) {
                     initEGL()
                     initShaders()
                     initOesTexture(streamWidth, streamHeight)
                     isReady = true
-                    Log.i(TAG, "HlgGlRenderer initialized successfully (${streamWidth}x$streamHeight, HLG EGL extension=$supportsHlgColorSpace)")
+                    Log.i(TAG, "HlgGlRenderer initialized successfully (${streamWidth}x$streamHeight, standard 8-bit RGBA8888)")
                 }
 
                 if (previewSurface != null && previewSurface.isValid) {
                     destroyPreviewSurface()
-                    val eglSurf = createHlgWindowSurface(previewSurface)
+                    val eglSurf = createWindowSurface(previewSurface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         calculateViewport(viewWidth, viewHeight, streamWidth, streamHeight)
@@ -231,6 +232,26 @@ void main() {
 
     fun getCameraInputSurface(): Surface? = inputSurface
 
+    /**
+     * Updates the active color mode (0 = REC.709, 1 = PIXEL-LOG, 2 = HLG) instantly
+     * in the fragment shader without restarting CameraCaptureSession!
+     */
+    fun setColorMode(profile: ColorProfile) {
+        val mode = when (profile) {
+            ColorProfile.REC709 -> 0
+            ColorProfile.FLAT_LOG -> 1
+            ColorProfile.HLG_10BIT -> 2
+        }
+        currentColorMode = mode
+        val handler = glHandler ?: return
+        handler.post {
+            if (isReady && programId != 0) {
+                GLES20.glUseProgram(programId)
+                GLES20.glUniform1i(uColorModeLoc, mode)
+            }
+        }
+    }
+
     private fun initEGL() {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
@@ -242,34 +263,27 @@ void main() {
             throw RuntimeException("Unable to initialize EGL14")
         }
 
-        // Query available extensions
-        val extensions = EGL14.eglQueryString(eglDisplay, EGL14.EGL_EXTENSIONS) ?: ""
-        val hasKhr = extensions.contains("EGL_KHR_gl_colorspace")
-        val hasHlg = extensions.contains("EGL_EXT_gl_colorspace_bt2020_hlg")
-        supportsHlgColorSpace = hasKhr && hasHlg
-        Log.d(TAG, "EGL Colorspace query: hasKhr=$hasKhr, hasHlg=$hasHlg")
-
-        // 1. Try choosing 10-bit EGL config (RGBA 10:10:10:2)
-        val config10BitAttribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 10,
-            EGL14.EGL_GREEN_SIZE, 10,
-            EGL14.EGL_BLUE_SIZE, 10,
-            EGL14.EGL_ALPHA_SIZE, 2,
+        // Standard 8-bit RGBA_8888 with EGL_RECORDABLE_ANDROID for 60fps Tensor G4 stability
+        val configAttribs = intArrayOf(
+            EGL14.EGL_RED_SIZE, 8,
+            EGL14.EGL_GREEN_SIZE, 8,
+            EGL14.EGL_BLUE_SIZE, 8,
+            EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
+            EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_NONE
         )
 
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
 
-        var foundConfig = (EGL14.eglChooseConfig(
-            eglDisplay, config10BitAttribs, 0, configs, 0, 1, numConfigs, 0
-        ) && numConfigs[0] > 0)
+        var foundConfig = EGL14.eglChooseConfig(
+            eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0
+        ) && numConfigs[0] > 0
 
         if (!foundConfig) {
-            Log.w(TAG, "10-bit EGLConfig not found, falling back to 8-bit RGBA_8888")
-            val config8BitAttribs = intArrayOf(
+            val fallbackAttribs = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
@@ -278,17 +292,16 @@ void main() {
                 EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
                 EGL14.EGL_NONE
             )
-            foundConfig = (EGL14.eglChooseConfig(
-                eglDisplay, config8BitAttribs, 0, configs, 0, 1, numConfigs, 0
-            ) && numConfigs[0] > 0)
+            foundConfig = EGL14.eglChooseConfig(
+                eglDisplay, fallbackAttribs, 0, configs, 0, 1, numConfigs, 0
+            ) && numConfigs[0] > 0
         }
 
         if (!foundConfig || configs[0] == null) {
-            throw RuntimeException("Failed to find suitable EGLConfig")
+            throw RuntimeException("Failed to find suitable 8-bit EGLConfig")
         }
         eglConfig = configs[0]
 
-        // 2. Create OpenGL ES 3.0 context
         val contextAttribs = intArrayOf(
             EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
             EGL14.EGL_NONE
@@ -317,6 +330,7 @@ void main() {
         }
 
         uTexMatrixLoc = GLES20.glGetUniformLocation(programId, "uTexMatrix")
+        uColorModeLoc = GLES20.glGetUniformLocation(programId, "uColorMode")
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
@@ -370,7 +384,7 @@ void main() {
             try {
                 destroyPreviewSurface()
                 if (surface != null && surface.isValid && isReady) {
-                    val eglSurf = createHlgWindowSurface(surface)
+                    val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         calculateViewport(viewWidth, viewHeight, streamWidth, streamHeight)
@@ -393,7 +407,7 @@ void main() {
                 if (surface != null && surface.isValid && isReady) {
                     encoderWidth = width
                     encoderHeight = height
-                    val eglSurf = createHlgWindowSurface(surface)
+                    val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         encoderEglSurface = eglSurf
                         Log.i(TAG, "Encoder EGL surface attached (${width}x$height)")
@@ -405,7 +419,7 @@ void main() {
         }
     }
 
-    private fun createHlgWindowSurface(surface: Surface): EGLSurface {
+    private fun createWindowSurface(surface: Surface): EGLSurface {
         val config = eglConfig ?: run {
             Log.w(TAG, "Cannot create window surface: EGLConfig is null")
             return EGL14.EGL_NO_SURFACE
@@ -416,25 +430,12 @@ void main() {
         }
 
         try {
-            // 1. Only pass EGL_GL_COLORSPACE_BT2020_HLG_EXT if extension is actually supported!
-            if (supportsHlgColorSpace) {
-                val hlgAttribs = intArrayOf(
-                    EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_BT2020_HLG_EXT,
-                    EGL14.EGL_NONE
-                )
-                val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, hlgAttribs, 0)
-                if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
-                    return eglSurf
-                }
-            }
-
-            // 2. Clean window surface without colorspace extension attributes
+            // Standard EGL window surface (rock-solid 8-bit RGBA8888, zero driver stalls)
             val defaultAttribs = intArrayOf(EGL14.EGL_NONE)
             val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, defaultAttribs, 0)
             if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
                 return eglSurf
             }
-
             Log.w(TAG, "Failed to create EGL window surface: 0x${Integer.toHexString(EGL14.eglGetError())}")
         } catch (e: Throwable) {
             Log.w(TAG, "Exception creating EGL window surface", e)
@@ -469,7 +470,7 @@ void main() {
     }
 
     /**
-     * Executes the HLG shader render pass when a new Camera2 frame arrives.
+     * Executes the shader render pass when a new Camera2 frame arrives.
      */
     private fun renderFrame() {
         val st = surfaceTexture ?: return
@@ -480,7 +481,7 @@ void main() {
 
             if (!hasLoggedFirstFrame) {
                 hasLoggedFirstFrame = true
-                Log.d("PixelCineHDR", "GL frame rendered")
+                Log.d("PixelCineHDR", "GL frame rendered (mode=$currentColorMode)")
             }
 
             // 1. Render to Viewfinder
@@ -510,7 +511,7 @@ void main() {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error rendering HLG frame", e)
+            Log.w(TAG, "Error rendering GL frame", e)
         }
     }
 
@@ -518,6 +519,7 @@ void main() {
         GLES20.glUseProgram(programId)
 
         GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, texMatrix, 0)
+        GLES20.glUniform1i(uColorModeLoc, currentColorMode)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
@@ -598,15 +600,6 @@ void main() {
 
                 isReady = false
             }
-        }
-
-        glThread?.quitSafely()
-        try {
-            glThread?.join(1000)
-            glThread = null
-            glHandler = null
-        } catch (e: InterruptedException) {
-            Log.w(TAG, "Error stopping GL thread", e)
         }
     }
 }

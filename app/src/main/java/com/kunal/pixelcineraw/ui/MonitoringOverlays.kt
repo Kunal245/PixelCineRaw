@@ -255,86 +255,110 @@ fun MovableHistogramHUD(
     var dragOffsetX by remember { mutableFloatStateOf(0f) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
 
-    Box(
+    Column(
         modifier = modifier
-            .offset { IntOffset(dragOffsetX.roundToInt(), dragOffsetY.roundToInt()) }
-            .size(width = 124.dp, height = 58.dp)
-            .background(Color(0xA6111317), RoundedCornerShape(6.dp))
-            .border(0.7.dp, if (isHlg) Color(0x88FFD700) else Color(0x44FFFFFF), RoundedCornerShape(6.dp))
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    dragOffsetX += dragAmount.x
-                    dragOffsetY += dragAmount.y
+            .offset { IntOffset(dragOffsetX.roundToInt(), dragOffsetY.roundToInt()) },
+        horizontalAlignment = Alignment.End
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 124.dp, height = 58.dp)
+                .background(Color(0xA6111317), RoundedCornerShape(6.dp))
+                .border(0.7.dp, if (isHlg) Color(0x88FFD700) else Color(0x44FFFFFF), RoundedCornerShape(6.dp))
+                .pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        dragOffsetX += dragAmount.x
+                        dragOffsetY += dragAmount.y
+                    }
+                }
+                .padding(horizontal = 4.dp, vertical = 3.dp)
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+                val numBins = data.redBins.size
+
+                if (numBins > 1) {
+                    val redPath = Path()
+                    val greenPath = Path()
+                    val bluePath = Path()
+                    val lumaPath = Path()
+
+                    val startY = h
+                    redPath.moveTo(0f, startY)
+                    greenPath.moveTo(0f, startY)
+                    bluePath.moveTo(0f, startY)
+                    lumaPath.moveTo(0f, startY)
+
+                    for (i in 0 until numBins) {
+                        val x = (i.toFloat() / (numBins - 1)) * w
+                        val rH = (data.redBins[i] * (h - 6f)).coerceIn(0f, h)
+                        val gH = (data.greenBins[i] * (h - 6f)).coerceIn(0f, h)
+                        val bH = (data.blueBins[i] * (h - 6f)).coerceIn(0f, h)
+                        val lH = (data.lumaBins[i] * (h - 6f)).coerceIn(0f, h)
+
+                        redPath.lineTo(x, h - rH)
+                        greenPath.lineTo(x, h - gH)
+                        bluePath.lineTo(x, h - bH)
+                        lumaPath.lineTo(x, h - lH)
+                    }
+
+                    drawPath(redPath, Color(0x99FF3333), style = Stroke(width = 1.2.dp.toPx()))
+                    drawPath(greenPath, Color(0x9933FF33), style = Stroke(width = 1.2.dp.toPx()))
+                    drawPath(bluePath, Color(0x993399FF), style = Stroke(width = 1.2.dp.toPx()))
+                    drawPath(lumaPath, Color(0xEEFFFFFF), style = Stroke(width = 1.0.dp.toPx()))
+
+                    // HLG diffuse white (75% IRE / 203 nits) and specular headroom (100% IRE / 1000 nits) reference line
+                    if (isHlg) {
+                        val x75 = w * 0.75f
+                        drawLine(
+                            color = Color(0x99FFD700),
+                            start = Offset(x75, 10f),
+                            end = Offset(x75, h),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
                 }
             }
-            .padding(horizontal = 4.dp, vertical = 3.dp)
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val numBins = data.redBins.size
 
-            if (numBins > 1) {
-                val redPath = Path()
-                val greenPath = Path()
-                val bluePath = Path()
-                val lumaPath = Path()
-
-                val startY = h
-                redPath.moveTo(0f, startY)
-                greenPath.moveTo(0f, startY)
-                bluePath.moveTo(0f, startY)
-                lumaPath.moveTo(0f, startY)
-
-                for (i in 0 until numBins) {
-                    val x = (i.toFloat() / (numBins - 1)) * w
-                    val rH = (data.redBins[i] * (h - 6f)).coerceIn(0f, h)
-                    val gH = (data.greenBins[i] * (h - 6f)).coerceIn(0f, h)
-                    val bH = (data.blueBins[i] * (h - 6f)).coerceIn(0f, h)
-                    val lH = (data.lumaBins[i] * (h - 6f)).coerceIn(0f, h)
-
-                    redPath.lineTo(x, h - rH)
-                    greenPath.lineTo(x, h - gH)
-                    bluePath.lineTo(x, h - bH)
-                    lumaPath.lineTo(x, h - lH)
-                }
-
-                drawPath(redPath, Color(0x99FF3333), style = Stroke(width = 1.2.dp.toPx()))
-                drawPath(greenPath, Color(0x9933FF33), style = Stroke(width = 1.2.dp.toPx()))
-                drawPath(bluePath, Color(0x993399FF), style = Stroke(width = 1.2.dp.toPx()))
-                drawPath(lumaPath, Color(0xEEFFFFFF), style = Stroke(width = 1.0.dp.toPx()))
-
-                // HLG diffuse white (75% IRE / 203 nits) and specular headroom (100% IRE / 1000 nits) reference line
-                if (isHlg) {
-                    val x75 = w * 0.75f
-                    drawLine(
-                        color = Color(0x99FFD700),
-                        start = Offset(x75, 10f),
-                        end = Offset(x75, h),
-                        strokeWidth = 1.dp.toPx()
-                    )
-                }
+            Row(
+                modifier = Modifier.align(Alignment.TopStart),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(4.dp)
+                        .background(if (isHlg) Color(0xFFFFD700) else Color(0xFF00FF66), RoundedCornerShape(1.dp))
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                    text = if (isHlg) "HLG (75% W)" else "RGB/LUMA LIVE",
+                    color = if (isHlg) Color(0xFFFFD700) else Color(0x99FFFFFF),
+                    fontSize = 7.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
             }
         }
 
-        Row(
-            modifier = Modifier.align(Alignment.TopStart),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        // Red HLG badge under live histogram just like mcpro24fps
+        if (isHlg) {
+            Spacer(modifier = Modifier.height(3.dp))
             Box(
                 modifier = Modifier
-                    .size(4.dp)
-                    .background(if (isHlg) Color(0xFFFFD700) else Color(0xFF00FF66), RoundedCornerShape(1.dp))
-            )
-            Spacer(modifier = Modifier.width(3.dp))
-            Text(
-                text = if (isHlg) "HLG10 (75% W)" else "RGB/LUMA LIVE",
-                color = if (isHlg) Color(0xFFFFD700) else Color(0x99FFFFFF),
-                fontSize = 7.5.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
+                    .background(Color(0xFFCC0000), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 6.dp, vertical = 1.5.dp)
+            ) {
+                Text(
+                    text = "HLG",
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.5.sp
+                )
+            }
         }
     }
 }

@@ -452,7 +452,7 @@ fun CinemaSettingsDialog(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        listOf(50, 100, 150, 200).forEach { mbps ->
+                        listOf(50, 100, 150, 200, 240).forEach { mbps ->
                             FilterChip(
                                 selected = state.targetBitrateMbps == mbps,
                                 onClick = { onSelectBitrate(mbps) },
