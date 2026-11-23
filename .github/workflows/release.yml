@@ -1,0 +1,146 @@
+name: Build & Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build APK & Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code with Full Git History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant Execute Permission to Gradle Wrapper
+        run: chmod +x gradlew
+
+      - name: Assemble Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Generate Build Metadata, Checksum & Release Notes
+        id: prep
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          APK_SRC="app/build/outputs/apk/debug/app-debug.apk"
+          APK_DEST="PixelCineRaw-${TAG_NAME}.apk"
+          SHA_DEST="${APK_DEST}.sha256"
+
+          if [ ! -f "$APK_SRC" ]; then
+            echo "Error: $APK_SRC not found!"
+            exit 1
+          fi
+
+          cp "$APK_SRC" "$APK_DEST"
+
+          # Calculate SHA-256 Checksum
+          SHA256="$(sha256sum "$APK_DEST" | awk '{print $1}')"
+          echo "${SHA256}  ${APK_DEST}" > "$SHA_DEST"
+
+          # Calculate APK file size
+          APK_SIZE_BYTES="$(wc -c < "$APK_DEST" | tr -d ' ')"
+          APK_SIZE_MB="$(awk "BEGIN {printf \"%.2f\", $APK_SIZE_BYTES / 1048576}")"
+
+          # Determine Pre-release Status (-alpha, -beta, -rc)
+          if [[ "$TAG_NAME" =~ -(alpha|beta|rc) ]]; then
+            IS_PRERELEASE="true"
+          else
+            IS_PRERELEASE="false"
+          fi
+          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+
+          # Extract Tag Annotation / Highlights
+          TAG_MSG="$(git tag -l --format='%(contents)' "$TAG_NAME" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ -z "$TAG_MSG" ]; then
+            TAG_MSG="PixelCineRaw release ${TAG_NAME}"
+          fi
+
+          # Extract Previous Tag for Changelog
+          PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^" 2>/dev/null || true)"
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG="$(git log "${PREV_TAG}..${TAG_NAME}" --oneline --no-merges)"
+            CHANGELOG_HEADER="Commits since \`${PREV_TAG}\`:"
+          else
+            CHANGELOG="$(git log -n 15 --oneline --no-merges)"
+            CHANGELOG_HEADER="Recent commits:"
+          fi
+
+          # Write release_notes.md without YAML indentation
+          cat <<EOF | sed 's/^          //' > release_notes.md
+          # 🎬 PixelCineRaw \`${TAG_NAME}\`
+
+          > ${TAG_MSG}
+
+          ---
+
+          ### 📊 Build Specifications
+
+          | Specification | Value |
+          | :--- | :--- |
+          | **Release Tag** | \`${TAG_NAME}\` |
+          | **Commit SHA** | [\`${SHORT_SHA}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |
+          | **Build Timestamp** | \`${BUILD_DATE}\` |
+          | **APK Binary** | \`${APK_DEST}\` |
+          | **File Size** | **${APK_SIZE_MB} MB** (${APK_SIZE_BYTES} bytes) |
+          | **SHA-256 Checksum** | \`${SHA256}\` |
+          | **Android Compatibility** | Android 15+ (\`minSdk 35\`, \`targetSdk 37\`, \`compileSdk 37\`) |
+          | **Target Architecture** | Universal / \`arm64-v8a\` |
+          | **Hardware Target** | Google Pixel (Tensor G4 / Pixel 9a) & Camera2 Manual Sensor |
+          | **Software License** | [GNU General Public License v3.0 (GPLv3)](https://www.gnu.org/licenses/gpl-3.0) |
+
+          ---
+
+          ### 📦 Installation & Verification
+
+          1. **Direct Download:** Download \`${APK_DEST}\` attached below to your Android device.
+          2. **Verify Checksum (Optional):**
+             \`\`\`bash
+             # Linux / macOS
+             sha256sum ${APK_DEST}
+
+             # Windows PowerShell
+             Get-FileHash ${APK_DEST} -Algorithm SHA256
+             \`\`\`
+             Verify the output matches:
+             \`${SHA256}\`
+          3. **Install via ADB:**
+             \`\`\`bash
+             adb install -r ${APK_DEST}
+             \`\`\`
+             *(Or open the APK on your device and grant "Install unknown apps" permission).*
+
+          ---
+
+          ### 📝 Commit Changelog
+          ${CHANGELOG_HEADER}
+          \`\`\`
+          ${CHANGELOG}
+          \`\`\`
+          EOF
+
+      - name: Publish Automated GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "PixelCineRaw ${{ github.ref_name }}"
+          body_path: release_notes.md
+          prerelease: ${{ steps.prep.outputs.is_prerelease == 'true' }}
+          draft: false
+          files: |
+            PixelCineRaw-${{ github.ref_name }}.apk
+            PixelCineRaw-${{ github.ref_name }}.apk.sha256
