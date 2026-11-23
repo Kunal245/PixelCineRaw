@@ -16,6 +16,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -141,9 +143,13 @@ fun Viewfinder(
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
+        val previewSize = viewModel.cameraController.optimalPreviewSize
+        val aspectModifier = Modifier
+            .fillMaxHeight()
+            .aspectRatio(previewSize.width.toFloat() / previewSize.height.toFloat(), matchHeightConstraintsFirst = true)
+
         AndroidView(
-            modifier = Modifier
-                .fillMaxSize()
+            modifier = aspectModifier
                 .pointerInput(Unit) {
                     detectTapGestures { offset ->
                         val normX = offset.x / size.width
@@ -165,8 +171,8 @@ fun Viewfinder(
                     textureViewRef = this
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                            val previewSize = viewModel.cameraController.optimalPreviewSize
-                            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+                            val pSize = viewModel.cameraController.optimalPreviewSize
+                            surfaceTexture.setDefaultBufferSize(pSize.width, pSize.height)
                             val surface = Surface(surfaceTexture)
                             viewModel.attachPreviewSurface(surface)
 
@@ -175,20 +181,20 @@ fun Viewfinder(
                                 viewWidth = width,
                                 viewHeight = height,
                                 sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
-                                previewWidth = previewSize.width,
-                                previewHeight = previewSize.height
+                                previewWidth = pSize.width,
+                                previewHeight = pSize.height
                             )
                         }
 
                         override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                            val previewSize = viewModel.cameraController.optimalPreviewSize
+                            val pSize = viewModel.cameraController.optimalPreviewSize
                             applyViewfinderTransform(
                                 textureView = this@apply,
                                 viewWidth = width,
                                 viewHeight = height,
                                 sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
-                                previewWidth = previewSize.width,
-                                previewHeight = previewSize.height
+                                previewWidth = pSize.width,
+                                previewHeight = pSize.height
                             )
                         }
 
@@ -205,14 +211,14 @@ fun Viewfinder(
                         val w = right - left
                         val h = bottom - top
                         if (w > 0 && h > 0) {
-                            val previewSize = viewModel.cameraController.optimalPreviewSize
+                            val pSize = viewModel.cameraController.optimalPreviewSize
                             applyViewfinderTransform(
                                 textureView = this,
                                 viewWidth = w,
                                 viewHeight = h,
                                 sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
-                                previewWidth = previewSize.width,
-                                previewHeight = previewSize.height
+                                previewWidth = pSize.width,
+                                previewHeight = pSize.height
                             )
                         }
                     }
@@ -257,8 +263,8 @@ fun Viewfinder(
 
 /**
  * Configures the matrix transformation for TextureView:
- * Ensures the preview is upright and maintains its natural, un-distorted aspect ratio without
- * artificial stretching or compression.
+ * Since the TextureView is already sized to the exact aspect ratio of the preview,
+ * this transform purely aligns the rotated sensor buffer to the view without stretching.
  */
 fun applyViewfinderTransform(
     textureView: TextureView,
@@ -283,25 +289,6 @@ fun applyViewfinderTransform(
     if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
         bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
         matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-
-        // Calculate aspect ratios
-        val bufferAspect = previewWidth.toFloat() / previewHeight.toFloat()
-        val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
-
-        val scaleX: Float
-        val scaleY: Float
-
-        if (viewAspect > bufferAspect) {
-            // View is wider than camera buffer (e.g. 20:9 display vs 16:9 or 4:3) -> pillarbox bars on left/right
-            scaleX = (viewHeight.toFloat() / viewWidth.toFloat()) * bufferAspect
-            scaleY = 1.0f
-        } else {
-            // View is taller than camera buffer -> letterbox bars on top/bottom
-            scaleX = 1.0f
-            scaleY = (viewWidth.toFloat() / viewHeight.toFloat()) / bufferAspect
-        }
-
-        matrix.postScale(scaleX, scaleY, centerX, centerY)
         matrix.postRotate((90 * (rotation - 2)).toFloat(), centerX, centerY)
     } else if (Surface.ROTATION_180 == rotation) {
         matrix.postRotate(180f, centerX, centerY)
