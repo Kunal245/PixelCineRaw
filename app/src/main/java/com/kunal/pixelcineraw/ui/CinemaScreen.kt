@@ -78,17 +78,28 @@ fun CinemaScreen(
                 activeDial = ActiveDial.NONE
             }
     ) {
-        // 1. Live Camera2 Viewfinder Surface with rotation matrix and aspect ratio fit
+        // 1. Live Camera2 Viewfinder Surface with AutoFitSurfaceView (Universal Zero-Stretch)
         Viewfinder(
             viewModel = viewModel,
             modifier = Modifier.fillMaxSize()
         )
 
         // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Live Movable Histogram)
-        MonitoringOverlays(
-            state = state,
-            modifier = Modifier.fillMaxSize()
-        )
+        // Strictly positioned between TopStatusBar and BottomControlBar so nothing is clipped
+        val previewSize = viewModel.cameraController.optimalPreviewSize
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 48.dp, bottom = 68.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            MonitoringOverlays(
+                state = state,
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .aspectRatio(previewSize.width.toFloat() / previewSize.height.toFloat(), matchHeightConstraintsFirst = true)
+            )
+        }
 
         // 3. Top Cinema Status Bar (Tap values to open tactile scrubbers)
         TopStatusBar(

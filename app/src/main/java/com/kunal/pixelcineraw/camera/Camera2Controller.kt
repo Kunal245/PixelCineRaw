@@ -134,7 +134,9 @@ class Camera2Controller(
                 val physicalIds = chars.physicalCameraIds
 
                 val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                val previewSizes = map?.getOutputSizes(SurfaceTexture::class.java)?.toList() ?: emptyList()
+                val previewSizes = map?.getOutputSizes(android.view.SurfaceHolder::class.java)?.toList()
+                    ?: map?.getOutputSizes(SurfaceTexture::class.java)?.toList()
+                    ?: emptyList()
                 val videoSizes = map?.getOutputSizes(android.media.MediaRecorder::class.java)?.toList() ?: emptyList()
 
                 // Check for 10-bit dynamic range profile (Android 13+)
@@ -209,7 +211,7 @@ class Camera2Controller(
                         supportedResolutions = probedResolutions,
                         videoResolution = probedResolutions.firstOrNull { r -> r.width == 3840 && r.height == 2160 }
                             ?: probedResolutions.firstOrNull { r -> r.width == 1920 && r.height == 1080 }
-                            ?: probedResolutions.first(),
+                            ?: CustomResolution.UHD_4K,
                         iso = initialSpec.isoRange.lower.coerceAtLeast(100),
                         focusDistance = 0.0f // Infinity
                     )
