@@ -116,7 +116,19 @@ class Camera2Controller(
     fun probeSensors() {
         _probedSensors.clear()
         try {
-            val cameraIds = cameraManager.cameraIdList
+            val cameraIds = cameraManager.cameraIdList.toMutableList()
+            for (id in cameraManager.cameraIdList) {
+                try {
+                    val chars = cameraManager.getCameraCharacteristics(id)
+                    chars.physicalCameraIds.forEach { physId ->
+                        if (!cameraIds.contains(physId)) {
+                            cameraIds.add(physId)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error querying physical IDs for $id", e)
+                }
+            }
             var mainWideSpec: CameraSensorSpec? = null
             var ultraWideSpec: CameraSensorSpec? = null
 
@@ -447,6 +459,12 @@ class Camera2Controller(
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
+                        val status = if (_state.value.colorProfile == ColorProfile.HLG_10BIT) {
+                            if (useHardwareHlg) HdrPipelineStatus.HW_HLG10 else HdrPipelineStatus.CURVE_HLG10
+                        } else {
+                            HdrPipelineStatus.NONE
+                        }
+                        _state.update { it.copy(hdrPipelineStatus = status) }
                         createAndSetRepeatingRequest()
                         onConfigured()
                     }
@@ -456,6 +474,7 @@ class Camera2Controller(
                         if (useHardwareHlg && !hardwareHlgFallback) {
                             Log.w(TAG, "Hardware HLG10 session configuration failed! Falling back to STANDARD preview + 64-point BT.2100 HLG TonemapCurve")
                             hardwareHlgFallback = true
+                            _state.update { it.copy(hdrPipelineStatus = HdrPipelineStatus.CURVE_HLG10) }
                             cameraHandler?.post {
                                 startCaptureSession()
                             }
@@ -469,6 +488,7 @@ class Camera2Controller(
             Log.e(TAG, "Failed to start capture session", e)
             if (_state.value.colorProfile == ColorProfile.HLG_10BIT && !hardwareHlgFallback) {
                 hardwareHlgFallback = true
+                _state.update { it.copy(hdrPipelineStatus = HdrPipelineStatus.CURVE_HLG10) }
                 cameraHandler?.post { startCaptureSession() }
             }
         }
@@ -1098,12 +1118,19 @@ class Camera2Controller(
     fun setColorProfile(profile: ColorProfile) {
         val prevProfile = _state.value.colorProfile
         hardwareHlgFallback = false
-        _state.update { it.copy(colorProfile = profile) }
-        val isPrevHlg = prevProfile == ColorProfile.HLG_10BIT
         val isNewHlg = profile == ColorProfile.HLG_10BIT
+        val isPrevHlg = prevProfile == ColorProfile.HLG_10BIT
+        val currentSpec = _state.value.currentSensorSpec
+
+        val initialStatus = if (isNewHlg) {
+            if (currentSpec?.isHlg10Supported == true) HdrPipelineStatus.HW_HLG10 else HdrPipelineStatus.CURVE_HLG10
+        } else {
+            HdrPipelineStatus.NONE
+        }
+
+        _state.update { it.copy(colorProfile = profile, hdrPipelineStatus = initialStatus) }
 
         if (isNewHlg) {
-            val currentSpec = _state.value.currentSensorSpec
             if (currentSpec?.isHlg10Supported != true) {
                 // Find physical camera "0" or another probed rear camera with HLG10 support
                 val hlgSpec = _probedSensors.find { it.cameraId == "0" && it.isHlg10Supported }
@@ -1116,7 +1143,8 @@ class Camera2Controller(
                         it.copy(
                             currentSensorSpec = hlgSpec,
                             selectedLens = LensSelection.WIDE_1X,
-                            zoomRatio = 1.0f
+                            zoomRatio = 1.0f,
+                            hdrPipelineStatus = HdrPipelineStatus.HW_HLG10
                         )
                     }
                     openCamera(hlgSpec.cameraId)

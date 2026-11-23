@@ -49,6 +49,7 @@ data class CinemaState(
     val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
     val targetBitrateMbps: Int = 100, // 50 to 200 Mbps
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
+    val hdrPipelineStatus: HdrPipelineStatus = HdrPipelineStatus.NONE,
     val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,
     val oisEnabed: Boolean = true,
     val eisEnabled: Boolean = true,
@@ -174,4 +175,13 @@ data class HistogramData(
         result = 31 * result + lumaBins.contentHashCode()
         return result
     }
+}
+
+/**
+ * Active HDR hardware and tonemapping pipeline indicator.
+ */
+enum class HdrPipelineStatus(val label: String) {
+    NONE(""),
+    HW_HLG10("HW-HLG10"),
+    CURVE_HLG10("10B-CURVE-HLG")
 }

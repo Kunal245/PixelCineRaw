@@ -94,27 +94,29 @@ class HevcLogRecorder(
 
         val width = resolution.width
         val height = resolution.height
-        val bitrate = bitrateMbps * 1_000_000
+        val isHlg = colorProfile == ColorProfile.HLG_10BIT
+        val targetMime = if (isHlg) MediaFormat.MIMETYPE_VIDEO_HEVC else codec.mimeType
+        val bitrate = if (isHlg) maxOf(bitrateMbps * 1_000_000, 100_000_000) else bitrateMbps * 1_000_000
 
         // 1. Configure Video Encoder
-        val videoFormat = MediaFormat.createVideoFormat(codec.mimeType, width, height).apply {
+        val videoFormat = MediaFormat.createVideoFormat(targetMime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second GOP for cinema scrubbing
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
 
-            if (codec.mimeType == MediaFormat.MIMETYPE_VIDEO_HEVC) {
-                if (codec.is10Bit || colorProfile == ColorProfile.HLG_10BIT) {
+            if (targetMime == MediaFormat.MIMETYPE_VIDEO_HEVC) {
+                if (isHlg || codec.is10Bit) {
                     setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
                 } else {
                     setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
                 }
-            } else if (codec.mimeType == MediaFormat.MIMETYPE_VIDEO_AVC) {
+            } else if (targetMime == MediaFormat.MIMETYPE_VIDEO_AVC) {
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
             }
 
-            if (colorProfile == ColorProfile.HLG_10BIT) {
+            if (isHlg) {
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
                 setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
@@ -129,7 +131,7 @@ class HevcLogRecorder(
             }
         }
 
-        videoEncoder = MediaCodec.createEncoderByType(codec.mimeType).apply {
+        videoEncoder = MediaCodec.createEncoderByType(targetMime).apply {
             configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = createInputSurface()
         }

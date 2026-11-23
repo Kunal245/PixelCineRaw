@@ -96,15 +96,27 @@ fun TopStatusBar(
             )
 
             // Color Profile Pill (Selector: REC.709 8-bit, PIXEL-LOG, and HLG10 HDR 10-bit)
+            val isHlgProfile = state.colorProfile == ColorProfile.HLG_10BIT
             val profileSubText = when (state.colorProfile) {
                 ColorProfile.REC709 -> "8-bit"
                 ColorProfile.FLAT_LOG -> "Log"
-                ColorProfile.HLG_10BIT -> "10-bit"
+                ColorProfile.HLG_10BIT -> if (state.hdrPipelineStatus != com.kunal.pixelcineraw.camera.HdrPipelineStatus.NONE) {
+                    state.hdrPipelineStatus.label
+                } else {
+                    "10-bit"
+                }
+            }
+            val profileSubColor = when {
+                state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.HW_HLG10 -> Color(0xFF00FF66)
+                state.hdrPipelineStatus == com.kunal.pixelcineraw.camera.HdrPipelineStatus.CURVE_HLG10 -> Color(0xFF00E5FF)
+                isHlgProfile -> Color(0xFFFFD700)
+                else -> Color(0xAAFFFFFF)
             }
             CinemaStatusPill(
                 label = "PROFILE",
                 value = state.colorProfile.label,
                 subText = profileSubText,
+                subTextColor = profileSubColor,
                 highlight = true,
                 onClick = onColorProfileClick
             )
@@ -223,6 +235,7 @@ fun CinemaStatusPill(
     label: String,
     value: String,
     subText: String? = null,
+    subTextColor: Color = Color(0xAAFFFFFF),
     highlight: Boolean = false,
     onClick: () -> Unit
 ) {
@@ -257,8 +270,9 @@ fun CinemaStatusPill(
                 Spacer(modifier = Modifier.width(2.dp))
                 Text(
                     text = subText,
-                    color = Color(0xAAFFFFFF),
+                    color = subTextColor,
                     fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
             }

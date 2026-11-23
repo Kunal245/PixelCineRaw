@@ -48,4 +48,31 @@ class AutoFitSurfaceView @JvmOverloads constructor(
             }
         }
     }
+
+    /**
+     * Applies HDR brightness boost and BT.2020 HLG data space directly to the native SurfaceControl
+     * without modifying SurfaceHolder format or destroying the active camera Surface.
+     * On Pixel 9a (Android 14+), SurfaceFlinger utilizes extended range brightness to boost
+     * OLED specular highlights.
+     */
+    fun setHdrBoost(enabled: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                val sc = surfaceControl
+                if (sc.isValid) {
+                    val transaction = android.view.SurfaceControl.Transaction()
+                    if (enabled) {
+                        transaction.setDataSpace(sc, android.hardware.DataSpace.DATASPACE_BT2020_HLG)
+                        transaction.setExtendedRangeBrightness(sc, 4.0f, 4.0f)
+                    } else {
+                        transaction.setDataSpace(sc, android.hardware.DataSpace.DATASPACE_SRGB)
+                        transaction.setExtendedRangeBrightness(sc, 1.0f, 1.0f)
+                    }
+                    transaction.apply()
+                }
+            } catch (e: Throwable) {
+                android.util.Log.w("AutoFitSurfaceView", "Failed to set HDR boost on SurfaceControl", e)
+            }
+        }
+    }
 }
