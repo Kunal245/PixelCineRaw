@@ -12,8 +12,6 @@ import android.view.Surface
 import com.kunal.pixelcineraw.audio.AudioEngine
 import com.kunal.pixelcineraw.camera.ColorProfile
 import com.kunal.pixelcineraw.camera.VideoResolution
-import java.io.File
-import java.io.FileDescriptor
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
@@ -22,6 +20,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 10-Bit 4K HEVC (H.265) Cinema Video Recorder with flat Log / HLG support,
  * high-bitrate encoding (up to 200 Mbps), and 48kHz audio track muxing.
+ *
+ * Implements strict zero-relative timestamp normalization across video and audio
+ * and queues initial frames so IDR keyframes are never lost before muxer initialization.
  */
 class HevcLogRecorder(
     private val context: Context,
@@ -32,6 +33,12 @@ class HevcLogRecorder(
         private const val TIMEOUT_USEC = 10_000L
     }
 
+    private data class PendingSample(
+        val isAudio: Boolean,
+        val data: ByteBuffer,
+        val info: MediaCodec.BufferInfo
+    )
+
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
     private var mediaMuxer: MediaMuxer? = null
@@ -40,6 +47,16 @@ class HevcLogRecorder(
     private var videoTrackIndex = -1
     private var audioTrackIndex = -1
     private var isMuxerStarted = false
+
+    private val pendingVideoSamples = mutableListOf<PendingSample>()
+    private val pendingAudioSamples = mutableListOf<PendingSample>()
+
+    private var firstVideoPtsUs = -1L
+    private var lastVideoPtsUs = -1L
+    private var firstAudioPtsUs = -1L
+    private var lastAudioPtsUs = -1L
+    private var totalAudioBytesFed = 0L
+    private var totalBytesWritten = 0L
 
     private val isRecording = AtomicBoolean(false)
     private var recordingThread: Thread? = null
@@ -52,7 +69,7 @@ class HevcLogRecorder(
     val encoderSurface: Surface? get() = inputSurface
 
     /**
-     * Initializes the 10-bit HEVC encoder and creates the Camera2 recording Surface.
+     * Initializes the HEVC encoder and creates the Camera2 recording Surface.
      */
     fun prepare(
         resolution: VideoResolution,
@@ -60,23 +77,38 @@ class HevcLogRecorder(
         bitrateMbps: Int,
         colorProfile: ColorProfile
     ): Surface {
+        // Reset tracking state
+        videoTrackIndex = -1
+        audioTrackIndex = -1
+        isMuxerStarted = false
+        firstVideoPtsUs = -1L
+        lastVideoPtsUs = -1L
+        firstAudioPtsUs = -1L
+        lastAudioPtsUs = -1L
+        totalAudioBytesFed = 0L
+        totalBytesWritten = 0L
+        pendingVideoSamples.clear()
+        pendingAudioSamples.clear()
+
         val width = resolution.width
         val height = resolution.height
         val bitrate = bitrateMbps * 1_000_000
 
-        // 1. Configure Video Encoder (HEVC Main 10)
+        // 1. Configure Video Encoder (HEVC)
         val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second GOP for cinema scrubbing
-            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
 
             if (colorProfile == ColorProfile.HLG_10BIT) {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
                 setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
             } else {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
             }
@@ -134,9 +166,9 @@ class HevcLogRecorder(
         isRecording.set(true)
 
         // Connect audio engine callback to feed PCM data to audio encoder
-        audioEngine.onPcmDataAvailable = { buffer, bytesRead, ptsUs ->
+        audioEngine.onPcmDataAvailable = { buffer, bytesRead, _ ->
             if (isRecording.get()) {
-                feedAudioEncoder(buffer, bytesRead, ptsUs)
+                feedAudioEncoder(buffer, bytesRead)
             }
         }
 
@@ -151,9 +183,9 @@ class HevcLogRecorder(
     }
 
     /**
-     * Feeds PCM buffer from AudioEngine to the AAC encoder.
+     * Feeds PCM buffer from AudioEngine to AAC encoder with sample-accurate timestamp calculation.
      */
-    private fun feedAudioEncoder(buffer: ByteArray, bytesRead: Int, ptsUs: Long) {
+    private fun feedAudioEncoder(buffer: ByteArray, bytesRead: Int) {
         val encoder = audioEncoder ?: return
         try {
             val inputBufferIndex = encoder.dequeueInputBuffer(TIMEOUT_USEC)
@@ -161,6 +193,11 @@ class HevcLogRecorder(
                 val inputBuffer = encoder.getInputBuffer(inputBufferIndex)
                 inputBuffer?.clear()
                 inputBuffer?.put(buffer, 0, bytesRead)
+
+                // 48kHz 16-bit stereo = 192,000 bytes per second
+                val ptsUs = (totalAudioBytesFed * 1_000_000L) / (AudioEngine.SAMPLE_RATE * 4L)
+                totalAudioBytesFed += bytesRead
+
                 encoder.queueInputBuffer(inputBufferIndex, 0, bytesRead, ptsUs, 0)
             }
         } catch (e: Exception) {
@@ -180,7 +217,6 @@ class HevcLogRecorder(
         val audioBufferInfo = MediaCodec.BufferInfo()
 
         val startTimeMs = System.currentTimeMillis()
-        var totalBytesWritten = 0L
 
         while (isRecording.get() || !isMuxerStarted) {
             // 1. Drain Video Encoder
@@ -192,14 +228,31 @@ class HevcLogRecorder(
                     videoBufferInfo.size = 0
                 }
 
-                if (videoBufferInfo.size > 0) {
-                    if (!isMuxerStarted) {
-                        Log.w(TAG, "Video data received before muxer started")
-                    } else if (encodedData != null) {
-                        encodedData.position(videoBufferInfo.offset)
-                        encodedData.limit(videoBufferInfo.offset + videoBufferInfo.size)
+                if (videoBufferInfo.size > 0 && encodedData != null) {
+                    // Normalize video PTS to zero-relative
+                    if (firstVideoPtsUs < 0) {
+                        firstVideoPtsUs = videoBufferInfo.presentationTimeUs
+                    }
+                    val normalizedPts = (videoBufferInfo.presentationTimeUs - firstVideoPtsUs).coerceAtLeast(0L)
+                    val monotonicPts = if (normalizedPts <= lastVideoPtsUs) lastVideoPtsUs + 1000L else normalizedPts
+                    lastVideoPtsUs = monotonicPts
+                    videoBufferInfo.presentationTimeUs = monotonicPts
+
+                    encodedData.position(videoBufferInfo.offset)
+                    encodedData.limit(videoBufferInfo.offset + videoBufferInfo.size)
+
+                    if (isMuxerStarted) {
                         muxer.writeSampleData(videoTrackIndex, encodedData, videoBufferInfo)
                         totalBytesWritten += videoBufferInfo.size
+                    } else {
+                        // Buffer keyframe and initial samples until muxer has started
+                        val clone = ByteBuffer.allocate(videoBufferInfo.size)
+                        clone.put(encodedData)
+                        clone.flip()
+                        val infoClone = MediaCodec.BufferInfo().apply {
+                            set(0, videoBufferInfo.size, videoBufferInfo.presentationTimeUs, videoBufferInfo.flags)
+                        }
+                        pendingVideoSamples.add(PendingSample(isAudio = false, clone, infoClone))
                     }
                 }
 
@@ -221,11 +274,31 @@ class HevcLogRecorder(
                     audioBufferInfo.size = 0
                 }
 
-                if (audioBufferInfo.size > 0 && isMuxerStarted && encodedData != null) {
+                if (audioBufferInfo.size > 0 && encodedData != null) {
+                    // Normalize audio PTS to zero-relative
+                    if (firstAudioPtsUs < 0) {
+                        firstAudioPtsUs = audioBufferInfo.presentationTimeUs
+                    }
+                    val normalizedPts = (audioBufferInfo.presentationTimeUs - firstAudioPtsUs).coerceAtLeast(0L)
+                    val monotonicPts = if (normalizedPts <= lastAudioPtsUs) lastAudioPtsUs + 1000L else normalizedPts
+                    lastAudioPtsUs = monotonicPts
+                    audioBufferInfo.presentationTimeUs = monotonicPts
+
                     encodedData.position(audioBufferInfo.offset)
                     encodedData.limit(audioBufferInfo.offset + audioBufferInfo.size)
-                    muxer.writeSampleData(audioTrackIndex, encodedData, audioBufferInfo)
-                    totalBytesWritten += audioBufferInfo.size
+
+                    if (isMuxerStarted) {
+                        muxer.writeSampleData(audioTrackIndex, encodedData, audioBufferInfo)
+                        totalBytesWritten += audioBufferInfo.size
+                    } else {
+                        val clone = ByteBuffer.allocate(audioBufferInfo.size)
+                        clone.put(encodedData)
+                        clone.flip()
+                        val infoClone = MediaCodec.BufferInfo().apply {
+                            set(0, audioBufferInfo.size, audioBufferInfo.presentationTimeUs, audioBufferInfo.flags)
+                        }
+                        pendingAudioSamples.add(PendingSample(isAudio = true, clone, infoClone))
+                    }
                 }
 
                 aEncoder.releaseOutputBuffer(audioOutIndex, false)
@@ -237,8 +310,12 @@ class HevcLogRecorder(
                 checkAndStartMuxer(muxer)
             }
 
-            // Update metrics
-            val elapsedSecs = (System.currentTimeMillis() - startTimeMs) / 1000
+            // Update metrics: use real video duration
+            val elapsedSecs = if (firstVideoPtsUs >= 0) {
+                lastVideoPtsUs / 1_000_000L
+            } else {
+                (System.currentTimeMillis() - startTimeMs) / 1000L
+            }
             onMetricsUpdate?.invoke(elapsedSecs, totalBytesWritten, 0)
         }
     }
@@ -248,6 +325,20 @@ class HevcLogRecorder(
             muxer.start()
             isMuxerStarted = true
             Log.i(TAG, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex")
+
+            // Flush buffered video frames (including the crucial IDR keyframe!)
+            for (sample in pendingVideoSamples) {
+                muxer.writeSampleData(videoTrackIndex, sample.data, sample.info)
+                totalBytesWritten += sample.info.size
+            }
+            pendingVideoSamples.clear()
+
+            // Flush buffered audio packets
+            for (sample in pendingAudioSamples) {
+                muxer.writeSampleData(audioTrackIndex, sample.data, sample.info)
+                totalBytesWritten += sample.info.size
+            }
+            pendingAudioSamples.clear()
         }
     }
 
@@ -267,7 +358,18 @@ class HevcLogRecorder(
         }
 
         try {
-            recordingThread?.join(1500)
+            audioEncoder?.let { encoder ->
+                val idx = encoder.dequeueInputBuffer(TIMEOUT_USEC)
+                if (idx >= 0) {
+                    encoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error sending audio EOS", e)
+        }
+
+        try {
+            recordingThread?.join(2000)
         } catch (e: InterruptedException) {
             Log.w(TAG, "Recording thread interrupted", e)
         }

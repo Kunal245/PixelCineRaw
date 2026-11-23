@@ -79,12 +79,11 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                         colorProfile = state.colorProfile
                     )
 
-                    cameraController.setRecordingSurface(surface)
-                    cameraController.startCaptureSession()
-
                     val fileName = hevcRecorder.start()
-                    cameraController.setRecordingActive(true, fileName)
-                    Log.i(TAG, "Started 10-bit HEVC recording: $fileName")
+
+                    cameraController.startRecordingSession(surface, fileName) {
+                        Log.i(TAG, "Camera2 session active and streaming to HEVC encoder: $fileName")
+                    }
                 }
                 RecordingFormat.RAW_DNG -> {
                     val spec = state.currentSensorSpec ?: return
@@ -109,10 +108,10 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         try {
             when (format) {
                 RecordingFormat.HEVC_10BIT -> {
+                    cameraController.stopRecordingSession {
+                        Log.i(TAG, "Camera2 session restored to clean preview mode")
+                    }
                     hevcRecorder.stop()
-                    cameraController.setRecordingSurface(null)
-                    cameraController.startCaptureSession()
-                    cameraController.setRecordingActive(false)
                     Log.i(TAG, "Stopped HEVC recording successfully")
                 }
                 RecordingFormat.RAW_DNG -> {

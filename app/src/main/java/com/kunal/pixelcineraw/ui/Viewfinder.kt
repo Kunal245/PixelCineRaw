@@ -1,11 +1,15 @@
 package com.kunal.pixelcineraw.ui
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.hardware.display.DisplayManager
+import android.os.Handler
+import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
-import android.view.View
+import android.view.WindowManager
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -43,6 +47,7 @@ fun Viewfinder(
     viewModel: CinemaViewModel,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val state by viewModel.state.collectAsStateWithLifecycle()
     var tapOffset by remember { mutableStateOf<Offset?>(null) }
@@ -51,19 +56,51 @@ fun Viewfinder(
 
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
 
-    // Reapply matrix transform whenever sensor spec or orientation updates
-    LaunchedEffect(state.currentSensorSpec?.sensorOrientation) {
+    // Reapply matrix transform whenever sensor spec or optimal preview size changes
+    LaunchedEffect(state.currentSensorSpec) {
         textureViewRef?.let { tv ->
             val w = tv.width
             val h = tv.height
             if (w > 0 && h > 0) {
+                val previewSize = viewModel.cameraController.optimalPreviewSize
                 applyViewfinderTransform(
                     textureView = tv,
                     viewWidth = w,
                     viewHeight = h,
-                    sensorOrientation = state.currentSensorSpec?.sensorOrientation ?: 90
+                    sensorOrientation = state.currentSensorSpec?.sensorOrientation ?: 90,
+                    previewWidth = previewSize.width,
+                    previewHeight = previewSize.height
                 )
             }
+        }
+    }
+
+    // Register DisplayListener to dynamically handle 180° rotation flips between ROTATION_90 and ROTATION_270
+    DisposableEffect(context) {
+        val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val displayListener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                val tv = textureViewRef ?: return
+                val w = tv.width
+                val h = tv.height
+                if (w > 0 && h > 0) {
+                    val previewSize = viewModel.cameraController.optimalPreviewSize
+                    applyViewfinderTransform(
+                        textureView = tv,
+                        viewWidth = w,
+                        viewHeight = h,
+                        sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
+                        previewWidth = previewSize.width,
+                        previewHeight = previewSize.height
+                    )
+                }
+            }
+        }
+        displayManager.registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
+        onDispose {
+            displayManager.unregisterDisplayListener(displayListener)
         }
     }
 
@@ -122,12 +159,13 @@ fun Viewfinder(
                         }
                     }
                 },
-            factory = { context ->
-                TextureView(context).apply {
+            factory = { ctx ->
+                TextureView(ctx).apply {
                     textureViewRef = this
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                            surfaceTexture.setDefaultBufferSize(3840, 2160) // Native 4K buffer
+                            val previewSize = viewModel.cameraController.optimalPreviewSize
+                            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
                             val surface = Surface(surfaceTexture)
                             viewModel.attachPreviewSurface(surface)
 
@@ -135,16 +173,21 @@ fun Viewfinder(
                                 textureView = this@apply,
                                 viewWidth = width,
                                 viewHeight = height,
-                                sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90
+                                sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
+                                previewWidth = previewSize.width,
+                                previewHeight = previewSize.height
                             )
                         }
 
                         override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                            val previewSize = viewModel.cameraController.optimalPreviewSize
                             applyViewfinderTransform(
                                 textureView = this@apply,
                                 viewWidth = width,
                                 viewHeight = height,
-                                sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90
+                                sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
+                                previewWidth = previewSize.width,
+                                previewHeight = previewSize.height
                             )
                         }
 
@@ -161,11 +204,14 @@ fun Viewfinder(
                         val w = right - left
                         val h = bottom - top
                         if (w > 0 && h > 0) {
+                            val previewSize = viewModel.cameraController.optimalPreviewSize
                             applyViewfinderTransform(
                                 textureView = this,
                                 viewWidth = w,
                                 viewHeight = h,
-                                sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90
+                                sensorOrientation = viewModel.state.value.currentSensorSpec?.sensorOrientation ?: 90,
+                                previewWidth = previewSize.width,
+                                previewHeight = previewSize.height
                             )
                         }
                     }
@@ -218,15 +264,16 @@ fun applyViewfinderTransform(
     viewWidth: Int,
     viewHeight: Int,
     sensorOrientation: Int,
-    previewWidth: Int = 3840,
-    previewHeight: Int = 2160
+    previewWidth: Int = 1920,
+    previewHeight: Int = 1080
 ) {
     if (viewWidth == 0 || viewHeight == 0) return
 
     val display = textureView.display
+        ?: (textureView.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay
     val displayRotation = display?.rotation ?: Surface.ROTATION_90
 
-    val displayDegrees = when (displayRotation) {
+    val surfaceRotationDegrees = when (displayRotation) {
         Surface.ROTATION_0 -> 0
         Surface.ROTATION_90 -> 90
         Surface.ROTATION_180 -> 180
@@ -234,20 +281,16 @@ fun applyViewfinderTransform(
         else -> 90
     }
 
-    // Angle to rotate buffer to compensate for sensor mount and display orientation
-    val rotationAngle = (sensorOrientation - displayDegrees + 360) % 360
+    // Official Android Camera2 formula for back-facing camera:
+    // (sensorOrientation + surfaceRotationDegrees) % 360
+    val relativeRotation = (sensorOrientation + surfaceRotationDegrees) % 360
 
     val matrix = Matrix()
     val centerX = viewWidth / 2f
     val centerY = viewHeight / 2f
 
-    // In landscape orientations (ROTATION_90 / ROTATION_270), rotationAngle is either 0 or 180.
-    // If rotationAngle is 90 or 270 (portrait), width and height are swapped.
-    val isSwapped = rotationAngle == 90 || rotationAngle == 270
-    val bufferW = if (isSwapped) previewHeight.toFloat() else previewWidth.toFloat()
-    val bufferH = if (isSwapped) previewWidth.toFloat() else previewHeight.toFloat()
-
-    val bufferAspect = bufferW / bufferH // 16/9 = ~1.7778
+    // 16:9 buffer aspect ratio
+    val bufferAspect = previewWidth.toFloat() / previewHeight.toFloat()
     val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
 
     val scaleX: Float
@@ -263,12 +306,12 @@ fun applyViewfinderTransform(
         scaleY = (viewWidth / bufferAspect) / viewHeight
     }
 
-    // Center and scale to preserve aspect ratio
+    // 1. Center and scale to preserve 16:9 without stretching
     matrix.setScale(scaleX, scaleY, centerX, centerY)
 
-    // Rotate around center to keep upright
-    if (rotationAngle != 0) {
-        matrix.postRotate(rotationAngle.toFloat(), centerX, centerY)
+    // 2. Rotate around center to keep upright in both landscape orientations
+    if (relativeRotation != 0) {
+        matrix.postRotate(relativeRotation.toFloat(), centerX, centerY)
     }
 
     textureView.setTransform(matrix)

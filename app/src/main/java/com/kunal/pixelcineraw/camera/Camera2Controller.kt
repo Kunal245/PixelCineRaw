@@ -265,13 +265,22 @@ class Camera2Controller(
         rawImageReader = null
     }
 
+    val optimalPreviewSize: Size
+        get() {
+            val spec = _state.value.currentSensorSpec ?: return Size(1920, 1080)
+            return spec.previewSizes
+                .filter { it.width * 9 == it.height * 16 }
+                .maxByOrNull { it.width * it.height }
+                ?: Size(1920, 1080)
+        }
+
     /**
      * Creates a deterministic Camera2 CaptureSession supporting:
      * 1. Viewfinder preview Surface
      * 2. Video recording Surface (when active)
      * 3. RAW ImageReader Surface (when in RAW mode)
      */
-    fun startCaptureSession() {
+    fun startCaptureSession(onConfigured: () -> Unit = {}) {
         val device = cameraDevice ?: return
         val surface = previewSurface ?: return
         val handler = cameraHandler ?: return
@@ -318,6 +327,7 @@ class Camera2Controller(
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
                         createAndSetRepeatingRequest()
+                        onConfigured()
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -330,6 +340,27 @@ class Camera2Controller(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start capture session", e)
         }
+    }
+
+    fun startRecordingSession(surface: Surface, fileName: String, onStarted: () -> Unit = {}) {
+        videoRecordingSurface = surface
+        _state.update {
+            it.copy(
+                isRecording = true,
+                currentSavedFilePath = fileName,
+                recordingTimeSeconds = 0L,
+                recordedBytes = 0L,
+                droppedFramesCount = 0
+            )
+        }
+        startCaptureSession(onConfigured = onStarted)
+    }
+
+    fun stopRecordingSession(onStopped: () -> Unit = {}) {
+        videoRecordingSurface = null
+        _state.update { it.copy(isRecording = false) }
+        createAndSetRepeatingRequest()
+        startCaptureSession(onConfigured = onStopped)
     }
 
     /**
