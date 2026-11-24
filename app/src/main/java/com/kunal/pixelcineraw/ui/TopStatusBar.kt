@@ -455,17 +455,17 @@ private fun CodecPopoverContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 2. Bitrate Selector: 80M | 150M | 200M | 280M
-        val bitrateOptions = listOf(80, 150, 200, 280)
+        // 2. Bitrate Selector: 80M | 100M | 120M | 160M (Tensor G4 optimized)
+        val bitrateOptions = listOf(80, 100, 120, 160)
         val selectedBitrateIdx = when {
             state.targetBitrateMbps <= 90 -> 0
-            state.targetBitrateMbps in 91..175 -> 1
-            state.targetBitrateMbps in 176..240 -> 2
+            state.targetBitrateMbps in 91..110 -> 1
+            state.targetBitrateMbps in 111..140 -> 2
             else -> 3
         }
         PopoverSegmentedRow(
             title = "BITRATE (MBPS)",
-            items = listOf("80M", "150M", "200M", "280M"),
+            items = listOf("80M", "100M", "120M", "160M"),
             selectedIndex = selectedBitrateIdx,
             onItemSelected = { idx ->
                 onBitrateSelected(bitrateOptions[idx])

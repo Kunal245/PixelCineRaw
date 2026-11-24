@@ -52,10 +52,10 @@ data class CinemaState(
         CustomResolution.FHD_1080P
     ),
     val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
-    val targetBitrateMbps: Int = 280, // Default 280 Mbps peak VBR
+    val targetBitrateMbps: Int = 120, // Default 120 Mbps 10-bit GOP for Tensor G4
     val ispMode: IspMode = IspMode.CLEAN,
-    val intraFrameMode: IntraFrameMode = IntraFrameMode.ALL_INTRA,
-    val encoderChromaBadge: String = "10B 4:2:0 ALL-I",
+    val intraFrameMode: IntraFrameMode = IntraFrameMode.GOP_LONG,
+    val encoderChromaBadge: String = "10B 4:2:0 GOP",
     val recordWavSidecar: Boolean = true,
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
     val hdrPipelineStatus: HdrPipelineStatus = HdrPipelineStatus.NONE,

@@ -265,6 +265,10 @@ void main() {
     private val queryWidth = IntArray(1)
     private val queryHeight = IntArray(1)
 
+    // Strictly monotonic MP4 presentation timestamps for video encoder
+    @Volatile private var firstRecordedFrameTimeNs = -1L
+    @Volatile private var lastRecordedFramePtsNs = -1L
+
     @Volatile
     var isReady: Boolean = false
         private set
@@ -744,6 +748,8 @@ void main() {
                     val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         encoderEglSurface = eglSurf
+                        firstRecordedFrameTimeNs = -1L
+                        lastRecordedFramePtsNs = -1L
                         Log.i(TAG, "Encoder EGL surface attached (${encoderWidth}x${encoderHeight})")
                     }
                 }
@@ -853,7 +859,21 @@ void main() {
                         lutPreset = if (isLutBakeEnabled) currentLutPreset else 0
                     )
                     checkGlError("drawQuad encoder")
-                    EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, timestampNs)
+
+                    // Monotonic, jitter-free presentation timestamp for MP4 frame pacing
+                    if (firstRecordedFrameTimeNs < 0L) {
+                        firstRecordedFrameTimeNs = timestampNs
+                        lastRecordedFramePtsNs = 0L
+                    }
+                    val rawDeltaNs = timestampNs - firstRecordedFrameTimeNs
+                    val ptsNs = if (rawDeltaNs <= lastRecordedFramePtsNs) {
+                        lastRecordedFramePtsNs + 1_000_000L // Clamp minimum frame delta to at least 1ms
+                    } else {
+                        rawDeltaNs
+                    }
+                    lastRecordedFramePtsNs = ptsNs
+
+                    EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, ptsNs)
                     EGL14.eglSwapBuffers(eglDisplay, eSurf)
                 }
             }
@@ -942,6 +962,8 @@ void main() {
             }
             encoderEglSurface = null
         }
+        firstRecordedFrameTimeNs = -1L
+        lastRecordedFramePtsNs = -1L
     }
 
     fun release() {
