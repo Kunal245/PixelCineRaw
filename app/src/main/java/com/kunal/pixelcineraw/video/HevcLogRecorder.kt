@@ -199,12 +199,19 @@ class HevcLogRecorder(
         val targetMime = if (isHdr) MediaFormat.MIMETYPE_VIDEO_HEVC else codec.mimeType
 
         val isAllIntra = intraFrameMode == IntraFrameMode.ALL_INTRA
-        // Cap ALL-I mode at 160 Mbps (30fps/24fps max) so Tensor G4 never drops frames
-        // Default GOP (1s Keyframe) at 120 Mbps (clamped 40M..160M)
-        val targetBitrate = if (isAllIntra) {
-            (bitrateMbps * 1_000_000).coerceIn(80_000_000, 160_000_000)
+        // Default GOP: 180 Mbps for 4K (>= 2160p) and 120 Mbps for 1080p/2.5K
+        // Keyframe interval = 1s, Realtime priority = 0, eliminating 8x8 macroblock sky noise
+        val is4k = width >= 3840 || height >= 2160 || maxOf(width, height) >= 3800
+        val defaultBitrate = if (is4k) 180_000_000 else 120_000_000
+        val targetBitrate = if (bitrateMbps > 0) {
+            val bps = bitrateMbps * 1_000_000
+            if (isAllIntra) {
+                bps.coerceIn(80_000_000, 280_000_000)
+            } else {
+                bps.coerceIn(40_000_000, 220_000_000)
+            }
         } else {
-            (bitrateMbps * 1_000_000).coerceIn(40_000_000, 160_000_000)
+            defaultBitrate
         }
 
         val iFrameInterval = if (isAllIntra) 0 else 1
@@ -218,10 +225,10 @@ class HevcLogRecorder(
         }
 
         val bitrateAttempts = if (isAllIntra) {
-            listOf(targetBitrate, 140_000_000, 120_000_000, 100_000_000)
+            listOf(targetBitrate, 180_000_000, 140_000_000, 120_000_000)
         } else {
-            listOf(targetBitrate, 120_000_000, 100_000_000, 80_000_000)
-        }
+            listOf(targetBitrate, defaultBitrate, 140_000_000, 120_000_000, 100_000_000)
+        }.distinct()
 
         var configured = false
         var lastEx: Exception? = null

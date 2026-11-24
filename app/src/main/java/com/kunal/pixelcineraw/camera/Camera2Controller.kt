@@ -157,6 +157,11 @@ class Camera2Controller(
     private var isHistogramDispatchScheduled = false
     private var lastAudioUpdateTime = 0L
 
+    // Linear EV-Stop Hysteresis Auto-ISO Controller State (Shutter-Priority)
+    private var autoIsoSettlingFrames = 0
+    private var autoIsoLastDirection = 0 // +1 = brighter (ISO up), -1 = darker (ISO down), 0 = idle
+    private var autoIsoFramesSinceDirectionChange = 0
+
     init {
         startBackgroundThread()
         probeSensors()
@@ -1033,6 +1038,12 @@ class Camera2Controller(
 
             // Measure actual FPS
             frameCount++
+            if (autoIsoSettlingFrames > 0) {
+                autoIsoSettlingFrames--
+            }
+            if (autoIsoFramesSinceDirectionChange < 1000) {
+                autoIsoFramesSinceDirectionChange++
+            }
             val now = System.nanoTime()
             val elapsed = now - lastFpsTimestamp
             if (elapsed >= 1_000_000_000L) {
@@ -1627,12 +1638,18 @@ class Camera2Controller(
                 )
             }
         }
+        autoIsoSettlingFrames = 0
+        autoIsoLastDirection = 0
+        autoIsoFramesSinceDirectionChange = 0
         persistState()
         createAndSetRepeatingRequest()
     }
 
     fun toggleAutoIso() {
         val willBeAuto = !_state.value.isAutoIso
+        autoIsoSettlingFrames = 0
+        autoIsoLastDirection = 0
+        autoIsoFramesSinceDirectionChange = 0
         _state.update { it.copy(isAutoIso = willBeAuto) }
         persistState()
     }
@@ -2140,19 +2157,51 @@ class Camera2Controller(
                 ndNeeded = true
             }
 
-            // Shutter-Priority Auto-ISO loop:
-            // When shutter is locked to 180° (or manual) while ISO is set to AUTO,
-            // automatically balance exposure by smoothly guiding targetEffectiveIso
+            // Linear EV-Stop Hysteresis Auto-ISO Controller:
+            // When shutter is locked (180° or manual) while ISO is set to AUTO:
             if (_state.value.isAutoIso && _state.value.isManualExposure) {
-                val targetLuma = 0.38f * Math.pow(2.0, _state.value.evCompensation.toDouble()).toFloat()
-                val currentLuma = maxOf(0.01f, avgLuma)
-                val evError = (kotlin.math.ln(targetLuma / currentLuma) / kotlin.math.ln(2.0)).coerceIn(-3.0, 3.0)
-                if (Math.abs(evError) > 0.05) { // Deadband to prevent hunting
-                    val isoMultiplier = Math.pow(2.0, evError * 0.25)
-                    val newTargetIso = (currentEffectiveIso * isoMultiplier).toFloat()
-                        .coerceIn(activeRange.lower.toFloat(), minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat()))
-                    pendingEffectiveIso.set(newTargetIso)
-                    cameraHandler?.post { applyHardwareParametersRamping(force = false) }
+                val targetLinearLuma = (0.38f * Math.pow(2.0, _state.value.evCompensation.toDouble()).toFloat())
+                    .coerceIn(0.05f, 0.95f)
+                val measuredLinearLuma = avgLuma.coerceIn(0.01f, 1.0f)
+                val evRatio = (targetLinearLuma / measuredLinearLuma).coerceIn(0.125f, 8.0f)
+                val evError = (kotlin.math.ln(evRatio) / kotlin.math.ln(2.0f))
+
+                // Rule A — Wide Hysteresis Deadband (±0.25 EV):
+                // If |evError| < 0.25f, hold currentAutoIso 100% locked - no hunting during framing/hand movements!
+                if (kotlin.math.abs(evError) >= 0.25f) {
+                    // Rule B — 6-Frame Hardware Pipeline Settling:
+                    // Wait 6 frames so Tensor G4's sensor pipeline completely reflects previous update
+                    if (autoIsoSettlingFrames <= 0) {
+                        val desiredDirection = if (evError > 0f) 1 else -1
+
+                        // Rule C — Anti-Oscillation Direction Lock:
+                        // Do NOT reverse ISO direction within 24 frames (~400ms at 60fps) unless |evError| > 0.75f
+                        val isReversing = autoIsoLastDirection != 0 && desiredDirection != autoIsoLastDirection
+                        val canProceed = !isReversing || autoIsoFramesSinceDirectionChange >= 24 || kotlin.math.abs(evError) > 0.75f
+
+                        if (canProceed) {
+                            // Rule D — Smooth Cinema Iris Slew:
+                            // Move currentAutoIso by 2^(evError * 0.12f) per step, clamped to max ±3% [0.97, 1.03]
+                            val rawMultiplier = Math.pow(2.0, (evError * 0.12f).toDouble()).toFloat()
+                            val stepMultiplier = rawMultiplier.coerceIn(0.97f, 1.03f)
+
+                            val maxAllowedIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
+                            val newTargetIso = (currentEffectiveIso * stepMultiplier)
+                                .coerceIn(activeRange.lower.toFloat(), maxAllowedIso)
+
+                            if (Math.abs(newTargetIso - currentEffectiveIso) >= 0.5f) {
+                                if (desiredDirection != autoIsoLastDirection) {
+                                    autoIsoLastDirection = desiredDirection
+                                    autoIsoFramesSinceDirectionChange = 0
+                                }
+                                autoIsoSettlingFrames = 6
+                                pendingEffectiveIso.set(newTargetIso)
+                                cameraHandler?.post { applyHardwareParametersRamping(force = false) }
+                            }
+                        }
+                    }
+                } else {
+                    autoIsoLastDirection = 0
                 }
             }
         }

@@ -54,7 +54,7 @@ data class CinemaState(
         CustomResolution.FHD_1080P
     ),
     val videoCodec: VideoCodec = VideoCodec.HEVC_10BIT,
-    val targetBitrateMbps: Int = 120, // Default 120 Mbps 10-bit GOP for Tensor G4
+    val targetBitrateMbps: Int = 180, // Default 180 Mbps 10-bit GOP for Tensor G4
     val ispMode: IspMode = IspMode.CLEAN,
     val intraFrameMode: IntraFrameMode = IntraFrameMode.GOP_LONG,
     val encoderChromaBadge: String = "10B 4:2:0 GOP",

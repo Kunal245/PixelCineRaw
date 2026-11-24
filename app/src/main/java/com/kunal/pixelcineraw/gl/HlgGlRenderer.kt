@@ -68,7 +68,6 @@ uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020, 3 = HD
 uniform int uFalseColor; // 0 = off, 1 = on
 uniform int uLutPreset;  // 0 = off, 1 = REC.709 PRO, 2 = KODAK 2383, 3 = TEAL & ORANGE
 uniform vec2 uTexelSize;
-uniform float uFrameSeed;
 varying vec2 vTextureCoord;
 
 // Rec.709 to Rec.2020 3x3 color conversion matrix (column-major in GLSL)
@@ -171,18 +170,19 @@ vec3 applyFalseColor(vec3 color) {
     return vec3(luma * 0.45); // Neutral reference gray
 }
 
-// 10-bit Triangular Interleaved Gradient Noise (IGN) anti-banding dither
-// High-frequency Jimenez 2014 gradient noise with zero periodic repetition
-float ign(vec2 p, float seed) {
-    return fract(52.9829189 * fract(dot(p + seed * 5.588238, vec2(0.06711056, 0.00583715))));
+// Static 10-bit Triangular Interleaved Gradient Noise (IGN) anti-banding spatial dither
+// Stationary spatial dither (zero temporal seed variation) eliminates 8-to-10-bit contour bands
+// while preventing temporal noise grain that stresses the HEVC encoder.
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Triangular probability density function (TPDF) noise in [-1.0, 1.0] scaled to 10-bit LSB (1.0 / 1023.0)
-vec3 applyTriangularIgnDither(vec3 color, vec2 fragCoord, float seed) {
-    float n1 = ign(fragCoord, seed);
-    float n2 = ign(fragCoord + vec2(1.7, 3.1), seed * 1.61803398875);
-    float tri = (n1 + n2 - 1.0); // Triangular PDF centered at 0.0
-    float dither = tri * (1.0 / 1023.0);
+// Static sub-LSB spatial dither: amplitude = 0.30 / 1023.0 (±0.3 LSB)
+vec3 applyTriangularIgnDither(vec3 color, vec2 fragCoord) {
+    float n1 = ign(fragCoord);
+    float n2 = ign(fragCoord + vec2(1.7, 3.1));
+    float tri = (n1 + n2 - 1.0); // Triangular PDF centered at 0.0 in [-1.0, 1.0]
+    float dither = tri * (0.30 / 1023.0);
     return clamp(color + vec3(dither), 0.0, 1.0);
 }
 
@@ -226,18 +226,18 @@ void main() {
         vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2));
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
-        vec3 dithered = applyTriangularIgnDither(hlgRgb, gl_FragCoord.xy, uFrameSeed);
+        vec3 dithered = applyTriangularIgnDither(hlgRgb, gl_FragCoord.xy);
         gl_FragColor = vec4(dithered, 1.0);
     } else if (uColorMode == 3) {
         // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode)
         vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2));
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 pqRgb = clamp(encodePq(rec2020), 0.0, 1.0);
-        vec3 dithered = applyTriangularIgnDither(pqRgb, gl_FragCoord.xy, uFrameSeed);
+        vec3 dithered = applyTriangularIgnDither(pqRgb, gl_FragCoord.xy);
         gl_FragColor = vec4(dithered, 1.0);
     } else {
         // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1)
-        vec3 dithered = applyTriangularIgnDither(color, gl_FragCoord.xy, uFrameSeed);
+        vec3 dithered = applyTriangularIgnDither(color, gl_FragCoord.xy);
         gl_FragColor = vec4(dithered, 1.0);
     }
 }
@@ -276,8 +276,6 @@ void main() {
     private var uColorModeLoc: Int = -1
     private var uFalseColorLoc: Int = -1
     private var uLutPresetLoc: Int = -1
-    private var uFrameSeedLoc: Int = -1
-    private var frameSeedCounter: Float = 0f
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -694,7 +692,6 @@ void main() {
         uTexelSizeLoc = GLES20.glGetUniformLocation(programId, "uTexelSize")
         uFalseColorLoc = GLES20.glGetUniformLocation(programId, "uFalseColor")
         uLutPresetLoc = GLES20.glGetUniformLocation(programId, "uLutPreset")
-        uFrameSeedLoc = GLES20.glGetUniformLocation(programId, "uFrameSeed")
         checkGlError("initShaders")
     }
 
@@ -962,10 +959,6 @@ void main() {
             val tw = maxOf(1, streamWidth).toFloat()
             val th = maxOf(1, streamHeight).toFloat()
             GLES20.glUniform2f(uTexelSizeLoc, 1.0f / tw, 1.0f / th)
-        }
-        if (uFrameSeedLoc != -1) {
-            frameSeedCounter = (frameSeedCounter + 0.61803398875f) % 1000.0f
-            GLES20.glUniform1f(uFrameSeedLoc, frameSeedCounter)
         }
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
