@@ -161,7 +161,8 @@ class HevcLogRecorder(
         colorProfile: ColorProfile,
         codec: VideoCodec = VideoCodec.HEVC_10BIT,
         intraFrameMode: IntraFrameMode = IntraFrameMode.GOP_LONG,
-        recordWavSidecar: Boolean = false
+        recordWavSidecar: Boolean = false,
+        isPortrait: Boolean = false
     ): Surface {
         ensureEncoderThread()
         val handler = encoderHandler ?: throw IllegalStateException("Encoder thread handler not ready")
@@ -188,8 +189,8 @@ class HevcLogRecorder(
         this.videoFrameCount = 0L
         this.videoMuxedFrameCount = 0L
 
-        val width = maxOf(resolution.width, resolution.height)
-        val height = minOf(resolution.width, resolution.height)
+        val width = if (isPortrait) minOf(resolution.width, resolution.height) else maxOf(resolution.width, resolution.height)
+        val height = if (isPortrait) maxOf(resolution.width, resolution.height) else minOf(resolution.width, resolution.height)
         activeColorProfile = colorProfile
         shouldRecordWavSidecar = recordWavSidecar
 

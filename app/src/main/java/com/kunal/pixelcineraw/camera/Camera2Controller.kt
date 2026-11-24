@@ -553,12 +553,16 @@ class Camera2Controller(
                 return
             }
 
+            val isPortrait = getDisplayRotation() == Surface.ROTATION_0 || getDisplayRotation() == Surface.ROTATION_180 ||
+                    _state.value.orientationLockMode == OrientationLockMode.LOCK_PORTRAIT
+            val prevW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+            val prevH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
             renderer.setDisplayRotation(getDisplayRotation())
-            renderer.setPreviewSurface(surface, vRes.width, vRes.height, streamSize.width, streamSize.height)
+            renderer.setPreviewSurface(surface, prevW, prevH, streamSize.width, streamSize.height)
             renderer.setColorMode(_state.value.colorProfile)
 
             if (videoRecordingSurface != null) {
-                renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height, _state.value.targetFps)
+                renderer.setEncoderSurface(videoRecordingSurface, prevW, prevH, _state.value.targetFps)
             } else {
                 renderer.setEncoderSurface(null, 0, 0)
             }
@@ -623,7 +627,7 @@ class Camera2Controller(
         }
     }
 
-    fun startRecordingSession(surface: Surface, fileName: String, onStarted: () -> Unit = {}) {
+    fun startRecordingSession(surface: Surface, fileName: String, isPortrait: Boolean = false, onStarted: () -> Unit = {}) {
         videoRecordingSurface = surface
         _state.update {
             it.copy(
@@ -635,7 +639,9 @@ class Camera2Controller(
             )
         }
         val vRes = _state.value.videoResolution
-        hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height, _state.value.targetFps)
+        val encW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+        val encH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
+        hlgGlRenderer?.setEncoderSurface(surface, encW, encH, _state.value.targetFps)
 
         if (_state.value.isGyroflowLoggingEnabled) {
             try {

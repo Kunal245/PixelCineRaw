@@ -74,11 +74,15 @@ fun Viewfinder(
 
     var surfaceViewRef by remember { mutableStateOf<AutoFitSurfaceView?>(null) }
 
-    // Dynamically update AutoFitSurfaceView aspect ratio whenever sensor spec or video resolution changes
-    LaunchedEffect(state.currentSensorSpec, state.videoResolution) {
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT ||
+            state.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
+
+    // Dynamically update AutoFitSurfaceView aspect ratio whenever sensor spec, resolution, or orientation changes
+    LaunchedEffect(state.currentSensorSpec, state.videoResolution, isPortrait) {
         val vRes = state.videoResolution
-        val w = maxOf(vRes.width, vRes.height)
-        val h = minOf(vRes.width, vRes.height)
+        val w = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+        val h = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
         surfaceViewRef?.let { sv ->
             sv.setAspectRatio(w, h)
             sv.holder.setFixedSize(w, h)
@@ -110,8 +114,8 @@ fun Viewfinder(
     var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
 
     val vRes = state.videoResolution
-    val resWidth = maxOf(vRes.width, vRes.height)
-    val resHeight = minOf(vRes.width, vRes.height)
+    val resWidth = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+    val resHeight = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
     val streamAspect = resWidth.toFloat() / resHeight.toFloat()
 
     Box(
@@ -120,7 +124,7 @@ fun Viewfinder(
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        // Viewport container matching exact aspect ratio of the camera stream
+        // Viewport container matching exact aspect ratio of the camera stream (9:16 / 3:4 in portrait, 16:9 / 4:3 in landscape)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -133,8 +137,8 @@ fun Viewfinder(
                 factory = { ctx ->
                     AutoFitSurfaceView(ctx).apply {
                         surfaceViewRef = this
-                        val curW = maxOf(vRes.width, vRes.height)
-                        val curH = minOf(vRes.width, vRes.height)
+                        val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+                        val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                         setAspectRatio(curW, curH)
                         holder.setFixedSize(curW, curH)
                         setHdrMode(state.colorProfile)
@@ -152,8 +156,10 @@ fun Viewfinder(
 
                             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                                 val curRes = viewModel.state.value.videoResolution
-                                val cW = maxOf(curRes.width, curRes.height)
-                                val cH = minOf(curRes.width, curRes.height)
+                                val isPort = display?.rotation == android.view.Surface.ROTATION_0 || display?.rotation == android.view.Surface.ROTATION_180 ||
+                                        viewModel.state.value.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
+                                val cW = if (isPort) minOf(curRes.width, curRes.height) else maxOf(curRes.width, curRes.height)
+                                val cH = if (isPort) maxOf(curRes.width, curRes.height) else minOf(curRes.width, curRes.height)
                                 setAspectRatio(cW, cH)
                                 setHdrMode(state.colorProfile)
                                 display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
@@ -167,8 +173,8 @@ fun Viewfinder(
                 },
                 update = { view ->
                     surfaceViewRef = view
-                    val curW = maxOf(vRes.width, vRes.height)
-                    val curH = minOf(vRes.width, vRes.height)
+                    val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+                    val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                     view.setAspectRatio(curW, curH)
                     view.holder.setFixedSize(curW, curH)
                     view.setHdrMode(state.colorProfile)

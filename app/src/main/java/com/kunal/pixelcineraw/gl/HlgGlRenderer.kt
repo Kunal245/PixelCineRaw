@@ -396,6 +396,7 @@ void main() {
      * Computes the 1:1 square-pixel aspect ratio center-crop matrix (uAspectMatrix).
      * Compares incomingBufferAspect against targetOutputAspect without stretching horizontally or squeezing vertically.
      * Optionally applies anamorphic de-squeeze factor to expand compressed widescreen visuals.
+     * Accounts for display/device rotation so vertical 9:16 and 3:4 portrait viewports receive 1:1 square pixels.
      */
     private fun computeAspectMatrix(
         result: FloatArray,
@@ -403,6 +404,7 @@ void main() {
         streamH: Int,
         outW: Int,
         outH: Int,
+        rotation: Int = Surface.ROTATION_90,
         anamorphic: Float = 1.0f
     ): FloatArray {
         Matrix.setIdentityM(result, 0)
@@ -410,7 +412,12 @@ void main() {
             return result
         }
 
-        val incomingBufferAspect = streamW.toFloat() / streamH.toFloat()
+        val isRotated = rotation == Surface.ROTATION_0 || rotation == Surface.ROTATION_180
+        val incomingBufferAspect = if (isRotated) {
+            streamH.toFloat() / streamW.toFloat()
+        } else {
+            streamW.toFloat() / streamH.toFloat()
+        }
         val targetOutputAspect = outW.toFloat() / outH.toFloat()
 
         var scaleU = 1.0f
@@ -747,8 +754,8 @@ void main() {
             try {
                 destroyEncoderSurface()
                 if (surface != null && surface.isValid && isReady) {
-                    encoderWidth = maxOf(width, height)
-                    encoderHeight = minOf(width, height)
+                    encoderWidth = width
+                    encoderHeight = height
                     val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         encoderEglSurface = eglSurf
@@ -829,7 +836,7 @@ void main() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
             val pMatrix = computePreviewMatrix(texMatrix, displayRotation, isFrontCamera)
-            val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h, anamorphicScale)
+            val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h, displayRotation, anamorphicScale)
             drawQuad(
                 matrix = pMatrix,
                 aspectMatrix = pAspect,
@@ -855,7 +862,7 @@ void main() {
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                     val eMatrix = computeEncoderMatrix(texMatrix, displayRotation, isFrontCamera)
-                    val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH, 1.0f)
+                    val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH, displayRotation, 1.0f)
                     drawQuad(
                         matrix = eMatrix,
                         aspectMatrix = eAspect,
