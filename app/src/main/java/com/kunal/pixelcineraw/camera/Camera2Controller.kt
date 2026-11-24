@@ -772,7 +772,53 @@ class Camera2Controller(
         builder.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, state.antiBandingMode.camera2Mode)
 
         // 3. Exposure & Sensitivity (Shutter & ISO & EV)
-        if (state.isManualExposure) {
+        val useHardwareAe = !state.isManualExposure || state.isAutoIso
+
+        if (useHardwareAe) {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            builder.set(CaptureRequest.CONTROL_AE_LOCK, state.isAeAfLocked)
+
+            // Highlight headroom bias: In HLG10, HDR10+, and PIXEL-LOG modes, bias by -1.0 EV below user's EV compensation
+            val isHdrOrLog = state.colorProfile == ColorProfile.HLG_10BIT ||
+                    state.colorProfile == ColorProfile.HDR10_PLUS ||
+                    state.colorProfile == ColorProfile.FLAT_LOG
+
+            val chars = getCameraCharacteristics(spec.cameraId)
+            val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP) ?: android.util.Rational(1, 3)
+            val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(-6, 6)
+            val stepVal = step.toFloat().coerceAtLeast(0.01f)
+
+            val targetEv = if (isHdrOrLog) state.evCompensation - 1.0f else state.evCompensation
+            val evIndex = (targetEv / stepVal).roundToInt().coerceIn(range.lower, range.upper)
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evIndex)
+
+            // If manual shutter (e.g. 180° shutter or manual speed) is selected while ISO is Auto, lock shutter speed
+            if (state.isManualExposure) {
+                val baseExposureNs = computeTargetShutterSpeedNs(
+                    shutterAngle = state.shutterAngle,
+                    targetFps = state.targetFps,
+                    antiBandingMode = state.antiBandingMode,
+                    manualSpeedNs = state.shutterSpeedNs,
+                    shutterUnit = state.shutterUnit
+                )
+                val exposureNs = baseExposureNs.coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
+                val minFrameDurationNs = 1_000_000_000L / state.targetFps
+                builder.set(CaptureRequest.SENSOR_FRAME_DURATION, minFrameDurationNs)
+            }
+
+            // Pre-match exposure from previous sensor during physical transition to eliminate brightness flash
+            if (state.isTransitioningLens) {
+                lastExposureNs?.let { exp ->
+                    val safeExp = exp.coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+                    builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, safeExp)
+                }
+                lastIso?.let { iso ->
+                    val safeIso = iso.coerceIn(spec.isoRange.lower, spec.isoRange.upper)
+                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, safeIso)
+                }
+            }
+        } else {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
 
             // Calculate exposure time in nanoseconds with anti-banding 180° sync
@@ -809,29 +855,6 @@ class Camera2Controller(
             // Clamp frame duration to ensure sensor doesn't drop target FPS
             val minFrameDurationNs = 1_000_000_000L / state.targetFps
             builder.set(CaptureRequest.SENSOR_FRAME_DURATION, minFrameDurationNs)
-        } else {
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            builder.set(CaptureRequest.CONTROL_AE_LOCK, state.isAeAfLocked)
-
-            // Set hardware EV compensation index for auto exposure
-            val chars = getCameraCharacteristics(spec.cameraId)
-            val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP) ?: android.util.Rational(1, 3)
-            val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(-6, 6)
-            val stepVal = step.toFloat().coerceAtLeast(0.01f)
-            val evIndex = (state.evCompensation / stepVal).toInt().coerceIn(range.lower, range.upper)
-            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evIndex)
-
-            // Pre-match exposure from previous sensor during physical transition to eliminate brightness flash
-            if (state.isTransitioningLens) {
-                lastExposureNs?.let { exp ->
-                    val safeExp = exp.coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
-                    builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, safeExp)
-                }
-                lastIso?.let { iso ->
-                    val safeIso = iso.coerceIn(spec.isoRange.lower, spec.isoRange.upper)
-                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, safeIso)
-                }
-            }
         }
 
         // 2b. Torch / Continuous Video Light
@@ -1062,51 +1085,28 @@ class Camera2Controller(
                 _state.update { it.copy(measuredFps = fps) }
             }
 
-            // Hardware SENSOR_SENSITIVITY throttling (~8 frames / 133ms) so Camera2 HAL is never flooded
+            // Tensor G4 Hardware AE readout sync (throttled to 5Hz to prevent recomposition flooding)
             val nowMs = SystemClock.uptimeMillis()
-            if (_state.value.isManualExposure && _state.value.isAutoIso) {
-                framesSinceLastHardwareIsoUpdate++
-                val activeRange = getActiveSensorIsoRange()
-                val continuousIso = hlgGlRenderer?.desiredContinuousIso ?: currentContinuousIso
-                currentContinuousIso = continuousIso
-                val targetHardwareIso = continuousIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
-                val hardwareDiff = Math.abs(targetHardwareIso - lastAppliedIso)
-
-                if ((framesSinceLastHardwareIsoUpdate >= 8 && hardwareDiff >= 4) || (hardwareDiff > lastAppliedIso * 0.25f)) {
-                    framesSinceLastHardwareIsoUpdate = 0
-                    pendingEffectiveIso.set(targetHardwareIso.toFloat())
-                    cameraHandler?.post { applyHardwareParametersRamping(force = false) }
-                }
-
-                // Throttled UI readout for Auto-ISO (5Hz to avoid recomposition flooding)
-                if (nowMs - lastAutoExposureReadoutTime >= 200L) {
-                    if (Math.abs(targetHardwareIso - _state.value.iso) >= 1) {
-                        lastAutoExposureReadoutTime = nowMs
-                        _state.update { it.copy(iso = targetHardwareIso) }
-                    }
-                }
-            } else {
-                autoIsoSustainedFrames = 0
-                framesSinceLastHardwareIsoUpdate = 0
-            }
-
-            // Sync actual sensor exposure if in auto mode (throttled to 5Hz to prevent recomposition flooding during camera pans)
-            if (!_state.value.isManualExposure && (nowMs - lastAutoExposureReadoutTime >= 200L)) {
+            val isUsingHardwareAe = !_state.value.isManualExposure || _state.value.isAutoIso
+            if (isUsingHardwareAe && (nowMs - lastAutoExposureReadoutTime >= 200L)) {
                 val actualExposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
                 val actualIso = result.get(CaptureResult.SENSOR_SENSITIVITY)
-                if (actualExposure != null && actualIso != null) {
-                    val expDiff = Math.abs(actualExposure - _state.value.shutterSpeedNs)
+                if (actualIso != null) {
+                    val expDiff = if (actualExposure != null) Math.abs(actualExposure - _state.value.shutterSpeedNs) else 0L
                     val isoDiff = Math.abs(actualIso - _state.value.iso)
-                    if (expDiff > 500_000L || isoDiff >= 5) {
+                    if (isoDiff >= 1 || (!_state.value.isManualExposure && expDiff > 500_000L)) {
                         lastAutoExposureReadoutTime = nowMs
                         _state.update {
                             it.copy(
-                                shutterSpeedNs = actualExposure,
-                                iso = actualIso
+                                iso = actualIso,
+                                shutterSpeedNs = if (!it.isManualExposure && actualExposure != null) actualExposure else it.shutterSpeedNs
                             )
                         }
                     }
                 }
+            } else if (!_state.value.isAutoIso) {
+                autoIsoSustainedFrames = 0
+                framesSinceLastHardwareIsoUpdate = 0
             }
 
             // Sync actual focus distance if in auto focus (throttled to 5Hz)
@@ -1120,8 +1120,9 @@ class Camera2Controller(
 
             // Multi-Frame Hardware Parameter Ramping: ONLY call when manual parameter has actually changed!
             // Stops immediately when target reached - NEVER touches setRepeatingRequest while panning!
+            val isManualIsoActive = _state.value.isManualExposure && !_state.value.isAutoIso
             val hasPendingRamp = (Math.abs(pendingZoomRatio.get() - lastAppliedZoomRatio) > 0.001f) ||
-                    (_state.value.isManualExposure && Math.abs(pendingEffectiveIso.get() - currentEffectiveIso) >= 0.5f) ||
+                    (isManualIsoActive && Math.abs(pendingEffectiveIso.get() - currentEffectiveIso) >= 0.5f) ||
                     (_state.value.isManualExposure && (Math.abs(pendingExposureNs.get() - lastAppliedExposureNs) > 50_000L)) ||
                     (_state.value.focusMode == FocusMode.MANUAL && (Math.abs(pendingFocusDistance.get() - lastAppliedFocusDistance) > 0.002f)) ||
                     (_state.value.isManualWb && (pendingWbKelvin.get() != lastAppliedWbKelvin || pendingWbTint.get() != lastAppliedWbTint))
@@ -1351,23 +1352,19 @@ class Camera2Controller(
             needsRepeatingRequest = true
         }
 
-        // 2. ISO Sensitivity Ramping (Supports both continuous S-curve Auto-ISO & manual 4% damping)
-        if (stateVal.isManualExposure) {
+        // 2. ISO Sensitivity Ramping (Active only for manual ISO)
+        if (stateVal.isManualExposure && !stateVal.isAutoIso) {
             val activeRange = getActiveSensorIsoRange()
-            val applyBase = if (stateVal.isAutoIso) {
-                currentContinuousIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
-            } else {
-                val targetIso = pendingEffectiveIso.get()
-                val clampedTargetIso = targetIso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
-                if (force) {
-                    currentEffectiveIso = clampedTargetIso
-                } else if (clampedTargetIso > currentEffectiveIso) {
-                    currentEffectiveIso = minOf(clampedTargetIso, currentEffectiveIso * 1.04f)
-                } else if (clampedTargetIso < currentEffectiveIso) {
-                    currentEffectiveIso = maxOf(clampedTargetIso, currentEffectiveIso * 0.96f)
-                }
-                currentEffectiveIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
+            val targetIso = pendingEffectiveIso.get()
+            val clampedTargetIso = targetIso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
+            if (force) {
+                currentEffectiveIso = clampedTargetIso
+            } else if (clampedTargetIso > currentEffectiveIso) {
+                currentEffectiveIso = minOf(clampedTargetIso, currentEffectiveIso * 1.04f)
+            } else if (clampedTargetIso < currentEffectiveIso) {
+                currentEffectiveIso = maxOf(clampedTargetIso, currentEffectiveIso * 0.96f)
             }
+            val applyBase = currentEffectiveIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
 
             val chars = getCameraCharacteristics(spec.cameraId)
             val boostRange = chars.get(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE)
@@ -1388,7 +1385,7 @@ class Camera2Controller(
         // 3. Shutter Exposure Time Ramping
         if (stateVal.isManualExposure) {
             val targetExp = pendingExposureNs.get().coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
-            val evMultiplier = Math.pow(2.0, stateVal.evCompensation.toDouble())
+            val evMultiplier = if (stateVal.isAutoIso) 1.0 else Math.pow(2.0, stateVal.evCompensation.toDouble())
             val biasedTargetExp = (targetExp * evMultiplier).toLong()
                 .coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
 
@@ -1400,7 +1397,11 @@ class Camera2Controller(
             }
             val applyExp = smoothedExposureNs.toLong().coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
             if (force || Math.abs(applyExp - lastAppliedExposureNs) > 50_000L) {
-                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                if (stateVal.isAutoIso) {
+                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                } else {
+                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                }
                 builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, applyExp)
                 builder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / stateVal.targetFps)
                 lastAppliedExposureNs = applyExp
@@ -1632,6 +1633,7 @@ class Camera2Controller(
         hlgGlRenderer?.setManualIso(clampedIso)
         hlgGlRenderer?.setExposureTrim(1.0f)
         val lockedExposureNs = lastExposureNs ?: _state.value.shutterSpeedNs
+        val wasAuto = _state.value.isAutoIso || !_state.value.isManualExposure
         _state.update {
             it.copy(
                 isManualExposure = true,
@@ -1642,9 +1644,12 @@ class Camera2Controller(
         }
         pendingExposureNs.set(lockedExposureNs)
         pendingEffectiveIso.set(clampedIso)
+        currentEffectiveIso = clampedIso
         persistState()
 
-        if (!isIsoCheckScheduled) {
+        if (wasAuto) {
+            createAndSetRepeatingRequest()
+        } else if (!isIsoCheckScheduled) {
             isIsoCheckScheduled = true
             cameraHandler?.post {
                 isIsoCheckScheduled = false
@@ -1697,19 +1702,11 @@ class Camera2Controller(
     fun toggleAutoIso() {
         val willBeAuto = !_state.value.isAutoIso
         autoIsoSustainedFrames = 0
-        hlgGlRenderer?.isAutoIsoEnabled = willBeAuto
-        if (willBeAuto) {
-            val currentIso = lastIso?.toFloat() ?: _state.value.iso.toFloat()
-            currentContinuousIso = currentIso
-            hlgGlRenderer?.setManualIso(currentIso)
-            val activeRange = getActiveSensorIsoRange()
-            hlgGlRenderer?.minSensorIso = activeRange.lower.toFloat()
-            hlgGlRenderer?.maxSensorIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
-        } else {
-            hlgGlRenderer?.setExposureTrim(1.0f)
-        }
+        hlgGlRenderer?.isAutoIsoEnabled = false
+        hlgGlRenderer?.setExposureTrim(1.0f)
         _state.update { it.copy(isAutoIso = willBeAuto) }
         persistState()
+        createAndSetRepeatingRequest()
     }
 
     fun setAutoShutter() {
@@ -2218,41 +2215,17 @@ class Camera2Controller(
                 ndNeeded = true
             }
 
-            // Measure linear pre-tone-map scene EV error:
-            // When shutter is locked (180° or manual) while ISO is set to AUTO:
-            if (_state.value.isAutoIso && _state.value.isManualExposure) {
-                val targetLinearLuma = (0.38f * Math.pow(2.0, _state.value.evCompensation.toDouble()).toFloat())
-                    .coerceIn(0.05f, 0.95f)
-                val measuredLinearLuma = avgLuma.coerceIn(0.01f, 1.0f)
-                val evRatio = (targetLinearLuma / measuredLinearLuma).coerceIn(0.0625f, 16.0f)
-                val evError = (kotlin.math.ln(evRatio) / kotlin.math.ln(2.0f))
-                latestEvError = evError
-
-                // Step A — 0.6-Second Sustained Change Delay (~36 frames at 60fps):
-                // Require abs(evError) > 0.30f to remain consistently outside deadband for 36 consecutive frames (~0.6s)
-                if (kotlin.math.abs(evError) > 0.30f) {
-                    autoIsoSustainedFrames++
-                    if (autoIsoSustainedFrames >= 36) {
-                        // Step B — Smooth 1.5-Second Ease-In-Out Glide:
-                        val currentIso = hlgGlRenderer?.desiredContinuousIso ?: currentContinuousIso
-                        val maxAllowedIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
-                        val calculatedTargetIso = (currentIso * Math.pow(2.0, evError.toDouble()).toFloat())
-                            .coerceIn(activeRange.lower.toFloat(), maxAllowedIso)
-
-                        hlgGlRenderer?.startAutoIsoGlide(calculatedTargetIso, activeRange.lower.toFloat(), maxAllowedIso)
-                        autoIsoSustainedFrames = 0
-                    }
-                } else {
-                    autoIsoSustainedFrames = 0
-                }
-            } else {
-                latestEvError = 0f
-                autoIsoSustainedFrames = 0
-            }
+            // Native Tensor G4 Hardware AE handles Auto-ISO; keep software glide state cleared
+            latestEvError = 0f
+            autoIsoSustainedFrames = 0
         }
 
         val now = SystemClock.uptimeMillis()
-        val currentIsoReadout = if (_state.value.isAutoIso) (hlgGlRenderer?.desiredContinuousIso ?: currentContinuousIso).roundToInt() else currentEffectiveIso.roundToInt()
+        val currentIsoReadout = if (_state.value.isAutoIso || !_state.value.isManualExposure) {
+            _state.value.iso
+        } else {
+            currentEffectiveIso.roundToInt()
+        }
         if (now - lastHistogramUpdateTime < 83L) { // 12Hz throttle (1000ms / 12 ~= 83ms)
             pendingHistogramData = data
             if (!isHistogramDispatchScheduled) {

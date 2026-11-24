@@ -6,7 +6,7 @@
 *Built with Kotlin, Jetpack Compose, Camera2 API, and OpenGL ES 3.0.*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v1.1.0](https://img.shields.io/badge/Release-v1.1.0%20(Stable)-brightgreen.svg)](https://github.com/kunalnimje/PixelCineRaw/releases/tag/v1.1.0)
+[![Release: v1.3.0](https://img.shields.io/badge/Release-v1.3.0%20(Stable)-brightgreen.svg)](https://github.com/kunalnimje/PixelCineRaw/releases/tag/v1.3.0)
 [![Platform](https://img.shields.io/badge/Platform-Android%2014+-green.svg)](https://developer.android.com)
 [![Hardware Tuned](https://img.shields.io/badge/Tuned%20For-Google%20Pixel%209a%20(Tensor%20G4)-orange.svg)](https://store.google.com)
 [![HDR Pipeline](https://img.shields.io/badge/Color-HLG10%20%7C%20HDR10%2B-purple.svg)]()
@@ -48,7 +48,9 @@ Unlike stock camera apps that apply heavy spatial noise reduction, aggressive ed
 - **3D LUT Engine:** Live OpenGL ES 3D LUT preview with `.cube` file import and optional "Bake LUT into MP4" toggle.
 
 ### 🎛️ True Cinema Exposure & Anti-Banding
-- **60fps Timestamp-Synced Auto-ISO (`SENSOR_TIMESTAMP`):** Delayed ~0.6s sustained scene-change hold followed by a silky-smooth 1.5-second cubic S-curve optical glide. Exactly synchronizes GPU exposure trim with hardware sensor timestamps to deliver continuous, step-free 60fps transitions.
+- **Native Tensor G4 Hardware Auto-Exposure (AE):** Runs Google Tensor G4's neural multi-zone metering and hardware gain smoothing natively at 60Hz across ALL color profiles (`REC.709`, `PIXEL-LOG`, `HLG10`, `HDR10+`) whenever `ISO == AUTO`. Completely replaces custom software feedback loops for silky-smooth, step-free exposure transitions with zero hunting or latency.
+- **-1.0 EV Highlight Headroom & Midtone Recovery (HDR10+, HLG10 & Pixel-Log):** Automatically biases hardware AE by `-1.0 EV` under-exposure for high-dynamic-range profiles while keeping the UI readout centered on user EV bias. In the OpenGL ES pipeline (`HlgGlRenderer.kt`), applies a `+1.0 EV` (`2.0x`) linear midtone gain recovery paired with a smooth normalized logarithmic highlight roll-off (`(x / (1.0 + x * 0.35)) * 1.35`) before OETF encoding—recovering an entire stop of highlight detail in bright skies and specular highlights without clipping.
+- **Instant Manual Overrides:** Clean, instantaneous handoff to `CONTROL_AE_MODE_OFF` whenever manual ISO or manual Shutter is dialed, and seamless return to `CONTROL_AE_MODE_ON` on tapping `AUTO ISO`.
 - **True 180° Cinema Shutter:** Authentic optical motion blur (`1/48s` at 24p, `1/60s` at 30p, `1/120s` at 60p) with live 32-bin luma histogram feedback and automatic highlight-clipping `ND NEEDED` warning badge.
 - **Sub-Stop ISO & $130\,\text{dp}$/Stop Relative Dial:** Eliminates analog sensor stair-stepping using fine `CONTROL_POST_RAW_SENSITIVITY_BOOST` gain multipliers with a 250ms optical exponential glide and zero-flash auto-to-manual handoff.
 - **50Hz / 60Hz Indoor Light Anti-Banding:** Hardware ISP anti-banding mode (`50Hz`, `60Hz`, `AUTO`, `OFF`) with automatic flicker-free $1/50\,\text{s}$ and $1/100\,\text{s}$ shutter harmonic synchronization for European/PAL AC indoor lighting.

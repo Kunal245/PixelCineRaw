@@ -281,25 +281,34 @@ void main() {
         return;
     }
 
-    // Apply smooth cubic highlight shoulder roll-off above 0.80 luminance before OETF
-    color = applyHighlightShoulder(color);
-
     if (uColorMode == 2) {
-        // HLG / BT.2020 Mode with GPU exposure trim & static dither right before OETF curve
+        // HLG / BT.2020 Mode: +1.0 EV (2.0x) linear midtone recovery with smooth highlight roll-off
         vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim;
+        vec3 x = linearRgb * 2.0;
+        linearRgb = (x / (vec3(1.0) + x * 0.35)) * 1.35;
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 dithered = applyTriangularIgnDither(rec2020, gl_FragCoord.xy);
         vec3 hlgRgb = clamp(encodeHlg(dithered), 0.0, 1.0);
         gl_FragColor = vec4(hlgRgb, 1.0);
     } else if (uColorMode == 3) {
-        // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode) with GPU exposure trim & static dither
+        // HDR10+ (SMPTE ST.2084 PQ): +1.0 EV (2.0x) linear midtone recovery with smooth highlight roll-off
         vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim;
+        vec3 x = linearRgb * 2.0;
+        linearRgb = (x / (vec3(1.0) + x * 0.35)) * 1.35;
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 dithered = applyTriangularIgnDither(rec2020, gl_FragCoord.xy);
         vec3 pqRgb = clamp(encodePq(dithered), 0.0, 1.0);
         gl_FragColor = vec4(pqRgb, 1.0);
+    } else if (uColorMode == 1) {
+        // PIXEL-LOG (uColorMode == 1): +1.0 EV (2.0x) midtone recovery with smooth highlight roll-off
+        vec3 trimmed = color * uExposureTrim;
+        vec3 x = trimmed * 2.0;
+        vec3 recovered = (x / (vec3(1.0) + x * 0.35)) * 1.35;
+        vec3 dithered = clamp(applyTriangularIgnDither(recovered, gl_FragCoord.xy), 0.0, 1.0);
+        gl_FragColor = vec4(dithered, 1.0);
     } else {
-        // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1)
+        // REC.709 (uColorMode == 0): standard 0.0 EV compensation, 1.0x output, and smooth highlight shoulder
+        color = applyHighlightShoulder(color);
         vec3 trimmed = color * uExposureTrim;
         vec3 dithered = clamp(applyTriangularIgnDither(trimmed, gl_FragCoord.xy), 0.0, 1.0);
         gl_FragColor = vec4(dithered, 1.0);
