@@ -6,7 +6,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
-import android.view.Choreographer
 import android.view.Surface
 import com.kunal.pixelcineraw.camera.ColorProfile
 import java.nio.ByteBuffer
@@ -245,12 +244,6 @@ void main() {
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
 
-    // Intermediate 16-Bit Half-Float Framebuffer (GL_RGBA16F)
-    private var fboId: Int = 0
-    private var fboTexId: Int = 0
-    private var fboWidth: Int = 0
-    private var fboHeight: Int = 0
-
     // Stream and Surface Dimensions (always landscape width >= height)
     @Volatile
     var streamWidth: Int = 3840
@@ -271,21 +264,6 @@ void main() {
     // Zero-allocation reusable query buffers for eglQuerySurface
     private val queryWidth = IntArray(1)
     private val queryHeight = IntArray(1)
-
-    // Hardware VSYNC Choreographer Pacing State
-    @Volatile private var isFramePending = false
-    @Volatile private var isChoreographerScheduled = false
-    private var choreographer: Choreographer? = null
-
-    private val frameCallback = object : Choreographer.FrameCallback {
-        override fun doFrame(frameTimeNanos: Long) {
-            isChoreographerScheduled = false
-            if (isFramePending) {
-                isFramePending = false
-                renderFrame()
-            }
-        }
-    }
 
     @Volatile
     var isReady: Boolean = false
@@ -511,7 +489,6 @@ void main() {
                     initEGL()
                     initShaders()
                     initOesTexture(sW, sH)
-                    initFbo(sW, sH)
                     isReady = true
                     Log.i(TAG, "HlgGlRenderer initialized successfully (${sW}x$sH, standard 8-bit RGBA8888)")
                 }
@@ -668,78 +645,6 @@ void main() {
         checkGlError("initShaders")
     }
 
-    /**
-     * Initializes intermediate 16-Bit Half-Float Framebuffer (GL_RGBA16F) for cinema supersampling.
-     */
-    private fun initFbo(width: Int, height: Int) {
-        if (fboId != 0 && fboWidth == width && fboHeight == height) return
-        destroyFbo()
-        try {
-            val fbos = IntArray(1)
-            GLES30.glGenFramebuffers(1, fbos, 0)
-            fboId = fbos[0]
-
-            val texs = IntArray(1)
-            GLES30.glGenTextures(1, texs, 0)
-            fboTexId = texs[0]
-
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fboTexId)
-            GLES30.glTexImage2D(
-                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F,
-                width, height, 0,
-                GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT, null
-            )
-            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
-            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
-            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
-            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
-
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
-            GLES30.glFramebufferTexture2D(
-                GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
-                GLES30.GL_TEXTURE_2D, fboTexId, 0
-            )
-
-            var status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
-            if (status != GLES30.GL_FRAMEBUFFER_COMPLETE) {
-                Log.w(TAG, "GL_RGBA16F FBO incomplete (0x${Integer.toHexString(status)}), falling back to GL_RGBA8")
-                GLES30.glTexImage2D(
-                    GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8,
-                    width, height, 0,
-                    GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null
-                )
-                status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
-            }
-
-            if (status == GLES30.GL_FRAMEBUFFER_COMPLETE) {
-                fboWidth = width
-                fboHeight = height
-                Log.i(TAG, "GL FBO allocated successfully: ${width}x${height} (GL_FRAMEBUFFER_COMPLETE)")
-            } else {
-                Log.w(TAG, "GL FBO incomplete (0x${Integer.toHexString(status)}), bypassing intermediate FBO")
-                destroyFbo()
-            }
-        } catch (e: Throwable) {
-            Log.w(TAG, "Failed to create GL FBO, bypassing intermediate FBO", e)
-            destroyFbo()
-        } finally {
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        }
-    }
-
-    private fun destroyFbo() {
-        if (fboId != 0) {
-            GLES30.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
-            fboId = 0
-        }
-        if (fboTexId != 0) {
-            GLES30.glDeleteTextures(1, intArrayOf(fboTexId), 0)
-            fboTexId = 0
-        }
-        fboWidth = 0
-        fboHeight = 0
-    }
-
     private fun loadShader(type: Int, shaderCode: String): Int {
         val shader = GLES20.glCreateShader(type)
         if (shader == 0) {
@@ -771,24 +676,11 @@ void main() {
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
         // Buffer size configured BEFORE creating Surface(surfaceTexture)
+        // Direct 1:1 onFrameAvailable callback on dedicated PixelCineHlgGl thread (zero frame-pacing beat jitter)
         surfaceTexture = SurfaceTexture(oesTextureId).apply {
             setDefaultBufferSize(width, height)
             setOnFrameAvailableListener({
-                isFramePending = true
-                if (!isChoreographerScheduled) {
-                    isChoreographerScheduled = true
-                    val ch = choreographer ?: try {
-                        Choreographer.getInstance().also { choreographer = it }
-                    } catch (e: Exception) {
-                        null
-                    }
-                    if (ch != null) {
-                        ch.postFrameCallback(frameCallback)
-                    } else {
-                        isFramePending = false
-                        renderFrame()
-                    }
-                }
+                renderFrame()
             }, glHandler)
         }
 
@@ -936,8 +828,8 @@ void main() {
             )
             checkGlError("drawQuad preview")
 
-            // Hardware VSYNC Frame Pacing: Pass camera frame timestamp to SurfaceFlinger before eglSwapBuffers
-            EGLExt.eglPresentationTimeANDROID(eglDisplay, pSurf, timestampNs)
+            // Viewfinder screen pass: call eglSwapBuffers immediately.
+            // NOTE: Do NOT call eglPresentationTimeANDROID on display windowSurface - SurfaceFlinger will pace it immediately!
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
 
             // 4. Render to MediaCodec HEVC Encoder if recording (exact upright matrix matching viewfinder)
@@ -1076,8 +968,6 @@ void main() {
                     GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
                     oesTextureId = 0
                 }
-
-                destroyFbo()
 
                 surfaceTexture?.release()
                 surfaceTexture = null
