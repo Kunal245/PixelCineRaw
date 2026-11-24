@@ -878,7 +878,7 @@ void main() {
                         lastInputFrameTimeNs = nowNs
                         // Advance frameIndex by 2 if genuine sensor drop > 1.7 * frameDurationNs occurred
                         if (deltaNs > 1.7 * frameDurationNs) {
-                            val droppedSteps = Math.round(deltaNs.toDouble() / frameDurationNs.toDouble()).toLong().coerceAtLeast(2L)
+                            val droppedSteps = Math.round(deltaNs.toDouble() / frameDurationNs.toDouble()).coerceAtLeast(2L)
                             recordedFrameIndex += droppedSteps
                         } else {
                             recordedFrameIndex += 1L

@@ -295,7 +295,7 @@ class HevcLogRecorder(
                             0L
                         } else {
                             val rawStep = (info.presentationTimeUs - firstVideoPtsUs).toDouble() / targetFrameDurationUs.toDouble()
-                            Math.round(rawStep).toLong().coerceAtLeast(videoMuxedFrameCount)
+                            Math.round(rawStep).coerceAtLeast(videoMuxedFrameCount)
                         }
                         val quantizedPtsUs = frameIndex * targetFrameDurationUs
                         val monotonicPts = if (quantizedPtsUs <= lastVideoPtsUs) lastVideoPtsUs + targetFrameDurationUs else quantizedPtsUs
