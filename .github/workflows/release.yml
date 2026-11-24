@@ -140,6 +140,7 @@ jobs:
           name: "PixelCineRaw ${{ github.ref_name }}"
           body_path: release_notes.md
           prerelease: ${{ steps.prep.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ steps.prep.outputs.is_prerelease != 'true' }}
           draft: false
           files: |
             PixelCineRaw-${{ github.ref_name }}.apk
