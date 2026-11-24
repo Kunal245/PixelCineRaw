@@ -5,9 +5,11 @@ import android.opengl.*
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.kunal.pixelcineraw.camera.ColorProfile
+import com.kunal.pixelcineraw.camera.HistogramData
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -68,6 +70,7 @@ uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020, 3 = HD
 uniform int uFalseColor; // 0 = off, 1 = on
 uniform int uLutPreset;  // 0 = off, 1 = REC.709 PRO, 2 = KODAK 2383, 3 = TEAL & ORANGE
 uniform vec2 uTexelSize;
+uniform float uExposureTrim;
 varying vec2 vTextureCoord;
 
 // Rec.709 to Rec.2020 3x3 color conversion matrix (column-major in GLSL)
@@ -170,6 +173,26 @@ vec3 applyFalseColor(vec3 color) {
     return vec3(luma * 0.45); // Neutral reference gray
 }
 
+// 4-tap thresholded deband filter around vTextureCoord
+// Samples 4 diagonal taps at ±2.5 * uTexelSize and blends when difference < 0.018 threshold
+vec3 applyDeband(samplerExternalOES tex, vec2 uv, vec2 texelSize, vec3 center) {
+    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
+        return center;
+    }
+    vec2 off = texelSize * 2.5;
+    vec3 s0 = texture2D(tex, uv + vec2( off.x,  off.y)).rgb;
+    vec3 s1 = texture2D(tex, uv + vec2(-off.x,  off.y)).rgb;
+    vec3 s2 = texture2D(tex, uv + vec2( off.x, -off.y)).rgb;
+    vec3 s3 = texture2D(tex, uv + vec2(-off.x, -off.y)).rgb;
+    vec3 avg = (s0 + s1 + s2 + s3) * 0.25;
+    vec3 diff = abs(center - avg);
+    float maxDiff = max(max(diff.r, diff.g), diff.b);
+    if (maxDiff < 0.018) {
+        return mix(center, avg, 0.75);
+    }
+    return center;
+}
+
 // Static 10-bit Triangular Interleaved Gradient Noise (IGN) anti-banding spatial dither
 // Stationary spatial dither (zero temporal seed variation) eliminates 8-to-10-bit contour bands
 // while preventing temporal noise grain that stresses the HEVC encoder.
@@ -177,13 +200,13 @@ float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Static sub-LSB spatial dither: amplitude = 0.30 / 1023.0 (±0.3 LSB)
+// Static triangular spatial dither: amplitude = 0.65 / 255.0 right before HLG/PQ curve
 vec3 applyTriangularIgnDither(vec3 color, vec2 fragCoord) {
     float n1 = ign(fragCoord);
     float n2 = ign(fragCoord + vec2(1.7, 3.1));
     float tri = (n1 + n2 - 1.0); // Triangular PDF centered at 0.0 in [-1.0, 1.0]
-    float dither = tri * (0.30 / 1023.0);
-    return clamp(color + vec3(dither), 0.0, 1.0);
+    float dither = tri * (0.65 / 255.0);
+    return max(vec3(0.0), color + vec3(dither));
 }
 
 // Smooth cubic highlight shoulder roll-off above 0.80 luminance
@@ -202,7 +225,7 @@ vec3 applyHighlightShoulder(vec3 color) {
 
 void main() {
     vec4 src = sampleBicubic(sTexture, vTextureCoord, uTexelSize);
-    vec3 color = src.rgb;
+    vec3 color = applyDeband(sTexture, vTextureCoord, uTexelSize, src.rgb);
 
     // 3D LUT Simulation pass
     if (uLutPreset == 1) {
@@ -222,22 +245,23 @@ void main() {
     color = applyHighlightShoulder(color);
 
     if (uColorMode == 2) {
-        // HLG / BT.2020 Mode
-        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2));
+        // HLG / BT.2020 Mode with GPU exposure trim & static dither right before OETF curve
+        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim;
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
-        vec3 hlgRgb = clamp(encodeHlg(rec2020), 0.0, 1.0);
-        vec3 dithered = applyTriangularIgnDither(hlgRgb, gl_FragCoord.xy);
-        gl_FragColor = vec4(dithered, 1.0);
+        vec3 dithered = applyTriangularIgnDither(rec2020, gl_FragCoord.xy);
+        vec3 hlgRgb = clamp(encodeHlg(dithered), 0.0, 1.0);
+        gl_FragColor = vec4(hlgRgb, 1.0);
     } else if (uColorMode == 3) {
-        // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode)
-        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2));
+        // HDR10+ (SMPTE ST.2084 PQ 1000-nit Dynamic PQ Mode) with GPU exposure trim & static dither
+        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim;
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
-        vec3 pqRgb = clamp(encodePq(rec2020), 0.0, 1.0);
-        vec3 dithered = applyTriangularIgnDither(pqRgb, gl_FragCoord.xy);
-        gl_FragColor = vec4(dithered, 1.0);
+        vec3 dithered = applyTriangularIgnDither(rec2020, gl_FragCoord.xy);
+        vec3 pqRgb = clamp(encodePq(dithered), 0.0, 1.0);
+        gl_FragColor = vec4(pqRgb, 1.0);
     } else {
         // REC.709 (uColorMode == 0) or PIXEL-LOG (uColorMode == 1)
-        vec3 dithered = applyTriangularIgnDither(color, gl_FragCoord.xy);
+        vec3 trimmed = color * uExposureTrim;
+        vec3 dithered = clamp(applyTriangularIgnDither(trimmed, gl_FragCoord.xy), 0.0, 1.0);
         gl_FragColor = vec4(dithered, 1.0);
     }
 }
@@ -276,6 +300,7 @@ void main() {
     private var uColorModeLoc: Int = -1
     private var uFalseColorLoc: Int = -1
     private var uLutPresetLoc: Int = -1
+    private var uExposureTrimLoc: Int = -1
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -363,6 +388,19 @@ void main() {
     fun setAnamorphicScale(scale: Float) {
         anamorphicScale = scale
     }
+
+    @Volatile
+    var exposureTrim: Float = 1.0f
+        private set
+
+    fun setExposureTrim(trim: Float) {
+        exposureTrim = trim.coerceIn(0.75f, 1.35f)
+    }
+
+    // Real-time downsampled histogram & luma telemetry extraction (10 fps, 16x16 thumbnail ~0.02ms)
+    private var lastHistogramSampleTimeMs: Long = 0L
+    private val histogramPixelBuffer = ByteBuffer.allocateDirect(16 * 16 * 4).order(ByteOrder.nativeOrder())
+    var onHistogramExtracted: ((HistogramData) -> Unit)? = null
 
     private val previewMatrix = FloatArray(16)
     private val encoderMatrix = FloatArray(16)
@@ -692,6 +730,7 @@ void main() {
         uTexelSizeLoc = GLES20.glGetUniformLocation(programId, "uTexelSize")
         uFalseColorLoc = GLES20.glGetUniformLocation(programId, "uFalseColor")
         uLutPresetLoc = GLES20.glGetUniformLocation(programId, "uLutPreset")
+        uExposureTrimLoc = GLES20.glGetUniformLocation(programId, "uExposureTrim")
         checkGlError("initShaders")
     }
 
@@ -881,6 +920,56 @@ void main() {
             )
             checkGlError("drawQuad preview")
 
+            // Real-time downsampled histogram & scene luma telemetry extraction (10 fps, 16x16 thumbnail ~0.02ms)
+            val nowMs = SystemClock.uptimeMillis()
+            if (nowMs - lastHistogramSampleTimeMs >= 100L && onHistogramExtracted != null && w >= 16 && h >= 16) {
+                lastHistogramSampleTimeMs = nowMs
+                try {
+                    histogramPixelBuffer.rewind()
+                    GLES20.glReadPixels(w / 2 - 8, h / 2 - 8, 16, 16, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, histogramPixelBuffer)
+                    histogramPixelBuffer.rewind()
+
+                    val rCounts = IntArray(32)
+                    val gCounts = IntArray(32)
+                    val bCounts = IntArray(32)
+                    val lCounts = IntArray(32)
+                    var maxCount = 1
+
+                    for (i in 0 until 256) {
+                        val r = histogramPixelBuffer.get().toInt() and 0xFF
+                        val g = histogramPixelBuffer.get().toInt() and 0xFF
+                        val b = histogramPixelBuffer.get().toInt() and 0xFF
+                        histogramPixelBuffer.get() // skip alpha
+                        val luma = (0.2126f * r + 0.7152f * g + 0.0722f * b).toInt().coerceIn(0, 255)
+
+                        val rBin = r shr 3
+                        val gBin = g shr 3
+                        val bBin = b shr 3
+                        val lBin = luma shr 3
+
+                        rCounts[rBin]++
+                        gCounts[gBin]++
+                        bCounts[bBin]++
+                        lCounts[lBin]++
+
+                        if (rCounts[rBin] > maxCount) maxCount = rCounts[rBin]
+                        if (gCounts[gBin] > maxCount) maxCount = gCounts[gBin]
+                        if (bCounts[bBin] > maxCount) maxCount = bCounts[bBin]
+                        if (lCounts[lBin] > maxCount) maxCount = lCounts[lBin]
+                    }
+
+                    val redBins = FloatArray(32) { rCounts[it].toFloat() / maxCount }
+                    val greenBins = FloatArray(32) { gCounts[it].toFloat() / maxCount }
+                    val blueBins = FloatArray(32) { bCounts[it].toFloat() / maxCount }
+                    val lumaBins = FloatArray(32) { lCounts[it].toFloat() / maxCount }
+
+                    val data = HistogramData(redBins, greenBins, blueBins, lumaBins)
+                    onHistogramExtracted?.invoke(data)
+                } catch (e: Exception) {
+                    // Ignore transient buffer access issues
+                }
+            }
+
             // Viewfinder screen pass: call eglSwapBuffers immediately.
             // NOTE: Do NOT call eglPresentationTimeANDROID on display windowSurface - SurfaceFlinger will pace it immediately!
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
@@ -959,6 +1048,9 @@ void main() {
             val tw = maxOf(1, streamWidth).toFloat()
             val th = maxOf(1, streamHeight).toFloat()
             GLES20.glUniform2f(uTexelSizeLoc, 1.0f / tw, 1.0f / th)
+        }
+        if (uExposureTrimLoc != -1) {
+            GLES20.glUniform1f(uExposureTrimLoc, exposureTrim)
         }
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
