@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
@@ -22,6 +23,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -565,28 +567,16 @@ fun CinemaIsoWheelScrubber(
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
-    val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
 
     var isHiIsoMode by remember { mutableStateOf(currentIso > 3200) }
     val maxAccessibleIso = if (isHiIsoMode) activeIsoRange.upper else minOf(3200, activeIsoRange.upper)
     val minIso = activeIsoRange.lower
 
-    val stopWidthDp = 130.0 // Exactly 130dp thumb drag per 1 exposure stop (2x)
-    val stopWidthPx = with(density) { 130.dp.toPx() }
+    val stopWidthPx = with(density) { 160.dp.toPx() }
 
-    var dragStartIso by remember { mutableFloatStateOf(currentIso.toFloat()) }
-    var totalDragDeltaDp by remember { mutableDoubleStateOf(0.0) }
+    val currentIsoState = rememberUpdatedState(currentIso)
     var lastHapticIso by remember { mutableIntStateOf(currentIso) }
-    var flingJob by remember { mutableStateOf<Job?>(null) }
-
-    // Synchronize dragStartIso when external ISO changes while not dragging
-    LaunchedEffect(currentIso) {
-        if (flingJob == null) {
-            dragStartIso = currentIso.toFloat()
-            totalDragDeltaDp = 0.0
-        }
-    }
 
     // Standard Cinema Full-Stop Presets
     val standardPresets = if (!isHiIsoMode) {
@@ -704,9 +694,6 @@ fun CinemaIsoWheelScrubber(
                             )
                             .border(0.5.dp, if (isSelected) Color(0xFFFFCC00) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
                             .clickable {
-                                flingJob?.cancel()
-                                dragStartIso = presetIso.toFloat()
-                                totalDragDeltaDp = 0.0
                                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 onIsoChanged(presetIso)
                             }
@@ -726,61 +713,40 @@ fun CinemaIsoWheelScrubber(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Horizontal ISO Scrubber Wheel with 130dp/Stop Relative Drag & Inertial Fling
+        // 4. Horizontal ISO Scrubber Wheel with 160dp/Stop Relative Drag & No Recomposition Compounding
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(58.dp)
                 .background(Color(0xFF08090B), RoundedCornerShape(8.dp))
                 .border(0.5.dp, Color(0x22FFFFFF), RoundedCornerShape(8.dp))
-                .draggable(
-                    orientation = Orientation.Horizontal,
-                    state = rememberDraggableState { delta ->
-                        flingJob?.cancel()
-                        // Negative delta = drag left = increase ISO
-                        val deltaDp = (-delta / density.density).toDouble()
-                        totalDragDeltaDp += deltaDp
+                .pointerInput(isHiIsoMode) {
+                    var anchorIso = currentIsoState.value.toDouble()
+                    var cumulativeDxDp = 0.0
 
-                        // Relative drag formula: targetIso = dragStartIso * 2^(totalDragDeltaDp / 130dp)
-                        val calculatedIso = (dragStartIso * 2.0.pow(totalDragDeltaDp / stopWidthDp))
-                            .toFloat()
-                            .coerceIn(minIso.toFloat(), maxAccessibleIso.toFloat())
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            anchorIso = currentIsoState.value.toDouble()
+                            cumulativeDxDp = 0.0
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            // Negative dragAmount (swiping left) increases ISO
+                            val deltaDp = (-dragAmount / density.density).toDouble()
+                            cumulativeDxDp += deltaDp
 
-                        val roundedIso = calculatedIso.roundToInt()
-                        if (abs(roundedIso - lastHapticIso) >= 5) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            lastHapticIso = roundedIso
-                        }
-                        onIsoChanged(roundedIso)
-                    },
-                    onDragStopped = { velocity ->
-                        if (abs(velocity) > 100f) {
-                            flingJob = coroutineScope.launch {
-                                var lastAnim = 0f
-                                Animatable(0f).animateDecay(
-                                    initialVelocity = -velocity,
-                                    animationSpec = exponentialDecay(frictionMultiplier = 1.6f)
-                                ) {
-                                    val step = value - lastAnim
-                                    lastAnim = value
-                                    val stepDp = (step / density.density).toDouble()
-                                    totalDragDeltaDp += stepDp
+                            val targetIso = (anchorIso * 2.0.pow(cumulativeDxDp / 160.0))
+                                .roundToInt()
+                                .coerceIn(minIso, maxAccessibleIso)
 
-                                    val calculatedIso = (dragStartIso * 2.0.pow(totalDragDeltaDp / stopWidthDp))
-                                        .toFloat()
-                                        .coerceIn(minIso.toFloat(), maxAccessibleIso.toFloat())
-
-                                    val roundedIso = calculatedIso.roundToInt()
-                                    if (abs(roundedIso - lastHapticIso) >= 5) {
-                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                        lastHapticIso = roundedIso
-                                    }
-                                    onIsoChanged(roundedIso)
-                                }
+                            if (abs(targetIso - lastHapticIso) >= 5) {
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                lastHapticIso = targetIso
                             }
+                            onIsoChanged(targetIso)
                         }
-                    }
-                ),
+                    )
+                },
             contentAlignment = Alignment.Center
         ) {
             Canvas(modifier = Modifier.fillMaxSize()) {

@@ -775,27 +775,21 @@ class Camera2Controller(
 
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
 
-            // Sub-Stop ISO: Analog Base ISO + Fine Post-RAW Sensitivity Boost
+            // Hardware SENSOR_SENSITIVITY with fixed boost = 100 (avoids Tensor G4 analog/digital bank glitches)
             val activeRange = spec.isoRange
             val effectiveIso = currentEffectiveIso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
-            val baseStops = listOf(25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800)
-                .filter { it in activeRange.lower..activeRange.upper }
-            val analogBaseIso = baseStops.filter { it.toFloat() <= effectiveIso }.maxOrNull() ?: activeRange.lower
-            val boost = ((effectiveIso / analogBaseIso.toFloat()) * 100f).roundToInt().coerceIn(100, 200)
+            val applyBase = effectiveIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
 
             val chars = getCameraCharacteristics(spec.cameraId)
             val boostRange = chars.get(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE)
-            val supportsBoost = boostRange != null && boostRange.upper > 100
-
-            val applyBase = if (supportsBoost) analogBaseIso else effectiveIso.roundToInt()
-            val applyBoost = if (supportsBoost) boost.coerceIn(boostRange.lower, boostRange.upper) else 100
+            val supportsBoost = boostRange != null
 
             builder.set(CaptureRequest.SENSOR_SENSITIVITY, applyBase)
             if (supportsBoost) {
-                builder.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, applyBoost)
+                builder.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, 100)
             }
             lastAppliedIso = applyBase
-            lastAppliedBoost = applyBoost
+            lastAppliedBoost = 100
 
             // Clamp frame duration to ensure sensor doesn't drop target FPS
             val minFrameDurationNs = 1_000_000_000L / state.targetFps
@@ -1310,39 +1304,33 @@ class Camera2Controller(
             needsRepeatingRequest = true
         }
 
-        // 2. ISO Sensitivity Ramping (Sub-stop analog base + fine post-raw boost with 250ms damping)
+        // 2. ISO Sensitivity Ramping (1-step-per-frame rate limiter: at most 4% per frame, fixed boost = 100)
         if (stateVal.isManualExposure) {
             val targetIso = pendingEffectiveIso.get()
             val activeRange = getActiveSensorIsoRange()
             val clampedTargetIso = targetIso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
-            if (force || Math.abs(clampedTargetIso - currentEffectiveIso) < 0.5f) {
+            if (force) {
                 currentEffectiveIso = clampedTargetIso
-            } else {
-                val deltaIso = clampedTargetIso - currentEffectiveIso
-                currentEffectiveIso += deltaIso * 0.14f
+            } else if (clampedTargetIso > currentEffectiveIso) {
+                currentEffectiveIso = minOf(clampedTargetIso, currentEffectiveIso * 1.04f)
+            } else if (clampedTargetIso < currentEffectiveIso) {
+                currentEffectiveIso = maxOf(clampedTargetIso, currentEffectiveIso * 0.96f)
             }
 
-            val effectiveIso = currentEffectiveIso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
-            val baseStops = listOf(25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800)
-                .filter { it in activeRange.lower..activeRange.upper }
-            val analogBaseIso = baseStops.filter { it.toFloat() <= effectiveIso }.maxOrNull() ?: activeRange.lower
-            val boost = ((effectiveIso / analogBaseIso.toFloat()) * 100f).roundToInt().coerceIn(100, 200)
+            val applyBase = currentEffectiveIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
 
             val chars = getCameraCharacteristics(spec.cameraId)
             val boostRange = chars.get(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE)
-            val supportsBoost = boostRange != null && boostRange.upper > 100
+            val supportsBoost = boostRange != null
 
-            val applyBase = if (supportsBoost) analogBaseIso else effectiveIso.roundToInt()
-            val applyBoost = if (supportsBoost) boost.coerceIn(boostRange.lower, boostRange.upper) else 100
-
-            if (force || applyBase != lastAppliedIso || applyBoost != lastAppliedBoost) {
+            if (force || applyBase != lastAppliedIso) {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 builder.set(CaptureRequest.SENSOR_SENSITIVITY, applyBase)
                 if (supportsBoost) {
-                    builder.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, applyBoost)
+                    builder.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, 100)
                 }
                 lastAppliedIso = applyBase
-                lastAppliedBoost = applyBoost
+                lastAppliedBoost = 100
                 needsRepeatingRequest = true
             }
         }
@@ -1588,13 +1576,16 @@ class Camera2Controller(
     fun setEffectiveIso(iso: Float) {
         val activeRange = getActiveSensorIsoRange()
         val clampedIso = iso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
+        val lockedExposureNs = lastExposureNs ?: _state.value.shutterSpeedNs
         _state.update {
             it.copy(
                 isManualExposure = true,
                 isAutoIso = false,
-                iso = clampedIso.roundToInt()
+                iso = clampedIso.roundToInt(),
+                shutterSpeedNs = lockedExposureNs
             )
         }
+        pendingExposureNs.set(lockedExposureNs)
         pendingEffectiveIso.set(clampedIso)
         persistState()
 
