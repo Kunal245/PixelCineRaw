@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -650,6 +651,30 @@ fun ProToolsDrawer(
                         }
                     }
                 }
+            }
+
+            // Restore Defaults Button
+            Button(
+                onClick = { cameraController.resetToDefaults() },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0x22FF3B30)),
+                border = BorderStroke(0.8.dp, Color(0xFFFF5252).copy(alpha = 0.6f)),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    tint = Color(0xFFFF5252),
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "RESTORE FACTORY CINEMA DEFAULTS",
+                    color = Color(0xFFFF5252),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))

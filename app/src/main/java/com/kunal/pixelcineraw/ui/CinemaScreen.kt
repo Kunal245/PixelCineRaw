@@ -72,12 +72,6 @@ fun CinemaScreen(
             1_000_000_000L / 24
         )
     }
-    val isoValues = remember {
-        listOf(50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 6400)
-    }
-    val focusDistances = remember {
-        (0..40).map { i -> (i / 40f) * 10f }
-    }
     val kelvinValues = remember {
         (2300..8000 step 100).toList()
     }
@@ -179,7 +173,8 @@ fun CinemaScreen(
                 onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() },
                 onAdvancedSettingsClick = { showSettingsDialog = true },
                 onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() },
-                onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() }
+                onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() },
+                onResetDefaults = { viewModel.cameraController.resetToDefaults() }
             )
         }
 
@@ -323,16 +318,37 @@ fun CinemaScreen(
                     }
                 }
                 ActiveDial.ISO -> {
+                    val activeIsoRange = viewModel.cameraController.getActiveSensorIsoRange()
+                    val allSteps = remember {
+                        listOf(
+                            50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640,
+                            800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800
+                        )
+                    }
+                    val currentIsoValues = remember(activeIsoRange) {
+                        val filtered = allSteps.filter { it in activeIsoRange.lower..activeIsoRange.upper }.toMutableList()
+                        if (!filtered.contains(activeIsoRange.lower)) filtered.add(0, activeIsoRange.lower)
+                        if (!filtered.contains(activeIsoRange.upper)) filtered.add(activeIsoRange.upper)
+                        filtered.sorted().distinct()
+                    }
                     val currentIso = state.iso
-                    val nearestIdx = isoValues.indices.minByOrNull { abs(isoValues[it] - currentIso) } ?: 3
+                    val nearestIdx = currentIsoValues.indices.minByOrNull { abs(currentIsoValues[it] - currentIso) } ?: 0
+                    val standardPresets = listOf(100, 200, 400, 800, 1600, 3200, 6400)
+                    val activePresets = standardPresets
+                        .filter { it in activeIsoRange.lower..activeIsoRange.upper }
+                        .map { iso ->
+                            val targetIdx = currentIsoValues.indexOf(iso).let { if (it >= 0) it else currentIsoValues.indices.minByOrNull { idx -> abs(currentIsoValues[idx] - iso) } ?: 0 }
+                            "$iso" to targetIdx
+                        }
+
                     RotaryWheelScrubber(
                         title = "ISO Sensitivity",
-                        items = isoValues,
+                        items = currentIsoValues,
                         selectedIndex = nearestIdx,
                         onItemSelected = { _, iso -> viewModel.cameraController.setIso(iso) },
                         formatItem = { "ISO $it" },
                         onClose = { activeDial = ActiveDial.NONE },
-                        presets = listOf("100" to 3, "200" to 6, "400" to 8, "800" to 10, "1600" to 13, "3200" to 18),
+                        presets = activePresets,
                         headerActions = {
                             TextButton(onClick = { viewModel.cameraController.toggleExposureMode() }) {
                                 Text(
@@ -346,22 +362,12 @@ fun CinemaScreen(
                     )
                 }
                 ActiveDial.FOCUS -> {
-                    val currentDist = state.focusDistance
-                    val nearestIdx = focusDistances.indices.minByOrNull { abs(focusDistances[it] - currentDist) } ?: 0
-                    RotaryWheelScrubber(
-                        title = "Manual Focus Wheel",
-                        items = focusDistances,
-                        selectedIndex = nearestIdx,
-                        onItemSelected = { _, dist -> viewModel.cameraController.setFocusDistance(dist) },
-                        formatItem = { dist ->
-                            if (dist <= 0.05f) "∞ INFINITY"
-                            else {
-                                val meters = 1.0f / dist
-                                String.format(Locale.US, "%.2fm", meters)
-                            }
-                        },
+                    val maxDiopters = maxOf(0.1f, state.currentSensorSpec?.minimumFocusDistance ?: 10.0f)
+                    CinemaFocusWheelScrubber(
+                        currentFocusDistance = state.focusDistance,
+                        maxDiopters = maxDiopters,
+                        onFocusDistanceChanged = { dist -> viewModel.cameraController.setFocusDistance(dist) },
                         onClose = { activeDial = ActiveDial.NONE },
-                        presets = listOf("∞ INF" to 0, "2.0m" to 10, "1.0m" to 20, "0.5m" to 30, "MACRO" to 40),
                         headerActions = {
                             TextButton(onClick = {
                                 viewModel.cameraController.setFocusMode(

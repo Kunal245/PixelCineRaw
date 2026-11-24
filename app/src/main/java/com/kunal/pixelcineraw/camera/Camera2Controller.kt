@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlin.math.min
@@ -83,8 +84,11 @@ class Camera2Controller(
     private var hardwareHlgFallback = false
     private var hlgGlRenderer: HlgGlRenderer? = null
 
-    // State flow
-    private val _state = MutableStateFlow(CinemaState())
+    // Settings repository
+    val settingsRepo = CameraSettingsRepository(context)
+
+    // State flow initialized with persisted settings
+    private val _state = MutableStateFlow(settingsRepo.loadSettings(CinemaState()))
     val state: StateFlow<CinemaState> = _state.asStateFlow()
 
     // Sensor pointers
@@ -101,9 +105,21 @@ class Camera2Controller(
     private var lastFpsTimestamp = System.nanoTime()
 
     // Lock-free VSYNC Zoom Sync State
-    private val pendingZoomRatio = AtomicReference<Float>(1.0f)
-    @Volatile private var lastAppliedZoomRatio = 1.0f
+    private val pendingZoomRatio = AtomicReference<Float>(_state.value.zoomRatio)
+    @Volatile private var lastAppliedZoomRatio = _state.value.zoomRatio
     private var isZoomCheckScheduled = false
+
+    // Lock-free VSYNC ISO Sync State
+    private val pendingIso = AtomicInteger(_state.value.iso)
+    @Volatile private var lastAppliedIso = _state.value.iso
+    @Volatile private var smoothedIso = _state.value.iso.toFloat()
+    private var isIsoCheckScheduled = false
+
+    // Lock-free VSYNC Focus Sync State
+    private val pendingFocusDistance = AtomicReference<Float>(_state.value.focusDistance)
+    @Volatile private var lastAppliedFocusDistance = _state.value.focusDistance
+    @Volatile private var smoothedFocusDistance = _state.value.focusDistance
+    private var isFocusCheckScheduled = false
 
     init {
         startBackgroundThread()
@@ -279,15 +295,19 @@ class Camera2Controller(
             }
 
             if (initialSpec != null) {
-                _state.update {
-                    it.copy(
+                _state.update { current ->
+                    val matchedRes = probedResolutions.find { r ->
+                        r.width == current.videoResolution.width && r.height == current.videoResolution.height
+                    } ?: probedResolutions.firstOrNull { r -> r.width == 3840 && r.height == 2160 }
+                      ?: probedResolutions.firstOrNull { r -> r.width == 1920 && r.height == 1080 }
+                      ?: CustomResolution.UHD_4K
+
+                    val safeIso = current.iso.coerceIn(initialSpec.isoRange.lower, initialSpec.isoRange.upper)
+                    current.copy(
                         currentSensorSpec = initialSpec,
                         supportedResolutions = probedResolutions,
-                        videoResolution = probedResolutions.firstOrNull { r -> r.width == 3840 && r.height == 2160 }
-                            ?: probedResolutions.firstOrNull { r -> r.width == 1920 && r.height == 1080 }
-                            ?: CustomResolution.UHD_4K,
-                        iso = initialSpec.isoRange.lower.coerceAtLeast(100),
-                        focusDistance = 0.0f // Infinity
+                        videoResolution = matchedRes,
+                        iso = safeIso
                     )
                 }
             }
@@ -645,6 +665,12 @@ class Camera2Controller(
             session.setRepeatingRequest(builder.build(), captureCallback, handler)
             lastAppliedZoomRatio = stateVal.zoomRatio
             pendingZoomRatio.set(stateVal.zoomRatio)
+            lastAppliedIso = stateVal.iso
+            smoothedIso = stateVal.iso.toFloat()
+            pendingIso.set(stateVal.iso)
+            lastAppliedFocusDistance = stateVal.focusDistance
+            smoothedFocusDistance = stateVal.focusDistance
+            pendingFocusDistance.set(stateVal.focusDistance)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set repeating request", e)
         }
@@ -961,6 +987,22 @@ class Camera2Controller(
             if (Math.abs(pendingZoomRatio.get() - lastAppliedZoomRatio) > 0.0005f) {
                 applyZoomUpdateIfPending(force = false)
             }
+
+            // VSYNC ISO Sync: Check if an ISO update is pending and apply at most once per actual camera frame
+            if (_state.value.isManualExposure) {
+                val targetIso = pendingIso.get()
+                if (targetIso != lastAppliedIso || Math.abs(targetIso - smoothedIso) > 1f) {
+                    applyIsoUpdateIfPending(force = false)
+                }
+            }
+
+            // VSYNC Focus Sync: Check if a focus update is pending and apply at most once per actual camera frame
+            if (_state.value.focusMode == FocusMode.MANUAL) {
+                val targetDist = pendingFocusDistance.get()
+                if (Math.abs(targetDist - lastAppliedFocusDistance) > 0.001f || Math.abs(targetDist - smoothedFocusDistance) > 0.001f) {
+                    applyFocusUpdateIfPending(force = false)
+                }
+            }
         }
     }
 
@@ -986,6 +1028,14 @@ class Camera2Controller(
                 )
             }
             pendingZoomRatio.set(targetZoom)
+            val isoRange = getActiveSensorIsoRange()
+            if (_state.value.iso !in isoRange.lower..isoRange.upper) {
+                val clamped = _state.value.iso.coerceIn(isoRange.lower, isoRange.upper)
+                _state.update { it.copy(iso = clamped) }
+                pendingIso.set(clamped)
+                smoothedIso = clamped.toFloat()
+            }
+            persistState()
             cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
             return
         }
@@ -1026,6 +1076,15 @@ class Camera2Controller(
                 transitionScale = if (lens == LensSelection.ULTRAWIDE) 0.95f else 1.05f
             )
         }
+
+        val isoRange = getActiveSensorIsoRange()
+        if (_state.value.iso !in isoRange.lower..isoRange.upper) {
+            val clamped = _state.value.iso.coerceIn(isoRange.lower, isoRange.upper)
+            _state.update { it.copy(iso = clamped) }
+            pendingIso.set(clamped)
+            smoothedIso = clamped.toFloat()
+        }
+        persistState()
 
         if (isSwitchingDevice && targetSpec != null) {
             val surface = previewSurface
@@ -1073,6 +1132,15 @@ class Camera2Controller(
         }
 
         pendingZoomRatio.set(clampedZoom)
+
+        val isoRange = getActiveSensorIsoRange()
+        if (_state.value.iso !in isoRange.lower..isoRange.upper) {
+            val clamped = _state.value.iso.coerceIn(isoRange.lower, isoRange.upper)
+            _state.update { it.copy(iso = clamped) }
+            pendingIso.set(clamped)
+            smoothedIso = clamped.toFloat()
+        }
+        persistState()
 
         if (currentSpec != null && currentSpec.isLogicalMultiCamera) {
             if (forceUpdate) {
@@ -1166,6 +1234,7 @@ class Camera2Controller(
                 shutterAngle = ColorMath.nanosToShutterAngle(nanos, it.targetFps)
             )
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1178,6 +1247,7 @@ class Camera2Controller(
                 shutterSpeedNs = nanos
             )
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1187,43 +1257,210 @@ class Camera2Controller(
                 shutterUnit = if (it.shutterUnit == ShutterUnit.ANGLE) ShutterUnit.SPEED else ShutterUnit.ANGLE
             )
         }
+        persistState()
+    }
+
+    fun persistState() {
+        settingsRepo.saveSettings(_state.value)
+    }
+
+    fun resetToDefaults() {
+        val defaultState = settingsRepo.resetToDefaults()
+        val spec = _state.value.currentSensorSpec
+        _state.update {
+            defaultState.copy(
+                currentSensorSpec = spec,
+                supportedResolutions = it.supportedResolutions
+            )
+        }
+        pendingZoomRatio.set(defaultState.zoomRatio)
+        lastAppliedZoomRatio = defaultState.zoomRatio
+        pendingIso.set(defaultState.iso)
+        lastAppliedIso = defaultState.iso
+        smoothedIso = defaultState.iso.toFloat()
+        pendingFocusDistance.set(defaultState.focusDistance)
+        lastAppliedFocusDistance = defaultState.focusDistance
+        smoothedFocusDistance = defaultState.focusDistance
+
+        selectLens(defaultState.selectedLens)
+        createAndSetRepeatingRequest()
     }
 
     /**
-     * User Action: Set ISO
+     * Queries the active physical sensor's exact sensitivity range.
+     * When using a logical multi-camera with 0.5x ultrawide, retrieves the physical
+     * ultrawide sensor's characteristics so ISO bounds are never clamped to the main sensor.
+     */
+    fun getActiveSensorIsoRange(): Range<Int> {
+        val stateVal = _state.value
+        val currentSpec = stateVal.currentSensorSpec ?: return Range(50, 6400)
+        if (currentSpec.isLogicalMultiCamera) {
+            val isUltrawide = stateVal.selectedLens == LensSelection.ULTRAWIDE || stateVal.zoomRatio < 1.0f
+            val physSpec = if (isUltrawide) {
+                _probedSensors.find { it.isUltraWide }
+            } else {
+                _probedSensors.find { it.isMainWide }
+            }
+            if (physSpec != null) {
+                return physSpec.isoRange
+            }
+        }
+        return currentSpec.isoRange
+    }
+
+    /**
+     * User Action: Set ISO (Synchronized to VSYNC, lock-free)
      */
     fun setIso(iso: Int) {
+        val activeRange = getActiveSensorIsoRange()
+        val clampedIso = iso.coerceIn(activeRange.lower, activeRange.upper)
         _state.update {
             it.copy(
                 isManualExposure = true,
-                iso = iso
+                iso = clampedIso
             )
         }
-        createAndSetRepeatingRequest()
+        pendingIso.set(clampedIso)
+        persistState()
+
+        if (!isIsoCheckScheduled) {
+            isIsoCheckScheduled = true
+            cameraHandler?.post {
+                isIsoCheckScheduled = false
+                applyIsoUpdateIfPending(force = false)
+            }
+        }
+    }
+
+    /**
+     * Synchronizes hardware SENSOR_SENSITIVITY to camera frame VSYNC with exponential smoothing.
+     * Reuses the pre-built previewRequestBuilder on cameraHandler thread to eliminate HAL queue flooding.
+     */
+    private fun applyIsoUpdateIfPending(force: Boolean = false) {
+        val builder = previewRequestBuilder ?: return
+        val session = captureSession ?: return
+        val handler = cameraHandler ?: return
+        val spec = _state.value.currentSensorSpec ?: return
+
+        val targetIso = pendingIso.get()
+        val activeRange = getActiveSensorIsoRange()
+        val clampedTarget = targetIso.coerceIn(activeRange.lower, activeRange.upper)
+
+        if (force) {
+            smoothedIso = clampedTarget.toFloat()
+        } else {
+            val delta = clampedTarget - smoothedIso
+            smoothedIso += delta * 0.45f
+        }
+
+        val applyIso = if (force || Math.abs(clampedTarget - smoothedIso) < 3f) {
+            clampedTarget
+        } else {
+            smoothedIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
+        }
+
+        if (!force && applyIso == lastAppliedIso) {
+            return
+        }
+
+        try {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, applyIso)
+
+            // Maintain locked exposure time
+            val baseExposureNs = _state.value.shutterSpeedNs
+            val evMultiplier = Math.pow(2.0, _state.value.evCompensation.toDouble()).toFloat()
+            val exposureNs = (baseExposureNs * evMultiplier).toLong()
+                .coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+            builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
+            builder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / _state.value.targetFps)
+
+            session.setRepeatingRequest(builder.build(), captureCallback, handler)
+            lastAppliedIso = applyIso
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to apply ISO update", e)
+        }
     }
 
     fun toggleExposureMode() {
         _state.update {
             it.copy(isManualExposure = !it.isManualExposure)
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
     /**
-     * User Action: Set Manual Focus Distance (0.0 = Infinity, max = macro)
+     * User Action: Set Manual Focus Distance (0.0 = Infinity, max = macro) (Synchronized to VSYNC)
      */
     fun setFocusDistance(distance: Float) {
+        val spec = _state.value.currentSensorSpec
+        val maxDiopters = max(0.1f, spec?.minimumFocusDistance ?: 10.0f)
+        val clampedDist = distance.coerceIn(0.0f, maxDiopters)
+
         _state.update {
             it.copy(
                 focusMode = FocusMode.MANUAL,
-                focusDistance = distance
+                focusDistance = clampedDist
             )
         }
-        createAndSetRepeatingRequest()
+        pendingFocusDistance.set(clampedDist)
+        persistState()
+
+        if (!isFocusCheckScheduled) {
+            isFocusCheckScheduled = true
+            cameraHandler?.post {
+                isFocusCheckScheduled = false
+                applyFocusUpdateIfPending(force = false)
+            }
+        }
+    }
+
+    /**
+     * Synchronizes hardware LENS_FOCUS_DISTANCE to camera frame VSYNC with damped interpolation.
+     * Reuses the pre-built previewRequestBuilder on cameraHandler thread to eliminate HAL queue flooding.
+     */
+    private fun applyFocusUpdateIfPending(force: Boolean = false) {
+        val builder = previewRequestBuilder ?: return
+        val session = captureSession ?: return
+        val handler = cameraHandler ?: return
+        val spec = _state.value.currentSensorSpec ?: return
+
+        val targetDist = pendingFocusDistance.get()
+        val maxDiopters = max(0.1f, spec.minimumFocusDistance)
+        val clampedTarget = targetDist.coerceIn(0.0f, maxDiopters)
+
+        if (force) {
+            smoothedFocusDistance = clampedTarget
+        } else {
+            val delta = clampedTarget - smoothedFocusDistance
+            smoothedFocusDistance += delta * 0.35f
+        }
+
+        val applyDist = if (force || Math.abs(clampedTarget - smoothedFocusDistance) < 0.005f) {
+            clampedTarget
+        } else {
+            smoothedFocusDistance
+        }
+
+        if (!force && Math.abs(applyDist - lastAppliedFocusDistance) <= 0.001f) {
+            return
+        }
+
+        try {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, applyDist)
+
+            session.setRepeatingRequest(builder.build(), captureCallback, handler)
+            lastAppliedFocusDistance = applyDist
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to apply focus distance update", e)
+        }
     }
 
     fun setFocusMode(mode: FocusMode) {
         _state.update { it.copy(focusMode = mode) }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1344,6 +1581,7 @@ class Camera2Controller(
                 wbTint = tint
             )
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1351,6 +1589,7 @@ class Camera2Controller(
         _state.update {
             it.copy(isManualWb = !it.isManualWb)
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1369,6 +1608,7 @@ class Camera2Controller(
                 shutterSpeedNs = newShutterNs
             )
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1389,6 +1629,7 @@ class Camera2Controller(
 
         // Instantly switch shader color mode on the running GL thread
         hlgGlRenderer?.setColorMode(profile)
+        persistState()
 
         // Update sensor tone curves on the fly without stopping repeating stream
         createAndSetRepeatingRequest()
@@ -1405,6 +1646,7 @@ class Camera2Controller(
                 eisEnabled = mode == StabilizationMode.OIS_EIS
             )
         }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1431,6 +1673,7 @@ class Camera2Controller(
     fun toggleIspMode() {
         val nextMode = if (_state.value.ispMode == IspMode.CLEAN) IspMode.STOCK else IspMode.CLEAN
         _state.update { it.copy(ispMode = nextMode) }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1441,11 +1684,13 @@ class Camera2Controller(
         val nextMode = if (_state.value.intraFrameMode == IntraFrameMode.ALL_INTRA) IntraFrameMode.GOP_LONG else IntraFrameMode.ALL_INTRA
         val badge = updateChromaBadgeString(_state.value.encoderChromaBadge, nextMode)
         _state.update { it.copy(intraFrameMode = nextMode, encoderChromaBadge = badge) }
+        persistState()
     }
 
     fun setIntraFrameMode(mode: IntraFrameMode) {
         val badge = updateChromaBadgeString(_state.value.encoderChromaBadge, mode)
         _state.update { it.copy(intraFrameMode = mode, encoderChromaBadge = badge) }
+        persistState()
     }
 
     /**
@@ -1453,6 +1698,7 @@ class Camera2Controller(
      */
     fun toggleRecordWavSidecar() {
         _state.update { it.copy(recordWavSidecar = !it.recordWavSidecar) }
+        persistState()
     }
 
     fun setEncoderChromaBadge(badge: String) {
@@ -1469,15 +1715,18 @@ class Camera2Controller(
      */
     fun setVideoResolution(res: CustomResolution) {
         _state.update { it.copy(videoResolution = res) }
+        persistState()
         startCaptureSession()
     }
 
     fun setVideoCodec(codec: VideoCodec) {
         _state.update { it.copy(videoCodec = codec) }
+        persistState()
     }
 
     fun setBitrateMbps(mbps: Int) {
         _state.update { it.copy(targetBitrateMbps = mbps.coerceIn(20, 280)) }
+        persistState()
     }
 
     fun setRecordingFormat(format: RecordingFormat) {
@@ -1486,16 +1735,46 @@ class Camera2Controller(
     }
 
     // Monitoring Overlays & Cinema Controls toggles
-    fun toggleHistogram() = _state.update { it.copy(showHistogram = !it.showHistogram) }
-    fun toggleFocusPeaking() = _state.update { it.copy(showFocusPeaking = !it.showFocusPeaking) }
-    fun setPeakingColor(color: PeakingColor) = _state.update { it.copy(peakingColor = color) }
-    fun setPeakingSensitivity(sens: Float) = _state.update { it.copy(peakingSensitivity = sens.coerceIn(0.1f, 1.0f)) }
-    fun toggleZebras() = _state.update { it.copy(showZebras = !it.showZebras) }
-    fun setZebraThreshold(ire: Int) = _state.update { it.copy(zebraIreThreshold = ire.coerceIn(50, 100)) }
-    fun toggleLutPreview() = _state.update { it.copy(showLutPreview = !it.showLutPreview) }
-    fun setFrameGuide(guide: FrameGuide) = _state.update { it.copy(frameGuide = guide) }
-    fun toggleGrid() = _state.update { it.copy(showGrid = !it.showGrid) }
-    fun toggleHorizonLeveler() = _state.update { it.copy(showHorizonLeveler = !it.showHorizonLeveler) }
+    fun toggleHistogram() {
+        _state.update { it.copy(showHistogram = !it.showHistogram) }
+        persistState()
+    }
+    fun toggleFocusPeaking() {
+        _state.update { it.copy(showFocusPeaking = !it.showFocusPeaking) }
+        persistState()
+    }
+    fun setPeakingColor(color: PeakingColor) {
+        _state.update { it.copy(peakingColor = color) }
+        persistState()
+    }
+    fun setPeakingSensitivity(sens: Float) {
+        _state.update { it.copy(peakingSensitivity = sens.coerceIn(0.1f, 1.0f)) }
+        persistState()
+    }
+    fun toggleZebras() {
+        _state.update { it.copy(showZebras = !it.showZebras) }
+        persistState()
+    }
+    fun setZebraThreshold(ire: Int) {
+        _state.update { it.copy(zebraIreThreshold = ire.coerceIn(50, 100)) }
+        persistState()
+    }
+    fun toggleLutPreview() {
+        _state.update { it.copy(showLutPreview = !it.showLutPreview) }
+        persistState()
+    }
+    fun setFrameGuide(guide: FrameGuide) {
+        _state.update { it.copy(frameGuide = guide) }
+        persistState()
+    }
+    fun toggleGrid() {
+        _state.update { it.copy(showGrid = !it.showGrid) }
+        persistState()
+    }
+    fun toggleHorizonLeveler() {
+        _state.update { it.copy(showHorizonLeveler = !it.showHorizonLeveler) }
+        persistState()
+    }
     fun toggleCleanViewfinder() = _state.update { it.copy(isCleanViewfinder = !it.isCleanViewfinder) }
 
     fun toggleTorch() {
@@ -1511,6 +1790,7 @@ class Camera2Controller(
 
     fun setEvCompensation(ev: Float) {
         _state.update { it.copy(evCompensation = ev.coerceIn(-2.0f, 2.0f)) }
+        persistState()
         createAndSetRepeatingRequest()
     }
 
@@ -1649,34 +1929,41 @@ class Camera2Controller(
             LutPreset.CINEMA_TEAL -> 3
         }
         hlgGlRenderer?.setLutPreset(mode)
+        persistState()
     }
 
     fun setLutBakeEnabled(enabled: Boolean) {
         _state.update { it.copy(isLutBakeEnabled = enabled) }
         hlgGlRenderer?.setLutBakeEnabled(enabled)
+        persistState()
     }
 
     fun toggleFalseColor() {
         val next = !_state.value.showFalseColor
         _state.update { it.copy(showFalseColor = next) }
         hlgGlRenderer?.setFalseColor(next)
+        persistState()
     }
 
     fun toggleWaveform() {
         _state.update { it.copy(showWaveform = !it.showWaveform) }
+        persistState()
     }
 
     fun setAnamorphicDeSqueeze(squeeze: AnamorphicDeSqueeze) {
         _state.update { it.copy(anamorphicDeSqueeze = squeeze) }
         hlgGlRenderer?.setAnamorphicScale(squeeze.factor)
+        persistState()
     }
 
     fun setGyroflowLoggingEnabled(enabled: Boolean) {
         _state.update { it.copy(isGyroflowLoggingEnabled = enabled) }
+        persistState()
     }
 
     fun setOrientationLockMode(mode: OrientationLockMode) {
         _state.update { it.copy(orientationLockMode = mode) }
+        persistState()
     }
 
     fun cycleOrientationLockMode() {

@@ -40,6 +40,7 @@ fun TopStatusBar(
     onAdvancedSettingsClick: () -> Unit,
     onStabilizationClick: () -> Unit,
     onOrientationLockClick: () -> Unit,
+    onResetDefaults: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showFormatPopover by remember { mutableStateOf(false) }
@@ -100,6 +101,10 @@ fun TopStatusBar(
                         onOpenAdvanced = {
                             showFormatPopover = false
                             onAdvancedSettingsClick()
+                        },
+                        onResetDefaults = {
+                            showFormatPopover = false
+                            onResetDefaults()
                         }
                     )
                 }
@@ -282,7 +287,8 @@ private fun FormatPopoverContent(
     state: CinemaState,
     onResolutionSelected: (CustomResolution) -> Unit,
     onFpsSelected: (Int) -> Unit,
-    onOpenAdvanced: () -> Unit
+    onOpenAdvanced: () -> Unit,
+    onResetDefaults: () -> Unit
 ) {
     val currentTier = when {
         state.videoResolution.width >= 3800 || state.videoResolution.height >= 2160 -> "4K"
@@ -369,18 +375,33 @@ private fun FormatPopoverContent(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Full Settings Dialog entry point
-        Text(
-            text = "ADVANCED SENSOR PRESETS...",
-            color = Color(0xFF00E5FF),
-            fontSize = 9.5.sp,
-            fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier
-                .align(Alignment.End)
-                .clickable(onClick = onOpenAdvanced)
-                .padding(4.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "RESET DEFAULTS",
+                color = Color(0xFFFF5252),
+                fontSize = 9.5.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .clickable { onResetDefaults() }
+                    .padding(4.dp)
+            )
+
+            Text(
+                text = "ADVANCED PRESETS...",
+                color = Color(0xFF00E5FF),
+                fontSize = 9.5.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .clickable(onClick = onOpenAdvanced)
+                    .padding(4.dp)
+            )
+        }
     }
 }
 
