@@ -16,6 +16,7 @@ app/build/
 *.jks
 *.keystore
 .kotlin/
-releases/
+releases/*
+!releases/*.md
 *.hprof
 *.log

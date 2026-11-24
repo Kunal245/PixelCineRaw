@@ -6,7 +6,7 @@
 *Built with Kotlin, Jetpack Compose, Camera2 API, and OpenGL ES 3.0.*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v1.0.0](https://img.shields.io/badge/Release-v1.0.0%20(Stable)-brightgreen.svg)](https://github.com/kunalnimje/PixelCineRaw/releases/tag/v1.0.0)
+[![Release: v1.1.0](https://img.shields.io/badge/Release-v1.1.0%20(Stable)-brightgreen.svg)](https://github.com/kunalnimje/PixelCineRaw/releases/tag/v1.1.0)
 [![Platform](https://img.shields.io/badge/Platform-Android%2014+-green.svg)](https://developer.android.com)
 [![Hardware Tuned](https://img.shields.io/badge/Tuned%20For-Google%20Pixel%209a%20(Tensor%20G4)-orange.svg)](https://store.google.com)
 [![HDR Pipeline](https://img.shields.io/badge/Color-HLG10%20%7C%20HDR10%2B-purple.svg)]()
@@ -36,6 +36,8 @@ Unlike stock camera apps that apply heavy spatial noise reduction, aggressive ed
   - **Recording Hold:** Automatically locks orientation in its current state when recording starts to prevent mid-take aspect ratio disruption.
 
 ### 🎞️ Stutter-Free 10-Bit HDR Video Pipeline
+- **Lossless 1:1 Direct Single-Pass HDR Shader:** Zero-blur direct pixel sampling with sub-LSB spatial dithering and smooth cubic highlight shoulder roll-off above 0.82 luminance for sharp, natural 10-bit `HLG10` & `HDR10+` (`BT.2020`) footage at up to 180–280 Mbps with <2ms GPU frame times.
+- **Toggleable Sky DEBAND Filter (`OFF` / `ON`):** Lightweight toggle accessible in both Pro Tools and Codec settings. `OFF` (default) ensures pure zero-overhead single-pass rendering at 60fps, while `ON` executes a 2-tap diagonal jittered debanding lookup with edge-preserving thresholding (`< 0.015`) to eliminate banding across smooth skies on demand.
 - **Zero-Micro-Stutter 10-Bit HEVC Pipeline:** Mathematical quantized monotonic MP4 frame cadence ($16.666\,\text{ms}$ at 60fps, $33.333\,\text{ms}$ at 30fps, $41.666\,\text{ms}$ at 24fps) eliminates erratic durations in `MediaMuxer` and Google Photos.
 - **Tensor G4 Realtime Hardware Priority:** Forces `MediaFormat.KEY_PRIORITY = 0` and `KEY_OPERATING_RATE = fps` to keep the hardware HEVC encoder clock steady without downclocking during complex high-motion pans.
 - **HLG10 & HDR10+ (BT.2020):** Wide Dynamic Range with 10-bit Rec.2020 colorimetry (`COLOR_STANDARD_BT2020` + `COLOR_TRANSFER_HLG` or `COLOR_TRANSFER_ST2084` PQ) with live 120Hz OLED preview and embedded MP4 metadata.
@@ -46,7 +48,8 @@ Unlike stock camera apps that apply heavy spatial noise reduction, aggressive ed
 - **3D LUT Engine:** Live OpenGL ES 3D LUT preview with `.cube` file import and optional "Bake LUT into MP4" toggle.
 
 ### 🎛️ True Cinema Exposure & Anti-Banding
-- **True 180° Cinema Shutter & Shutter-Priority Auto-ISO:** Authentic optical motion blur (`1/48s` at 24p, `1/60s` at 30p, `1/120s` at 60p) with live 32-bin luma histogram feedback and automatic highlight-clipping `ND NEEDED` warning badge.
+- **60fps Timestamp-Synced Auto-ISO (`SENSOR_TIMESTAMP`):** Delayed ~0.6s sustained scene-change hold followed by a silky-smooth 1.5-second cubic S-curve optical glide. Exactly synchronizes GPU exposure trim with hardware sensor timestamps to deliver continuous, step-free 60fps transitions.
+- **True 180° Cinema Shutter:** Authentic optical motion blur (`1/48s` at 24p, `1/60s` at 30p, `1/120s` at 60p) with live 32-bin luma histogram feedback and automatic highlight-clipping `ND NEEDED` warning badge.
 - **Sub-Stop ISO & $130\,\text{dp}$/Stop Relative Dial:** Eliminates analog sensor stair-stepping using fine `CONTROL_POST_RAW_SENSITIVITY_BOOST` gain multipliers with a 250ms optical exponential glide and zero-flash auto-to-manual handoff.
 - **50Hz / 60Hz Indoor Light Anti-Banding:** Hardware ISP anti-banding mode (`50Hz`, `60Hz`, `AUTO`, `OFF`) with automatic flicker-free $1/50\,\text{s}$ and $1/100\,\text{s}$ shutter harmonic synchronization for European/PAL AC indoor lighting.
 - **Precision Rotary Dials:** Haptic-responsive rotary wheels for White Balance (Kelvin 2300K–8000K + Tint), Manual Focus with hyperfocal marks, and EV Bias.
