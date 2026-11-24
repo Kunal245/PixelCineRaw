@@ -150,18 +150,6 @@ vec3 encodePq(vec3 rgb) {
     return vec3(pqOetf(rgb.r), pqOetf(rgb.g), pqOetf(rgb.b));
 }
 
-// Safe 4-tap supersampling filter around vTextureCoord (avoids NaN, infinite loops, and negative weights)
-vec4 sampleBicubic(samplerExternalOES tex, vec2 uv, vec2 texelSize) {
-    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
-        return texture2D(tex, uv);
-    }
-    vec2 halfTex = texelSize * 0.5;
-    vec4 s0 = texture2D(tex, uv - halfTex);
-    vec4 s1 = texture2D(tex, uv + vec2(halfTex.x, -halfTex.y));
-    vec4 s2 = texture2D(tex, uv + vec2(-halfTex.x, halfTex.y));
-    vec4 s3 = texture2D(tex, uv + halfTex);
-    return (s0 + s1 + s2 + s3) * 0.25;
-}
 
 // LUT 1: Rec.709 Pro (broadcast saturation & contrast)
 vec3 applyRec709Pro(vec3 color) {
@@ -213,50 +201,23 @@ float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// 8-tap wide-radius golden-angle deband filter (mpv gradfun architecture)
-// Samples at 10.0, 22.0, and 36.0 texel radii rotated by per-pixel IGN noise
-// Seamlessly bridges 30-80px 8-bit sky bands at 2.5K/4K while strictly preserving sharp edges
-vec3 applyDebandWide(samplerExternalOES tex, vec2 uv, vec2 texelSize, vec3 center, vec2 fragCoord) {
-    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
-        return center;
-    }
-    float rot = ign(fragCoord) * 6.2831853;
-    vec3 accum = center;
-    float totalWeight = 1.0;
-
-    for (int i = 0; i < 8; i++) {
-        float angle = rot + float(i) * 2.3999632;
-        float r = (i == 0 || i == 3) ? 10.0 : ((i == 1 || i == 4 || i == 6) ? 22.0 : 36.0);
-        vec2 offset = vec2(cos(angle), sin(angle)) * (r * texelSize);
-        vec3 s = texture2D(tex, uv + offset).rgb;
-        vec3 diff = abs(center - s);
-        float maxDiff = max(max(diff.r, diff.g), diff.b);
-        if (maxDiff < 0.022) {
-            float w = 1.0 - (maxDiff / 0.022);
-            accum += s * w;
-            totalWeight += w;
-        }
-    }
-    return accum / totalWeight;
-}
-
-// Static triangular spatial dither: amplitude = 0.85 / 255.0 right before HLG/PQ curve
+// Static triangular spatial dither: amplitude = 0.35 / 255.0 right before HLG/PQ curve
 vec3 applyTriangularIgnDither(vec3 color, vec2 fragCoord) {
     float n1 = ign(fragCoord);
     float n2 = ign(fragCoord + vec2(1.7, 3.1));
     float tri = (n1 + n2 - 1.0); // Triangular PDF centered at 0.0 in [-1.0, 1.0]
-    float dither = tri * (0.85 / 255.0);
+    float dither = tri * (0.35 / 255.0);
     return max(vec3(0.0), color + vec3(dither));
 }
 
-// Smooth cubic highlight shoulder roll-off above 0.80 luminance
+// Smooth cubic highlight shoulder roll-off above 0.82 luminance
 // Eliminates abrupt highlight knee transitions and sky color shifting before HLG/PQ OETF
 vec3 applyHighlightShoulder(vec3 color) {
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    if (luma > 0.80) {
-        float t = clamp((luma - 0.80) / 0.20, 0.0, 1.0);
-        // Smooth cubic Hermite curve with continuous 1st derivative at 0.80
-        float rolledLuma = 0.80 + 0.20 * (t - (t * t * t) * 0.3333333) * 1.5;
+    if (luma > 0.82) {
+        float t = clamp((luma - 0.82) / 0.18, 0.0, 1.0);
+        // Smooth cubic Hermite curve with continuous 1st derivative at 0.82
+        float rolledLuma = 0.82 + 0.18 * (t - (t * t * t) * 0.3333333) * 1.5;
         float scale = rolledLuma / max(1e-5, luma);
         return color * scale;
     }
@@ -264,8 +225,8 @@ vec3 applyHighlightShoulder(vec3 color) {
 }
 
 void main() {
-    vec4 src = sampleBicubic(sTexture, vTextureCoord, uTexelSize);
-    vec3 color = applyDebandWide(sTexture, vTextureCoord, uTexelSize, src.rgb, gl_FragCoord.xy);
+    vec4 src = texture2D(sTexture, vTextureCoord);
+    vec3 color = src.rgb;
 
     // 3D LUT Simulation pass
     if (uLutPreset == 1) {
