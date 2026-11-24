@@ -66,12 +66,21 @@ class MainActivity : ComponentActivity() {
                 // Orientation Lock & Hold: Enforces user-selected lock and auto-holds orientation during recording
                 LaunchedEffect(state.isRecording, state.orientationLockMode) {
                     if (state.isRecording) {
-                        val currentRotation = cinemaViewModel.cameraController.getDisplayRotation()
-                        val isLandscape = currentRotation == Surface.ROTATION_90 || currentRotation == Surface.ROTATION_270
-                        requestedOrientation = if (isLandscape) {
-                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        val isPortraitCurrently = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+                        if (isPortraitCurrently) {
+                            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
                         } else {
-                            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                            val rot = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                                try { display?.rotation ?: Surface.ROTATION_90 } catch (_: Exception) { Surface.ROTATION_90 }
+                            } else {
+                                @Suppress("DEPRECATION")
+                                windowManager.defaultDisplay.rotation
+                            }
+                            requestedOrientation = if (rot == Surface.ROTATION_270) {
+                                ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+                            } else {
+                                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            }
                         }
                     } else {
                         requestedOrientation = when (state.orientationLockMode) {
@@ -127,11 +136,16 @@ class MainActivity : ComponentActivity() {
         orientationEventListener = object : android.view.OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN) return
-                val rotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                    try { display?.rotation ?: android.view.Surface.ROTATION_90 } catch (_: Exception) { android.view.Surface.ROTATION_90 }
+                val isPort = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+                val rotation = if (isPort) {
+                    android.view.Surface.ROTATION_0
                 } else {
-                    @Suppress("DEPRECATION")
-                    windowManager.defaultDisplay.rotation
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        try { display?.rotation ?: android.view.Surface.ROTATION_90 } catch (_: Exception) { android.view.Surface.ROTATION_90 }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        windowManager.defaultDisplay.rotation
+                    }
                 }
                 cinemaViewModel.cameraController.setDisplayRotation(rotation)
             }
@@ -143,11 +157,16 @@ class MainActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         hideSystemUI()
-        val rotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            try { display?.rotation ?: android.view.Surface.ROTATION_90 } catch (_: Exception) { android.view.Surface.ROTATION_90 }
+        val isPort = newConfig.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        val rotation = if (isPort) {
+            android.view.Surface.ROTATION_0
         } else {
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.rotation
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                try { display?.rotation ?: android.view.Surface.ROTATION_90 } catch (_: Exception) { android.view.Surface.ROTATION_90 }
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.rotation
+            }
         }
         cinemaViewModel.cameraController.setDisplayRotation(rotation)
     }

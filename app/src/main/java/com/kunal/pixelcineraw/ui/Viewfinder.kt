@@ -75,8 +75,7 @@ fun Viewfinder(
     var surfaceViewRef by remember { mutableStateOf<AutoFitSurfaceView?>(null) }
 
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
-    val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT ||
-            state.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
+    val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
 
     // Dynamically update AutoFitSurfaceView aspect ratio whenever sensor spec, resolution, or orientation changes
     LaunchedEffect(state.currentSensorSpec, state.videoResolution, isPortrait) {

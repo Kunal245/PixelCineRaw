@@ -87,8 +87,7 @@ fun CinemaScreen(
     }
 
     val configuration = LocalConfiguration.current
-    val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT ||
-            state.orientationLockMode == OrientationLockMode.LOCK_PORTRAIT
+    val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
     if (isPortrait) {
         PortraitCinemaLayout(
@@ -543,10 +542,10 @@ private fun PortraitCinemaLayout(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(44.dp)
+                    .height(56.dp)
                     .padding(horizontal = 16.dp)
-                    .background(Color(0x99111318), RoundedCornerShape(22.dp))
-                    .border(0.6.dp, Color(0x26FFFFFF), RoundedCornerShape(22.dp)),
+                    .background(Color(0x99111318), RoundedCornerShape(28.dp))
+                    .border(0.6.dp, Color(0x26FFFFFF), RoundedCornerShape(28.dp)),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 1. SHUTTER
@@ -948,9 +947,11 @@ private fun BorderlessExposureItem(
             Text(
                 text = label,
                 color = if (isActive) Color(0xFFFFCC00) else Color(0x88FFFFFF),
-                fontSize = 7.5.sp,
+                fontSize = 8.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                softWrap = false
             )
             Box(
                 modifier = Modifier
@@ -959,13 +960,15 @@ private fun BorderlessExposureItem(
                     .background(if (isAuto) Color(0xFF00FF66) else Color(0xFFFFCC00))
             )
         }
+        Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = value,
             color = if (isActive) Color(0xFFFFCC00) else Color.White,
-            fontSize = 10.5.sp,
+            fontSize = 11.5.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
         )
     }
 }

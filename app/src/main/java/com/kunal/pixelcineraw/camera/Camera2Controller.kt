@@ -360,6 +360,9 @@ class Camera2Controller(
     }
 
     fun getDisplayRotation(): Int {
+        val isPort = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        if (isPort) return Surface.ROTATION_0
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 context.display?.rotation ?: Surface.ROTATION_90
