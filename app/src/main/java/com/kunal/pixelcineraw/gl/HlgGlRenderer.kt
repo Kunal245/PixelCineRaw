@@ -4,7 +4,9 @@ import android.graphics.SurfaceTexture
 import android.opengl.*
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Process
 import android.util.Log
+import android.view.Choreographer
 import android.view.Surface
 import com.kunal.pixelcineraw.camera.ColorProfile
 import java.nio.ByteBuffer
@@ -266,6 +268,25 @@ void main() {
 
     private var hasLoggedFirstFrame = false
 
+    // Zero-allocation reusable query buffers for eglQuerySurface
+    private val queryWidth = IntArray(1)
+    private val queryHeight = IntArray(1)
+
+    // Hardware VSYNC Choreographer Pacing State
+    @Volatile private var isFramePending = false
+    @Volatile private var isChoreographerScheduled = false
+    private var choreographer: Choreographer? = null
+
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            isChoreographerScheduled = false
+            if (isFramePending) {
+                isFramePending = false
+                renderFrame()
+            }
+        }
+    }
+
     @Volatile
     var isReady: Boolean = false
         private set
@@ -447,9 +468,16 @@ void main() {
 
     private fun ensureGlThreadStarted() {
         if (glThread == null) {
-            glThread = HandlerThread("PixelCineHlgGl").apply {
+            glThread = HandlerThread("PixelCineHlgGl", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply {
                 start()
                 glHandler = Handler(looper)
+            }
+            glHandler?.post {
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to set THREAD_PRIORITY_URGENT_DISPLAY on GL thread", e)
+                }
             }
         }
     }
@@ -746,7 +774,21 @@ void main() {
         surfaceTexture = SurfaceTexture(oesTextureId).apply {
             setDefaultBufferSize(width, height)
             setOnFrameAvailableListener({
-                renderFrame()
+                isFramePending = true
+                if (!isChoreographerScheduled) {
+                    isChoreographerScheduled = true
+                    val ch = choreographer ?: try {
+                        Choreographer.getInstance().also { choreographer = it }
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (ch != null) {
+                        ch.postFrameCallback(frameCallback)
+                    } else {
+                        isFramePending = false
+                        renderFrame()
+                    }
+                }
             }, glHandler)
         }
 
@@ -875,12 +917,10 @@ void main() {
             }
 
             // 3. Render directly to Viewfinder using full SurfaceView dimensions
-            val surfWidth = IntArray(1)
-            val surfHeight = IntArray(1)
-            EGL14.eglQuerySurface(eglDisplay, pSurf, EGL14.EGL_WIDTH, surfWidth, 0)
-            EGL14.eglQuerySurface(eglDisplay, pSurf, EGL14.EGL_HEIGHT, surfHeight, 0)
-            val w = if (surfWidth[0] > 0) surfWidth[0] else previewWidth
-            val h = if (surfHeight[0] > 0) surfHeight[0] else previewHeight
+            EGL14.eglQuerySurface(eglDisplay, pSurf, EGL14.EGL_WIDTH, queryWidth, 0)
+            EGL14.eglQuerySurface(eglDisplay, pSurf, EGL14.EGL_HEIGHT, queryHeight, 0)
+            val w = if (queryWidth[0] > 0) queryWidth[0] else previewWidth
+            val h = if (queryHeight[0] > 0) queryHeight[0] else previewHeight
 
             GLES20.glViewport(0, 0, w, h)
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
@@ -895,17 +935,18 @@ void main() {
                 lutPreset = currentLutPreset
             )
             checkGlError("drawQuad preview")
+
+            // Hardware VSYNC Frame Pacing: Pass camera frame timestamp to SurfaceFlinger before eglSwapBuffers
+            EGLExt.eglPresentationTimeANDROID(eglDisplay, pSurf, timestampNs)
             EGL14.eglSwapBuffers(eglDisplay, pSurf)
 
             // 4. Render to MediaCodec HEVC Encoder if recording (exact upright matrix matching viewfinder)
             if (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE) {
                 if (EGL14.eglMakeCurrent(eglDisplay, eSurf, eSurf, eglContext)) {
-                    val encSurfWidth = IntArray(1)
-                    val encSurfHeight = IntArray(1)
-                    EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_WIDTH, encSurfWidth, 0)
-                    EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_HEIGHT, encSurfHeight, 0)
-                    val encW = if (encSurfWidth[0] > 0) encSurfWidth[0] else encoderWidth
-                    val encH = if (encSurfHeight[0] > 0) encSurfHeight[0] else encoderHeight
+                    EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_WIDTH, queryWidth, 0)
+                    EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_HEIGHT, queryHeight, 0)
+                    val encW = if (queryWidth[0] > 0) queryWidth[0] else encoderWidth
+                    val encH = if (queryHeight[0] > 0) queryHeight[0] else encoderHeight
 
                     GLES20.glViewport(0, 0, encW, encH)
                     GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)

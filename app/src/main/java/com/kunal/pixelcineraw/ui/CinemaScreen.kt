@@ -72,9 +72,6 @@ fun CinemaScreen(
             1_000_000_000L / 24
         )
     }
-    val kelvinValues = remember {
-        (2300..8000 step 100).toList()
-    }
     val evValues = remember {
         listOf(-2.0f, -1.7f, -1.3f, -1.0f, -0.7f, -0.3f, 0.0f, 0.3f, 0.7f, 1.0f, 1.3f, 1.7f, 2.0f)
     }
@@ -319,46 +316,13 @@ fun CinemaScreen(
                 }
                 ActiveDial.ISO -> {
                     val activeIsoRange = viewModel.cameraController.getActiveSensorIsoRange()
-                    val allSteps = remember {
-                        listOf(
-                            50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640,
-                            800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800
-                        )
-                    }
-                    val currentIsoValues = remember(activeIsoRange) {
-                        val filtered = allSteps.filter { it in activeIsoRange.lower..activeIsoRange.upper }.toMutableList()
-                        if (!filtered.contains(activeIsoRange.lower)) filtered.add(0, activeIsoRange.lower)
-                        if (!filtered.contains(activeIsoRange.upper)) filtered.add(activeIsoRange.upper)
-                        filtered.sorted().distinct()
-                    }
-                    val currentIso = state.iso
-                    val nearestIdx = currentIsoValues.indices.minByOrNull { abs(currentIsoValues[it] - currentIso) } ?: 0
-                    val standardPresets = listOf(100, 200, 400, 800, 1600, 3200, 6400)
-                    val activePresets = standardPresets
-                        .filter { it in activeIsoRange.lower..activeIsoRange.upper }
-                        .map { iso ->
-                            val targetIdx = currentIsoValues.indexOf(iso).let { if (it >= 0) it else currentIsoValues.indices.minByOrNull { idx -> abs(currentIsoValues[idx] - iso) } ?: 0 }
-                            "$iso" to targetIdx
-                        }
-
-                    RotaryWheelScrubber(
-                        title = "ISO Sensitivity",
-                        items = currentIsoValues,
-                        selectedIndex = nearestIdx,
-                        onItemSelected = { _, iso -> viewModel.cameraController.setIso(iso) },
-                        formatItem = { "ISO $it" },
-                        onClose = { activeDial = ActiveDial.NONE },
-                        presets = activePresets,
-                        headerActions = {
-                            TextButton(onClick = { viewModel.cameraController.toggleExposureMode() }) {
-                                Text(
-                                    if (state.isManualExposure) "SET AUTO" else "SET MANUAL",
-                                    color = Color(0xFF00E5FF),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
+                    CinemaIsoWheelScrubber(
+                        currentIso = state.iso,
+                        activeIsoRange = activeIsoRange,
+                        isManualExposure = state.isManualExposure,
+                        onIsoChanged = { iso -> viewModel.cameraController.setIso(iso) },
+                        onToggleExposureMode = { viewModel.cameraController.toggleExposureMode() },
+                        onClose = { activeDial = ActiveDial.NONE }
                     )
                 }
                 ActiveDial.FOCUS -> {
@@ -385,26 +349,12 @@ fun CinemaScreen(
                     )
                 }
                 ActiveDial.WHITE_BALANCE -> {
-                    val currentK = state.wbKelvin
-                    val nearestIdx = kelvinValues.indices.minByOrNull { abs(kelvinValues[it] - currentK) } ?: 33
-                    RotaryWheelScrubber(
-                        title = "White Balance Kelvin",
-                        items = kelvinValues,
-                        selectedIndex = nearestIdx,
-                        onItemSelected = { _, k -> viewModel.cameraController.setWhiteBalance(k, state.wbTint) },
-                        formatItem = { "${it}K" },
-                        onClose = { activeDial = ActiveDial.NONE },
-                        presets = listOf("3200K" to 9, "4000K" to 17, "5600K" to 33, "6500K" to 42, "7500K" to 52),
-                        headerActions = {
-                            TextButton(onClick = { viewModel.cameraController.toggleAutoWb() }) {
-                                Text(
-                                    if (state.isManualWb) "ENABLE AWB" else "ENABLE MANUAL",
-                                    color = Color(0xFF00E5FF),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
+                    CinemaWhiteBalanceWheelScrubber(
+                        currentKelvin = state.wbKelvin,
+                        isManualWb = state.isManualWb,
+                        onKelvinChanged = { k -> viewModel.cameraController.setWhiteBalance(k, state.wbTint) },
+                        onToggleAutoWb = { viewModel.cameraController.toggleAutoWb() },
+                        onClose = { activeDial = ActiveDial.NONE }
                     )
                 }
                 ActiveDial.EV -> {

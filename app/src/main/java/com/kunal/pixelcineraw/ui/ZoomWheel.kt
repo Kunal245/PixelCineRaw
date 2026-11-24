@@ -177,8 +177,8 @@ fun CinemaZoomHub(
         label = "zoomExpandProgress"
     )
 
-    // Sweep calibration: 280dp sweeps the entire normalized [0, 1] range
-    val sweepPx = with(density) { 280.dp.toPx() }
+    // Sweep calibration: 3.5x heavy damped precision gear ratio (700dp sweeps normalized [0, 1] range)
+    val sweepPx = with(density) { 700.dp.toPx() }
 
     fun animateToZoom(targetZoom: Float) {
         presetGlideJob?.cancel()

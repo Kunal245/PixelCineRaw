@@ -204,23 +204,26 @@ fun AudioVuMeter(peakL: Float, peakR: Float) {
 
 @Composable
 fun VuBar(peakDb: Float) {
-    val norm = ((peakDb + 60f) / 60f).coerceIn(0.04f, 1.0f)
-    Row(
+    androidx.compose.foundation.Canvas(
         modifier = Modifier
             .width(44.dp)
             .height(5.dp)
-            .background(Color(0xFF16181D), RoundedCornerShape(2.dp))
     ) {
+        val cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx(), 2.dp.toPx())
+        drawRoundRect(
+            color = Color(0xFF16181D),
+            cornerRadius = cornerRadius
+        )
+        val norm = ((peakDb + 60f) / 60f).coerceIn(0.04f, 1.0f)
         val barColor = when {
             peakDb > -6f -> Color(0xFFFF2222)
             peakDb > -18f -> Color(0xFFFFCC00)
             else -> Color(0xFF00FF66)
         }
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .fillMaxWidth(norm)
-                .background(barColor, RoundedCornerShape(2.dp))
+        drawRoundRect(
+            color = barColor,
+            size = androidx.compose.ui.geometry.Size(size.width * norm, size.height),
+            cornerRadius = cornerRadius
         )
     }
 }

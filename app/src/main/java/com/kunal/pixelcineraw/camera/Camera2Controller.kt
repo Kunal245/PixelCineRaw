@@ -20,6 +20,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -107,6 +109,7 @@ class Camera2Controller(
     // Lock-free VSYNC Zoom Sync State
     private val pendingZoomRatio = AtomicReference<Float>(_state.value.zoomRatio)
     @Volatile private var lastAppliedZoomRatio = _state.value.zoomRatio
+    @Volatile private var smoothedZoomRatio = _state.value.zoomRatio
     private var isZoomCheckScheduled = false
 
     // Lock-free VSYNC ISO Sync State
@@ -121,6 +124,28 @@ class Camera2Controller(
     @Volatile private var smoothedFocusDistance = _state.value.focusDistance
     private var isFocusCheckScheduled = false
 
+    // Lock-free VSYNC Shutter Exposure Sync State
+    private val pendingExposureNs = AtomicReference<Long>(_state.value.shutterSpeedNs)
+    @Volatile private var lastAppliedExposureNs = _state.value.shutterSpeedNs
+    @Volatile private var smoothedExposureNs = _state.value.shutterSpeedNs.toDouble()
+    private var isExposureCheckScheduled = false
+
+    // Lock-free VSYNC White Balance Sync State
+    private val pendingWbKelvin = AtomicInteger(_state.value.wbKelvin)
+    private val pendingWbTint = AtomicInteger(_state.value.wbTint)
+    @Volatile private var lastAppliedWbKelvin = _state.value.wbKelvin
+    @Volatile private var smoothedWbKelvin = _state.value.wbKelvin.toFloat()
+    private var isWbCheckScheduled = false
+
+    // Reusable pre-allocated Rect for zero-allocation crop regions
+    private val cachedCropRect = Rect()
+
+    // 12Hz Telemetry & Histogram Dispatch Throttle State
+    private var lastHistogramUpdateTime = 0L
+    private var pendingHistogramData: HistogramData? = null
+    private var isHistogramDispatchScheduled = false
+    private var lastAudioUpdateTime = 0L
+
     init {
         startBackgroundThread()
         probeSensors()
@@ -128,9 +153,16 @@ class Camera2Controller(
 
     private fun startBackgroundThread() {
         if (cameraThread == null) {
-            cameraThread = HandlerThread("PixelCineCamera").apply {
+            cameraThread = HandlerThread("PixelCineCamera", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply {
                 start()
                 cameraHandler = Handler(looper)
+            }
+            cameraHandler?.post {
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to set URGENT_DISPLAY priority on camera thread", e)
+                }
             }
         }
     }
@@ -664,6 +696,7 @@ class Camera2Controller(
 
             session.setRepeatingRequest(builder.build(), captureCallback, handler)
             lastAppliedZoomRatio = stateVal.zoomRatio
+            smoothedZoomRatio = stateVal.zoomRatio
             pendingZoomRatio.set(stateVal.zoomRatio)
             lastAppliedIso = stateVal.iso
             smoothedIso = stateVal.iso.toFloat()
@@ -671,6 +704,13 @@ class Camera2Controller(
             lastAppliedFocusDistance = stateVal.focusDistance
             smoothedFocusDistance = stateVal.focusDistance
             pendingFocusDistance.set(stateVal.focusDistance)
+            lastAppliedExposureNs = stateVal.shutterSpeedNs
+            smoothedExposureNs = stateVal.shutterSpeedNs.toDouble()
+            pendingExposureNs.set(stateVal.shutterSpeedNs)
+            lastAppliedWbKelvin = stateVal.wbKelvin
+            smoothedWbKelvin = stateVal.wbKelvin.toFloat()
+            pendingWbKelvin.set(stateVal.wbKelvin)
+            pendingWbTint.set(stateVal.wbTint)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set repeating request", e)
         }
@@ -685,10 +725,8 @@ class Camera2Controller(
         spec: CameraSensorSpec,
         state: CinemaState
     ) {
-        // 1. Target FPS Range (Clamp to 30fps for 4K HLG if 60fps causes HAL rejection)
-        val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
-        val safeFps = if (isHlg && state.targetFps > 30 && state.videoResolution.width >= 3840) 30 else state.targetFps
-        val fpsRange = Range(safeFps, safeFps)
+        // 1. Locked Constant Target FPS Range [targetFps, targetFps]
+        val fpsRange = Range(state.targetFps, state.targetFps)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
         // 2. Exposure & Sensitivity (Shutter & ISO & EV)
@@ -831,7 +869,8 @@ class Camera2Controller(
             val cropH = (activeArray.height() / targetHardwareZoom).toInt()
             val cropL = (activeArray.width() - cropW) / 2
             val cropT = (activeArray.height() - cropH) / 2
-            builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
+            cachedCropRect.set(cropL, cropT, cropL + cropW, cropT + cropH)
+            builder.set(CaptureRequest.SCALER_CROP_REGION, cachedCropRect)
         }
 
         // 7. Tone Curves: HLG BT.2100 / HDR10+ PQ vs Flat Log vs SDR
@@ -983,25 +1022,15 @@ class Camera2Controller(
                 }
             }
 
-            // VSYNC Zoom Sync: Check if a zoom update is pending and apply at most once per actual camera frame
-            if (Math.abs(pendingZoomRatio.get() - lastAppliedZoomRatio) > 0.0005f) {
-                applyZoomUpdateIfPending(force = false)
-            }
+            // Multi-Frame Hardware Parameter Ramping synced 1:1 to camera frame VSYNC
+            val hasPendingRamp = (Math.abs(pendingZoomRatio.get() - lastAppliedZoomRatio) > 0.0005f) ||
+                    (_state.value.isManualExposure && (pendingIso.get() != lastAppliedIso || Math.abs(pendingIso.get() - smoothedIso) > 1f)) ||
+                    (_state.value.isManualExposure && (pendingExposureNs.get() != lastAppliedExposureNs || Math.abs(pendingExposureNs.get() - smoothedExposureNs) > 100_000.0)) ||
+                    (_state.value.focusMode == FocusMode.MANUAL && (Math.abs(pendingFocusDistance.get() - lastAppliedFocusDistance) > 0.001f || Math.abs(pendingFocusDistance.get() - smoothedFocusDistance) > 0.001f)) ||
+                    (_state.value.isManualWb && (pendingWbKelvin.get() != lastAppliedWbKelvin || Math.abs(pendingWbKelvin.get() - smoothedWbKelvin) > 3f))
 
-            // VSYNC ISO Sync: Check if an ISO update is pending and apply at most once per actual camera frame
-            if (_state.value.isManualExposure) {
-                val targetIso = pendingIso.get()
-                if (targetIso != lastAppliedIso || Math.abs(targetIso - smoothedIso) > 1f) {
-                    applyIsoUpdateIfPending(force = false)
-                }
-            }
-
-            // VSYNC Focus Sync: Check if a focus update is pending and apply at most once per actual camera frame
-            if (_state.value.focusMode == FocusMode.MANUAL) {
-                val targetDist = pendingFocusDistance.get()
-                if (Math.abs(targetDist - lastAppliedFocusDistance) > 0.001f || Math.abs(targetDist - smoothedFocusDistance) > 0.001f) {
-                    applyFocusUpdateIfPending(force = false)
-                }
+            if (hasPendingRamp) {
+                applyHardwareParametersRamping(force = false)
             }
         }
     }
@@ -1036,7 +1065,7 @@ class Camera2Controller(
                 smoothedIso = clamped.toFloat()
             }
             persistState()
-            cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
+            cameraHandler?.post { applyHardwareParametersRamping(force = true) }
             return
         }
 
@@ -1144,12 +1173,12 @@ class Camera2Controller(
 
         if (currentSpec != null && currentSpec.isLogicalMultiCamera) {
             if (forceUpdate) {
-                cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
+                cameraHandler?.post { applyHardwareParametersRamping(force = true) }
             } else if (!isZoomCheckScheduled) {
                 isZoomCheckScheduled = true
                 cameraHandler?.post {
                     isZoomCheckScheduled = false
-                    applyZoomUpdateIfPending(force = false)
+                    applyHardwareParametersRamping(force = false)
                 }
             }
             return
@@ -1167,55 +1196,175 @@ class Camera2Controller(
         }
 
         if (forceUpdate) {
-            cameraHandler?.post { applyZoomUpdateIfPending(force = true) }
+            cameraHandler?.post { applyHardwareParametersRamping(force = true) }
         } else if (!isZoomCheckScheduled) {
             isZoomCheckScheduled = true
             cameraHandler?.post {
                 isZoomCheckScheduled = false
-                applyZoomUpdateIfPending(force = false)
+                applyHardwareParametersRamping(force = false)
             }
         }
     }
 
     /**
-     * Synchronizes hardware CONTROL_ZOOM_RATIO to camera frame VSYNC.
-     * Reuses the pre-built previewRequestBuilder on cameraHandler thread to eliminate HAL queue flooding.
+     * Multi-frame hardware parameter ramping synced 1:1 to camera frame VSYNC.
+     * Damps ISO, Focus, Shutter Exposure, White Balance gains, and Zoom with exponential
+     * decay (current += (target - current) * 0.22f) and batches all changed hardware keys
+     * into at most ONE setRepeatingRequest per camera frame to eliminate HAL queue flooding.
      */
-    private fun applyZoomUpdateIfPending(force: Boolean = false) {
+    private fun applyHardwareParametersRamping(force: Boolean = false) {
         val builder = previewRequestBuilder ?: return
         val session = captureSession ?: return
         val handler = cameraHandler ?: return
         val spec = _state.value.currentSensorSpec ?: return
+        val stateVal = _state.value
 
+        var needsRepeatingRequest = force
+
+        // 1. Hardware Zoom Ratio Ramping
         val targetZoom = pendingZoomRatio.get()
-        if (!force && Math.abs(targetZoom - lastAppliedZoomRatio) <= 0.0005f) {
-            return
-        }
-
-        val targetHardwareZoom = if (spec.isLogicalMultiCamera) {
-            targetZoom.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
-        } else if (spec.isUltraWide) {
-            (targetZoom / 0.5f).coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+        if (force) {
+            smoothedZoomRatio = targetZoom
         } else {
-            targetZoom.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+            val deltaZoom = targetZoom - smoothedZoomRatio
+            smoothedZoomRatio += deltaZoom * 0.22f
+        }
+        val applyZoom = if (force || Math.abs(targetZoom - smoothedZoomRatio) < 0.005f) {
+            targetZoom
+        } else {
+            smoothedZoomRatio
+        }
+        if (force || Math.abs(applyZoom - lastAppliedZoomRatio) > 0.0005f) {
+            val targetHardwareZoom = if (spec.isLogicalMultiCamera) {
+                applyZoom.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+            } else if (spec.isUltraWide) {
+                (applyZoom / 0.5f).coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+            } else {
+                applyZoom.coerceIn(spec.zoomRatioRange.lower, spec.zoomRatioRange.upper)
+            }
+
+            try {
+                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, targetHardwareZoom)
+            } catch (_: Exception) {
+                val activeArray = spec.activeArraySize
+                val cropW = (activeArray.width() / targetHardwareZoom).toInt()
+                val cropH = (activeArray.height() / targetHardwareZoom).toInt()
+                val cropL = (activeArray.width() - cropW) / 2
+                val cropT = (activeArray.height() - cropH) / 2
+                cachedCropRect.set(cropL, cropT, cropL + cropW, cropT + cropH)
+                builder.set(CaptureRequest.SCALER_CROP_REGION, cachedCropRect)
+            }
+            lastAppliedZoomRatio = applyZoom
+            needsRepeatingRequest = true
         }
 
-        try {
-            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, targetHardwareZoom)
-        } catch (e: Exception) {
-            val activeArray = spec.activeArraySize
-            val cropW = (activeArray.width() / targetHardwareZoom).toInt()
-            val cropH = (activeArray.height() / targetHardwareZoom).toInt()
-            val cropL = (activeArray.width() - cropW) / 2
-            val cropT = (activeArray.height() - cropH) / 2
-            builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropL, cropT, cropL + cropW, cropT + cropH))
+        // 2. ISO Sensitivity Ramping
+        if (stateVal.isManualExposure) {
+            val targetIso = pendingIso.get()
+            val activeRange = getActiveSensorIsoRange()
+            val clampedTargetIso = targetIso.coerceIn(activeRange.lower, activeRange.upper)
+            if (force) {
+                smoothedIso = clampedTargetIso.toFloat()
+            } else {
+                val deltaIso = clampedTargetIso - smoothedIso
+                smoothedIso += deltaIso * 0.22f
+            }
+            val applyIso = if (force || Math.abs(clampedTargetIso - smoothedIso) < 1.5f) {
+                clampedTargetIso
+            } else {
+                smoothedIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
+            }
+            if (force || applyIso != lastAppliedIso) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                builder.set(CaptureRequest.SENSOR_SENSITIVITY, applyIso)
+                lastAppliedIso = applyIso
+                needsRepeatingRequest = true
+            }
         }
 
-        try {
-            session.setRepeatingRequest(builder.build(), captureCallback, handler)
-            lastAppliedZoomRatio = targetZoom
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to apply zoom ratio update", e)
+        // 3. Shutter Exposure Time Ramping
+        if (stateVal.isManualExposure) {
+            val targetExp = pendingExposureNs.get().coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+            val evMultiplier = Math.pow(2.0, stateVal.evCompensation.toDouble())
+            val biasedTargetExp = (targetExp * evMultiplier).toLong()
+                .coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+
+            if (force) {
+                smoothedExposureNs = biasedTargetExp.toDouble()
+            } else {
+                val deltaExp = biasedTargetExp - smoothedExposureNs
+                smoothedExposureNs += deltaExp * 0.22
+            }
+            val applyExp = if (force || Math.abs(biasedTargetExp - smoothedExposureNs) < 100_000.0) {
+                biasedTargetExp
+            } else {
+                smoothedExposureNs.toLong().coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
+            }
+            if (force || applyExp != lastAppliedExposureNs) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, applyExp)
+                builder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / stateVal.targetFps)
+                lastAppliedExposureNs = applyExp
+                needsRepeatingRequest = true
+            }
+        }
+
+        // 4. Focus Distance Ramping
+        if (stateVal.focusMode == FocusMode.MANUAL) {
+            val targetDist = pendingFocusDistance.get()
+            val maxDiopters = max(0.1f, spec.minimumFocusDistance)
+            val clampedTargetDist = targetDist.coerceIn(0.0f, maxDiopters)
+            if (force) {
+                smoothedFocusDistance = clampedTargetDist
+            } else {
+                val deltaDist = clampedTargetDist - smoothedFocusDistance
+                smoothedFocusDistance += deltaDist * 0.22f
+            }
+            val applyDist = if (force || Math.abs(clampedTargetDist - smoothedFocusDistance) < 0.003f) {
+                clampedTargetDist
+            } else {
+                smoothedFocusDistance
+            }
+            if (force || Math.abs(applyDist - lastAppliedFocusDistance) > 0.001f) {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, applyDist)
+                lastAppliedFocusDistance = applyDist
+                needsRepeatingRequest = true
+            }
+        }
+
+        // 5. White Balance Ramping (Kelvin / RGGB Color Gains)
+        if (stateVal.isManualWb) {
+            val targetKelvin = pendingWbKelvin.get()
+            val targetTint = pendingWbTint.get()
+            if (force) {
+                smoothedWbKelvin = targetKelvin.toFloat()
+            } else {
+                val deltaK = targetKelvin - smoothedWbKelvin
+                smoothedWbKelvin += deltaK * 0.22f
+            }
+            val applyKelvin = if (force || Math.abs(targetKelvin - smoothedWbKelvin) < 4f) {
+                targetKelvin
+            } else {
+                smoothedWbKelvin.roundToInt()
+            }
+            if (force || applyKelvin != lastAppliedWbKelvin) {
+                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+                val rggb = ColorMath.kelvinToRggbChannelVector(applyKelvin, targetTint)
+                builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, rggb)
+                lastAppliedWbKelvin = applyKelvin
+                needsRepeatingRequest = true
+            }
+        }
+
+        // Submit batched request if anything was updated
+        if (needsRepeatingRequest) {
+            try {
+                session.setRepeatingRequest(builder.build(), captureCallback, handler)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to submit smoothed repeating request", e)
+            }
         }
     }
 
@@ -1234,8 +1383,16 @@ class Camera2Controller(
                 shutterAngle = ColorMath.nanosToShutterAngle(nanos, it.targetFps)
             )
         }
+        pendingExposureNs.set(nanos)
         persistState()
-        createAndSetRepeatingRequest()
+
+        if (!isExposureCheckScheduled) {
+            isExposureCheckScheduled = true
+            cameraHandler?.post {
+                isExposureCheckScheduled = false
+                applyHardwareParametersRamping(force = false)
+            }
+        }
     }
 
     fun setShutterAngle(degrees: Float) {
@@ -1247,8 +1404,16 @@ class Camera2Controller(
                 shutterSpeedNs = nanos
             )
         }
+        pendingExposureNs.set(nanos)
         persistState()
-        createAndSetRepeatingRequest()
+
+        if (!isExposureCheckScheduled) {
+            isExposureCheckScheduled = true
+            cameraHandler?.post {
+                isExposureCheckScheduled = false
+                applyHardwareParametersRamping(force = false)
+            }
+        }
     }
 
     fun toggleShutterUnit() {
@@ -1275,12 +1440,24 @@ class Camera2Controller(
         }
         pendingZoomRatio.set(defaultState.zoomRatio)
         lastAppliedZoomRatio = defaultState.zoomRatio
+        smoothedZoomRatio = defaultState.zoomRatio
+
         pendingIso.set(defaultState.iso)
         lastAppliedIso = defaultState.iso
         smoothedIso = defaultState.iso.toFloat()
+
         pendingFocusDistance.set(defaultState.focusDistance)
         lastAppliedFocusDistance = defaultState.focusDistance
         smoothedFocusDistance = defaultState.focusDistance
+
+        pendingExposureNs.set(defaultState.shutterSpeedNs)
+        lastAppliedExposureNs = defaultState.shutterSpeedNs
+        smoothedExposureNs = defaultState.shutterSpeedNs.toDouble()
+
+        pendingWbKelvin.set(defaultState.wbKelvin)
+        pendingWbTint.set(defaultState.wbTint)
+        lastAppliedWbKelvin = defaultState.wbKelvin
+        smoothedWbKelvin = defaultState.wbKelvin.toFloat()
 
         selectLens(defaultState.selectedLens)
         createAndSetRepeatingRequest()
@@ -1327,58 +1504,8 @@ class Camera2Controller(
             isIsoCheckScheduled = true
             cameraHandler?.post {
                 isIsoCheckScheduled = false
-                applyIsoUpdateIfPending(force = false)
+                applyHardwareParametersRamping(force = false)
             }
-        }
-    }
-
-    /**
-     * Synchronizes hardware SENSOR_SENSITIVITY to camera frame VSYNC with exponential smoothing.
-     * Reuses the pre-built previewRequestBuilder on cameraHandler thread to eliminate HAL queue flooding.
-     */
-    private fun applyIsoUpdateIfPending(force: Boolean = false) {
-        val builder = previewRequestBuilder ?: return
-        val session = captureSession ?: return
-        val handler = cameraHandler ?: return
-        val spec = _state.value.currentSensorSpec ?: return
-
-        val targetIso = pendingIso.get()
-        val activeRange = getActiveSensorIsoRange()
-        val clampedTarget = targetIso.coerceIn(activeRange.lower, activeRange.upper)
-
-        if (force) {
-            smoothedIso = clampedTarget.toFloat()
-        } else {
-            val delta = clampedTarget - smoothedIso
-            smoothedIso += delta * 0.45f
-        }
-
-        val applyIso = if (force || Math.abs(clampedTarget - smoothedIso) < 3f) {
-            clampedTarget
-        } else {
-            smoothedIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
-        }
-
-        if (!force && applyIso == lastAppliedIso) {
-            return
-        }
-
-        try {
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-            builder.set(CaptureRequest.SENSOR_SENSITIVITY, applyIso)
-
-            // Maintain locked exposure time
-            val baseExposureNs = _state.value.shutterSpeedNs
-            val evMultiplier = Math.pow(2.0, _state.value.evCompensation.toDouble()).toFloat()
-            val exposureNs = (baseExposureNs * evMultiplier).toLong()
-                .coerceIn(spec.exposureTimeRange.lower, spec.exposureTimeRange.upper)
-            builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
-            builder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / _state.value.targetFps)
-
-            session.setRepeatingRequest(builder.build(), captureCallback, handler)
-            lastAppliedIso = applyIso
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to apply ISO update", e)
         }
     }
 
@@ -1411,50 +1538,8 @@ class Camera2Controller(
             isFocusCheckScheduled = true
             cameraHandler?.post {
                 isFocusCheckScheduled = false
-                applyFocusUpdateIfPending(force = false)
+                applyHardwareParametersRamping(force = false)
             }
-        }
-    }
-
-    /**
-     * Synchronizes hardware LENS_FOCUS_DISTANCE to camera frame VSYNC with damped interpolation.
-     * Reuses the pre-built previewRequestBuilder on cameraHandler thread to eliminate HAL queue flooding.
-     */
-    private fun applyFocusUpdateIfPending(force: Boolean = false) {
-        val builder = previewRequestBuilder ?: return
-        val session = captureSession ?: return
-        val handler = cameraHandler ?: return
-        val spec = _state.value.currentSensorSpec ?: return
-
-        val targetDist = pendingFocusDistance.get()
-        val maxDiopters = max(0.1f, spec.minimumFocusDistance)
-        val clampedTarget = targetDist.coerceIn(0.0f, maxDiopters)
-
-        if (force) {
-            smoothedFocusDistance = clampedTarget
-        } else {
-            val delta = clampedTarget - smoothedFocusDistance
-            smoothedFocusDistance += delta * 0.35f
-        }
-
-        val applyDist = if (force || Math.abs(clampedTarget - smoothedFocusDistance) < 0.005f) {
-            clampedTarget
-        } else {
-            smoothedFocusDistance
-        }
-
-        if (!force && Math.abs(applyDist - lastAppliedFocusDistance) <= 0.001f) {
-            return
-        }
-
-        try {
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, applyDist)
-
-            session.setRepeatingRequest(builder.build(), captureCallback, handler)
-            lastAppliedFocusDistance = applyDist
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to apply focus distance update", e)
         }
     }
 
@@ -1581,8 +1666,17 @@ class Camera2Controller(
                 wbTint = tint
             )
         }
+        pendingWbKelvin.set(kelvin)
+        pendingWbTint.set(tint)
         persistState()
-        createAndSetRepeatingRequest()
+
+        if (!isWbCheckScheduled) {
+            isWbCheckScheduled = true
+            cameraHandler?.post {
+                isWbCheckScheduled = false
+                applyHardwareParametersRamping(force = false)
+            }
+        }
     }
 
     fun toggleAutoWb() {
@@ -1846,6 +1940,11 @@ class Camera2Controller(
     }
 
     fun updateAudioLevels(peakL: Float, peakR: Float) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastAudioUpdateTime < 66L) { // ~15Hz throttle for UI VU bars
+            return
+        }
+        lastAudioUpdateTime = now
         _state.update {
             it.copy(audioPeakDbL = peakL, audioPeakDbR = peakR)
         }
@@ -1862,8 +1961,25 @@ class Camera2Controller(
     }
 
     fun updateHistogramData(data: HistogramData) {
-        _state.update {
-            it.copy(histogramData = data)
+        val now = SystemClock.uptimeMillis()
+        if (now - lastHistogramUpdateTime < 83L) { // 12Hz throttle (1000ms / 12 ~= 83ms)
+            pendingHistogramData = data
+            if (!isHistogramDispatchScheduled) {
+                isHistogramDispatchScheduled = true
+                scope.launch(Dispatchers.Default) {
+                    kotlinx.coroutines.delay(83L)
+                    isHistogramDispatchScheduled = false
+                    val latest = pendingHistogramData
+                    if (latest != null) {
+                        _state.update { it.copy(histogramData = latest) }
+                    }
+                }
+            }
+            return
+        }
+        lastHistogramUpdateTime = now
+        scope.launch(Dispatchers.Default) {
+            _state.update { it.copy(histogramData = data) }
         }
     }
 
