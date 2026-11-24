@@ -161,11 +161,7 @@ class Camera2Controller(
     @Volatile private var currentContinuousIso = _state.value.iso.toFloat()
     @Volatile private var latestEvError = 0f
     private var autoIsoSustainedFrames = 0
-    private var isAutoIsoGliding = false
-    private var autoIsoGlideStartNs = 0L
-    private var autoIsoStartIso = 100f
-    private var autoIsoTargetIso = 100f
-    private val AUTO_ISO_GLIDE_DURATION_NS = 1_500_000_000L // 1.5 seconds
+    private var framesSinceLastHardwareIsoUpdate = 0
 
     init {
         startBackgroundThread()
@@ -551,6 +547,11 @@ class Camera2Controller(
                 it.onHistogramExtracted = { data ->
                     updateHistogramData(data)
                 }
+                it.isAutoIsoEnabled = _state.value.isAutoIso && _state.value.isManualExposure
+                it.setManualIso(_state.value.iso.toFloat())
+                val activeRange = getActiveSensorIsoRange()
+                it.minSensorIso = activeRange.lower.toFloat()
+                it.maxSensorIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
                 hlgGlRenderer = it
             }
 
@@ -1033,6 +1034,11 @@ class Camera2Controller(
             lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY)
             lastColorGains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
 
+            val frameTimestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP)
+            if (frameTimestampNs != null && lastIso != null) {
+                hlgGlRenderer?.timestampIsoMap?.put(frameTimestampNs, lastIso!!)
+            }
+
             // If transitioning between physical lenses, first captured frame marks completion
             if (_state.value.isTransitioningLens) {
                 _state.update {
@@ -1055,73 +1061,32 @@ class Camera2Controller(
                 _state.update { it.copy(measuredFps = fps) }
             }
 
-            // iPhone-Style Cinema Auto-ISO Controller (180° Shutter + AUTO ISO)
+            // Hardware SENSOR_SENSITIVITY throttling (~8 frames / 133ms) so Camera2 HAL is never flooded
             val nowMs = SystemClock.uptimeMillis()
             if (_state.value.isManualExposure && _state.value.isAutoIso) {
+                framesSinceLastHardwareIsoUpdate++
                 val activeRange = getActiveSensorIsoRange()
-                val maxAllowedIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
+                val continuousIso = hlgGlRenderer?.desiredContinuousIso ?: currentContinuousIso
+                currentContinuousIso = continuousIso
+                val targetHardwareIso = continuousIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
+                val hardwareDiff = Math.abs(targetHardwareIso - lastAppliedIso)
 
-                if (isAutoIsoGliding) {
-                    val elapsedGlideNs = System.nanoTime() - autoIsoGlideStartNs
-                    val progress = (elapsedGlideNs.toDouble() / AUTO_ISO_GLIDE_DURATION_NS.toDouble()).coerceIn(0.0, 1.0).toFloat()
-                    // 1.5-second cubic ease-in-out curve: t * t * (3f - 2f * t)
-                    val easedT = progress * progress * (3.0f - 2.0f * progress)
-                    // Interpolate in logarithmic stop space: startIso * (targetIso / startIso).pow(easedT)
-                    val stopRatio = (autoIsoTargetIso / maxOf(1.0f, autoIsoStartIso)).toDouble()
-                    currentContinuousIso = (autoIsoStartIso * Math.pow(stopRatio, easedT.toDouble()).toFloat())
-                        .coerceIn(activeRange.lower.toFloat(), maxAllowedIso)
-
-                    if (progress >= 1.0f) {
-                        currentContinuousIso = autoIsoTargetIso
-                        isAutoIsoGliding = false
-                        autoIsoSustainedFrames = 0
-                    }
-                } else {
-                    // Step A — 0.6-Second Sustained Change Delay (~36 frames at 60fps):
-                    // Require abs(evError) > 0.30f to remain consistently outside deadband for 36 consecutive frames
-                    val evError = latestEvError
-                    if (kotlin.math.abs(evError) > 0.30f) {
-                        autoIsoSustainedFrames++
-                        if (autoIsoSustainedFrames >= 36) {
-                            // Step B — Smooth 1.5-Second Ease-In-Out Glide:
-                            val evRatio = Math.pow(2.0, evError.toDouble()).toFloat()
-                            val calculatedTargetIso = (currentContinuousIso * evRatio)
-                                .coerceIn(activeRange.lower.toFloat(), maxAllowedIso)
-
-                            if (kotlin.math.abs(calculatedTargetIso - currentContinuousIso) >= 2.0f) {
-                                autoIsoStartIso = currentContinuousIso
-                                autoIsoTargetIso = calculatedTargetIso
-                                autoIsoGlideStartNs = System.nanoTime()
-                                isAutoIsoGliding = true
-                            }
-                            autoIsoSustainedFrames = 0
-                        }
-                    } else {
-                        autoIsoSustainedFrames = 0
-                    }
+                if ((framesSinceLastHardwareIsoUpdate >= 8 && hardwareDiff >= 4) || (hardwareDiff > lastAppliedIso * 0.25f)) {
+                    framesSinceLastHardwareIsoUpdate = 0
+                    pendingEffectiveIso.set(targetHardwareIso.toFloat())
+                    cameraHandler?.post { applyHardwareParametersRamping(force = false) }
                 }
-
-                // Step 2: Cancel Out Hardware Sensor ISO Steps in OpenGL
-                val actualHardwareIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: currentContinuousIso.roundToInt()
-                val gpuExposureTrim = if (actualHardwareIso > 0) {
-                    (currentContinuousIso / actualHardwareIso.toFloat()).coerceIn(0.75f, 1.35f)
-                } else {
-                    1.0f
-                }
-                hlgGlRenderer?.setExposureTrim(gpuExposureTrim)
 
                 // Throttled UI readout for Auto-ISO (5Hz to avoid recomposition flooding)
                 if (nowMs - lastAutoExposureReadoutTime >= 200L) {
-                    val roundedIso = currentContinuousIso.roundToInt()
-                    if (Math.abs(roundedIso - _state.value.iso) >= 1) {
+                    if (Math.abs(targetHardwareIso - _state.value.iso) >= 1) {
                         lastAutoExposureReadoutTime = nowMs
-                        _state.update { it.copy(iso = roundedIso) }
+                        _state.update { it.copy(iso = targetHardwareIso) }
                     }
                 }
             } else {
-                isAutoIsoGliding = false
                 autoIsoSustainedFrames = 0
-                hlgGlRenderer?.setExposureTrim(1.0f)
+                framesSinceLastHardwareIsoUpdate = 0
             }
 
             // Sync actual sensor exposure if in auto mode (throttled to 5Hz to prevent recomposition flooding during camera pans)
@@ -1155,8 +1120,7 @@ class Camera2Controller(
             // Multi-Frame Hardware Parameter Ramping: ONLY call when manual parameter has actually changed!
             // Stops immediately when target reached - NEVER touches setRepeatingRequest while panning!
             val hasPendingRamp = (Math.abs(pendingZoomRatio.get() - lastAppliedZoomRatio) > 0.001f) ||
-                    (_state.value.isManualExposure && _state.value.isAutoIso && currentContinuousIso.roundToInt() != lastAppliedIso) ||
-                    (_state.value.isManualExposure && !_state.value.isAutoIso && Math.abs(pendingEffectiveIso.get() - currentEffectiveIso) >= 0.5f) ||
+                    (_state.value.isManualExposure && Math.abs(pendingEffectiveIso.get() - currentEffectiveIso) >= 0.5f) ||
                     (_state.value.isManualExposure && (Math.abs(pendingExposureNs.get() - lastAppliedExposureNs) > 50_000L)) ||
                     (_state.value.focusMode == FocusMode.MANUAL && (Math.abs(pendingFocusDistance.get() - lastAppliedFocusDistance) > 0.002f)) ||
                     (_state.value.isManualWb && (pendingWbKelvin.get() != lastAppliedWbKelvin || pendingWbTint.get() != lastAppliedWbTint))
@@ -1662,8 +1626,9 @@ class Camera2Controller(
         val activeRange = getActiveSensorIsoRange()
         val clampedIso = iso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
         currentContinuousIso = clampedIso
-        isAutoIsoGliding = false
         autoIsoSustainedFrames = 0
+        hlgGlRenderer?.isAutoIsoEnabled = false
+        hlgGlRenderer?.setManualIso(clampedIso)
         hlgGlRenderer?.setExposureTrim(1.0f)
         val lockedExposureNs = lastExposureNs ?: _state.value.shutterSpeedNs
         _state.update {
@@ -1694,8 +1659,9 @@ class Camera2Controller(
             val exp = lastExposureNs ?: _state.value.shutterSpeedNs
             val iso = lastIso ?: _state.value.iso
             currentContinuousIso = iso.toFloat()
-            isAutoIsoGliding = false
             autoIsoSustainedFrames = 0
+            hlgGlRenderer?.isAutoIsoEnabled = false
+            hlgGlRenderer?.setManualIso(iso.toFloat())
             hlgGlRenderer?.setExposureTrim(1.0f)
             _state.update {
                 it.copy(
@@ -1712,8 +1678,8 @@ class Camera2Controller(
             lastAppliedIso = iso
             lastAppliedExposureNs = exp
         } else {
-            isAutoIsoGliding = false
             autoIsoSustainedFrames = 0
+            hlgGlRenderer?.isAutoIsoEnabled = false
             hlgGlRenderer?.setExposureTrim(1.0f)
             _state.update {
                 it.copy(
@@ -1730,9 +1696,14 @@ class Camera2Controller(
     fun toggleAutoIso() {
         val willBeAuto = !_state.value.isAutoIso
         autoIsoSustainedFrames = 0
-        isAutoIsoGliding = false
+        hlgGlRenderer?.isAutoIsoEnabled = willBeAuto
         if (willBeAuto) {
-            currentContinuousIso = lastIso?.toFloat() ?: _state.value.iso.toFloat()
+            val currentIso = lastIso?.toFloat() ?: _state.value.iso.toFloat()
+            currentContinuousIso = currentIso
+            hlgGlRenderer?.setManualIso(currentIso)
+            val activeRange = getActiveSensorIsoRange()
+            hlgGlRenderer?.minSensorIso = activeRange.lower.toFloat()
+            hlgGlRenderer?.maxSensorIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
         } else {
             hlgGlRenderer?.setExposureTrim(1.0f)
         }
@@ -1741,8 +1712,8 @@ class Camera2Controller(
     }
 
     fun setAutoShutter() {
-        isAutoIsoGliding = false
         autoIsoSustainedFrames = 0
+        hlgGlRenderer?.isAutoIsoEnabled = false
         hlgGlRenderer?.setExposureTrim(1.0f)
         _state.update {
             it.copy(
@@ -2253,14 +2224,34 @@ class Camera2Controller(
                     .coerceIn(0.05f, 0.95f)
                 val measuredLinearLuma = avgLuma.coerceIn(0.01f, 1.0f)
                 val evRatio = (targetLinearLuma / measuredLinearLuma).coerceIn(0.0625f, 16.0f)
-                latestEvError = (kotlin.math.ln(evRatio) / kotlin.math.ln(2.0f))
+                val evError = (kotlin.math.ln(evRatio) / kotlin.math.ln(2.0f))
+                latestEvError = evError
+
+                // Step A — 0.6-Second Sustained Change Delay (~36 frames at 60fps):
+                // Require abs(evError) > 0.30f to remain consistently outside deadband for 36 consecutive frames (~0.6s)
+                if (kotlin.math.abs(evError) > 0.30f) {
+                    autoIsoSustainedFrames++
+                    if (autoIsoSustainedFrames >= 36) {
+                        // Step B — Smooth 1.5-Second Ease-In-Out Glide:
+                        val currentIso = hlgGlRenderer?.desiredContinuousIso ?: currentContinuousIso
+                        val maxAllowedIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
+                        val calculatedTargetIso = (currentIso * Math.pow(2.0, evError.toDouble()).toFloat())
+                            .coerceIn(activeRange.lower.toFloat(), maxAllowedIso)
+
+                        hlgGlRenderer?.startAutoIsoGlide(calculatedTargetIso, activeRange.lower.toFloat(), maxAllowedIso)
+                        autoIsoSustainedFrames = 0
+                    }
+                } else {
+                    autoIsoSustainedFrames = 0
+                }
             } else {
                 latestEvError = 0f
+                autoIsoSustainedFrames = 0
             }
         }
 
         val now = SystemClock.uptimeMillis()
-        val currentIsoReadout = if (_state.value.isAutoIso) currentContinuousIso.roundToInt() else currentEffectiveIso.roundToInt()
+        val currentIsoReadout = if (_state.value.isAutoIso) (hlgGlRenderer?.desiredContinuousIso ?: currentContinuousIso).roundToInt() else currentEffectiveIso.roundToInt()
         if (now - lastHistogramUpdateTime < 83L) { // 12Hz throttle (1000ms / 12 ~= 83ms)
             pendingHistogramData = data
             if (!isHistogramDispatchScheduled) {

@@ -26,6 +26,39 @@ import java.nio.FloatBuffer
  * 2. EGL14.eglMakeCurrent() is ALWAYS active BEFORE calling SurfaceTexture.updateTexImage().
  * 3. Standard GLES OES external texture shaders and full SurfaceView viewports are used without distortion.
  */
+/**
+ * Thread-safe 32-entry circular buffer matching Camera2 SENSOR_TIMESTAMP (nanoseconds)
+ * to actual hardware SENSOR_SENSITIVITY applied by the camera sensor.
+ */
+class TimestampIsoMap(private val capacity: Int = 32) {
+    private val timestamps = LongArray(capacity)
+    private val isos = IntArray(capacity)
+    private var writeIndex = 0
+
+    @Synchronized
+    fun put(timestampNs: Long, iso: Int) {
+        timestamps[writeIndex] = timestampNs
+        isos[writeIndex] = iso
+        writeIndex = (writeIndex + 1) % capacity
+    }
+
+    @Synchronized
+    fun get(targetTimestampNs: Long): Int? {
+        var closestDiff = Long.MAX_VALUE
+        var matchedIso: Int? = null
+        for (i in 0 until capacity) {
+            val ts = timestamps[i]
+            if (ts == 0L) continue
+            val diff = Math.abs(ts - targetTimestampNs)
+            if (diff < closestDiff) {
+                closestDiff = diff
+                matchedIso = isos[i]
+            }
+        }
+        return if (closestDiff <= 65_000_000L) matchedIso else null
+    }
+}
+
 class HlgGlRenderer {
 
     companion object {
@@ -173,26 +206,6 @@ vec3 applyFalseColor(vec3 color) {
     return vec3(luma * 0.45); // Neutral reference gray
 }
 
-// 4-tap thresholded deband filter around vTextureCoord
-// Samples 4 diagonal taps at ±2.5 * uTexelSize and blends when difference < 0.018 threshold
-vec3 applyDeband(samplerExternalOES tex, vec2 uv, vec2 texelSize, vec3 center) {
-    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
-        return center;
-    }
-    vec2 off = texelSize * 2.5;
-    vec3 s0 = texture2D(tex, uv + vec2( off.x,  off.y)).rgb;
-    vec3 s1 = texture2D(tex, uv + vec2(-off.x,  off.y)).rgb;
-    vec3 s2 = texture2D(tex, uv + vec2( off.x, -off.y)).rgb;
-    vec3 s3 = texture2D(tex, uv + vec2(-off.x, -off.y)).rgb;
-    vec3 avg = (s0 + s1 + s2 + s3) * 0.25;
-    vec3 diff = abs(center - avg);
-    float maxDiff = max(max(diff.r, diff.g), diff.b);
-    if (maxDiff < 0.018) {
-        return mix(center, avg, 0.75);
-    }
-    return center;
-}
-
 // Static 10-bit Triangular Interleaved Gradient Noise (IGN) anti-banding spatial dither
 // Stationary spatial dither (zero temporal seed variation) eliminates 8-to-10-bit contour bands
 // while preventing temporal noise grain that stresses the HEVC encoder.
@@ -200,12 +213,39 @@ float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Static triangular spatial dither: amplitude = 0.65 / 255.0 right before HLG/PQ curve
+// 8-tap wide-radius golden-angle deband filter (mpv gradfun architecture)
+// Samples at 10.0, 22.0, and 36.0 texel radii rotated by per-pixel IGN noise
+// Seamlessly bridges 30-80px 8-bit sky bands at 2.5K/4K while strictly preserving sharp edges
+vec3 applyDebandWide(samplerExternalOES tex, vec2 uv, vec2 texelSize, vec3 center, vec2 fragCoord) {
+    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
+        return center;
+    }
+    float rot = ign(fragCoord) * 6.2831853;
+    vec3 accum = center;
+    float totalWeight = 1.0;
+
+    for (int i = 0; i < 8; i++) {
+        float angle = rot + float(i) * 2.3999632;
+        float r = (i == 0 || i == 3) ? 10.0 : ((i == 1 || i == 4 || i == 6) ? 22.0 : 36.0);
+        vec2 offset = vec2(cos(angle), sin(angle)) * (r * texelSize);
+        vec3 s = texture2D(tex, uv + offset).rgb;
+        vec3 diff = abs(center - s);
+        float maxDiff = max(max(diff.r, diff.g), diff.b);
+        if (maxDiff < 0.022) {
+            float w = 1.0 - (maxDiff / 0.022);
+            accum += s * w;
+            totalWeight += w;
+        }
+    }
+    return accum / totalWeight;
+}
+
+// Static triangular spatial dither: amplitude = 0.85 / 255.0 right before HLG/PQ curve
 vec3 applyTriangularIgnDither(vec3 color, vec2 fragCoord) {
     float n1 = ign(fragCoord);
     float n2 = ign(fragCoord + vec2(1.7, 3.1));
     float tri = (n1 + n2 - 1.0); // Triangular PDF centered at 0.0 in [-1.0, 1.0]
-    float dither = tri * (0.65 / 255.0);
+    float dither = tri * (0.85 / 255.0);
     return max(vec3(0.0), color + vec3(dither));
 }
 
@@ -225,7 +265,7 @@ vec3 applyHighlightShoulder(vec3 color) {
 
 void main() {
     vec4 src = sampleBicubic(sTexture, vTextureCoord, uTexelSize);
-    vec3 color = applyDeband(sTexture, vTextureCoord, uTexelSize, src.rgb);
+    vec3 color = applyDebandWide(sTexture, vTextureCoord, uTexelSize, src.rgb, gl_FragCoord.xy);
 
     // 3D LUT Simulation pass
     if (uLutPreset == 1) {
@@ -389,12 +429,57 @@ void main() {
         anamorphicScale = scale
     }
 
+    val timestampIsoMap = TimestampIsoMap()
+
+    @Volatile
+    var isAutoIsoEnabled: Boolean = false
+
+    @Volatile
+    var minSensorIso: Float = 50f
+
+    @Volatile
+    var maxSensorIso: Float = 3200f
+
+    @Volatile
+    var desiredContinuousIso: Float = 100f
+        private set
+
+    @Volatile
+    private var isAutoIsoGliding: Boolean = false
+    @Volatile
+    private var autoIsoGlideStartNs: Long = 0L
+    @Volatile
+    private var autoIsoStartIso: Float = 100f
+    @Volatile
+    private var autoIsoTargetIso: Float = 100f
+    private val AUTO_ISO_GLIDE_DURATION_NS: Long = 1_500_000_000L // 1.5 seconds
+
+    private var lastKnownHardwareIso: Int = 100
+
     @Volatile
     var exposureTrim: Float = 1.0f
         private set
 
     fun setExposureTrim(trim: Float) {
-        exposureTrim = trim.coerceIn(0.75f, 1.35f)
+        exposureTrim = trim.coerceIn(0.70f, 1.45f)
+    }
+
+    fun setManualIso(iso: Float) {
+        isAutoIsoGliding = false
+        desiredContinuousIso = iso
+        exposureTrim = 1.0f
+    }
+
+    fun startAutoIsoGlide(targetIso: Float, minIso: Float, maxIso: Float) {
+        minSensorIso = minIso
+        maxSensorIso = maxIso
+        val clampedTarget = targetIso.coerceIn(minIso, maxIso)
+        if (Math.abs(clampedTarget - desiredContinuousIso) >= 2.0f) {
+            autoIsoStartIso = desiredContinuousIso
+            autoIsoTargetIso = clampedTarget
+            autoIsoGlideStartNs = System.nanoTime()
+            isAutoIsoGliding = true
+        }
     }
 
     // Real-time downsampled histogram & luma telemetry extraction (10 fps, 16x16 thumbnail ~0.02ms)
@@ -894,6 +979,39 @@ void main() {
             // 2. Update hardware buffer onto GL_TEXTURE_EXTERNAL_OES texture
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
+            val frameTs = st.timestamp
+
+            // 2b. Frame-Locked 60fps Continuous S-Curve Auto-ISO & SENSOR_TIMESTAMP Gain Matching
+            if (isAutoIsoEnabled) {
+                if (isAutoIsoGliding) {
+                    val elapsedNs = System.nanoTime() - autoIsoGlideStartNs
+                    val progress = (elapsedNs.toDouble() / AUTO_ISO_GLIDE_DURATION_NS.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                    val easedT = progress * progress * (3.0f - 2.0f * progress) // 1.5s cubic S-curve
+                    val stopRatio = (autoIsoTargetIso / maxOf(1.0f, autoIsoStartIso)).toDouble()
+                    desiredContinuousIso = (autoIsoStartIso * Math.pow(stopRatio, easedT.toDouble()).toFloat())
+                        .coerceIn(minSensorIso, maxSensorIso)
+
+                    if (progress >= 1.0f) {
+                        desiredContinuousIso = autoIsoTargetIso
+                        isAutoIsoGliding = false
+                    }
+                }
+
+                // Match exact hardware ISO of this specific frame buffer via SENSOR_TIMESTAMP
+                val matchedIso = timestampIsoMap.get(frameTs)
+                if (matchedIso != null && matchedIso > 0) {
+                    lastKnownHardwareIso = matchedIso
+                }
+                val actualIso = lastKnownHardwareIso
+                if (actualIso > 0) {
+                    exposureTrim = (desiredContinuousIso / actualIso.toFloat()).coerceIn(0.70f, 1.45f)
+                } else {
+                    exposureTrim = 1.0f
+                }
+            } else {
+                isAutoIsoGliding = false
+                exposureTrim = 1.0f
+            }
 
             if (!hasLoggedFirstFrame) {
                 hasLoggedFirstFrame = true
