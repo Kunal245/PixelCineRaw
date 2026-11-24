@@ -64,6 +64,10 @@ class HlgGlRenderer {
     companion object {
         private const val TAG = "HlgGlRenderer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private const val EGL_GL_COLORSPACE_KHR = 0x309D
+        private const val EGL_GL_COLORSPACE_BT2020_HLG_EXT = 0x3540
+        private const val EGL_GL_COLORSPACE_BT2020_PQ_EXT = 0x3340
+        private const val EGL_GL_COLORSPACE_SRGB_KHR = 0x3089
 
         // Full-screen Quad geometry (clip-space bounds)
         private val VERTICES = floatArrayOf(
@@ -325,6 +329,14 @@ void main() {
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
+    private var eglConfig8Bit: EGLConfig? = null
+    private var eglConfig10Bit: EGLConfig? = null
+    private var supportsColorspace: Boolean = false
+    private var supportsHlgColorspace: Boolean = false
+    private var supportsPqColorspace: Boolean = false
+    private var activeColorProfile: ColorProfile = ColorProfile.REC709
+    private var isCurrentPreviewHdr: Boolean = false
+    private var lastPreviewProfile: ColorProfile = ColorProfile.REC709
     private var dummyPbufferSurface: EGLSurface = EGL14.EGL_NO_SURFACE
 
     // Window Surfaces
@@ -687,11 +699,11 @@ void main() {
                 if (previewSurface != null && previewSurface.isValid) {
                     destroyPreviewSurface()
                     currentSurface = previewSurface
-                    val eglSurf = createWindowSurface(previewSurface)
+                    val eglSurf = createPreviewWindowSurface(previewSurface, activeColorProfile)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
-                        Log.i(TAG, "Preview surface initialized (${vW}x$vH, stream=${sW}x$sH)")
+                        Log.i(TAG, "Preview surface initialized (${vW}x$vH, stream=${sW}x$sH, HDR=$isCurrentPreviewHdr)")
                     }
                 }
 
@@ -706,10 +718,11 @@ void main() {
     fun getCameraInputSurface(): Surface? = inputSurface
 
     /**
-     * Updates the active color mode (0 = REC.709, 1 = PIXEL-LOG, 2 = HLG) instantly
-     * in the fragment shader without restarting CameraCaptureSession!
+     * Updates the active color mode (0 = REC.709, 1 = PIXEL-LOG, 2 = HLG, 3 = HDR10+) instantly
+     * in the fragment shader and seamlessly transitions EGL window surface between SDR and HDR!
      */
     fun setColorMode(profile: ColorProfile) {
+        activeColorProfile = profile
         val mode = when (profile) {
             ColorProfile.REC709 -> 0
             ColorProfile.FLAT_LOG -> 1
@@ -719,6 +732,21 @@ void main() {
         currentColorMode = mode
         val handler = glHandler ?: return
         handler.post {
+            // Recreate preview window surface when transitioning between SDR and HDR (or between HLG and PQ)
+            val isHdrTarget = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
+            if (isCurrentPreviewHdr != isHdrTarget || (isHdrTarget && lastPreviewProfile != profile)) {
+                val surf = currentSurface
+                if (surf != null && surf.isValid) {
+                    destroyPreviewSurface()
+                    val eglSurf = createPreviewWindowSurface(surf, profile)
+                    if (eglSurf != EGL14.EGL_NO_SURFACE) {
+                        previewEglSurface = eglSurf
+                        EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
+                        Log.i(TAG, "Recreated preview EGL surface for profile $profile (HDR=$isHdrTarget)")
+                    }
+                }
+            }
+
             if (isReady && programId != 0) {
                 val currentDrawSurf = previewEglSurface ?: dummyPbufferSurface
                 if (currentDrawSurf != EGL14.EGL_NO_SURFACE) {
@@ -741,8 +769,52 @@ void main() {
             throw RuntimeException("Unable to initialize EGL14")
         }
 
-        // Standard 8-bit RGBA_8888 with EGL_RECORDABLE_ANDROID and PBUFFER support
-        val configAttribs = intArrayOf(
+        val extensions = EGL14.eglQueryString(eglDisplay, EGL14.EGL_EXTENSIONS) ?: ""
+        supportsColorspace = extensions.contains("EGL_KHR_gl_colorspace")
+        supportsHlgColorspace = supportsColorspace && (extensions.contains("EGL_EXT_gl_colorspace_bt2020_hlg") || extensions.contains("EGL_EXT_gl_colorspace_bt2020_linear"))
+        supportsPqColorspace = supportsColorspace && extensions.contains("EGL_EXT_gl_colorspace_bt2020_pq")
+        Log.i(TAG, "EGL colorspace support: KHR=$supportsColorspace, HLG=$supportsHlgColorspace, PQ=$supportsPqColorspace")
+
+        val configs = arrayOfNulls<EGLConfig>(1)
+        val numConfigs = IntArray(1)
+
+        // 1. Try 10-bit RGBA_1010102 config for true HDR OLED display
+        val configAttribs10 = intArrayOf(
+            EGL14.EGL_RED_SIZE, 10,
+            EGL14.EGL_GREEN_SIZE, 10,
+            EGL14.EGL_BLUE_SIZE, 10,
+            EGL14.EGL_ALPHA_SIZE, 2,
+            EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+            EGL14.EGL_NONE
+        )
+
+        var found10 = EGL14.eglChooseConfig(
+            eglDisplay, configAttribs10, 0, configs, 0, 1, numConfigs, 0
+        ) && numConfigs[0] > 0 && configs[0] != null
+
+        if (!found10) {
+            val configAttribs10WindowOnly = intArrayOf(
+                EGL14.EGL_RED_SIZE, 10,
+                EGL14.EGL_GREEN_SIZE, 10,
+                EGL14.EGL_BLUE_SIZE, 10,
+                EGL14.EGL_ALPHA_SIZE, 2,
+                EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
+                EGL14.EGL_NONE
+            )
+            found10 = EGL14.eglChooseConfig(
+                eglDisplay, configAttribs10WindowOnly, 0, configs, 0, 1, numConfigs, 0
+            ) && numConfigs[0] > 0 && configs[0] != null
+        }
+
+        if (found10) {
+            eglConfig10Bit = configs[0]
+            Log.i(TAG, "Selected 10-bit RGBA_1010102 EGLConfig for Actua OLED HDR preview")
+        }
+
+        // 2. Standard 8-bit RGBA_8888 config
+        val configAttribs8 = intArrayOf(
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
@@ -753,14 +825,15 @@ void main() {
             EGL14.EGL_NONE
         )
 
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val numConfigs = IntArray(1)
+        val found8 = EGL14.eglChooseConfig(
+            eglDisplay, configAttribs8, 0, configs, 0, 1, numConfigs, 0
+        ) && numConfigs[0] > 0 && configs[0] != null
 
-        var foundConfig = EGL14.eglChooseConfig(
-            eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0
-        ) && numConfigs[0] > 0
+        if (found8) {
+            eglConfig8Bit = configs[0]
+        }
 
-        if (!foundConfig) {
+        eglConfig = eglConfig10Bit ?: eglConfig8Bit ?: run {
             val fallbackAttribs = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
@@ -770,15 +843,12 @@ void main() {
                 EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
                 EGL14.EGL_NONE
             )
-            foundConfig = EGL14.eglChooseConfig(
-                eglDisplay, fallbackAttribs, 0, configs, 0, 1, numConfigs, 0
-            ) && numConfigs[0] > 0
+            if (EGL14.eglChooseConfig(eglDisplay, fallbackAttribs, 0, configs, 0, 1, numConfigs, 0) && numConfigs[0] > 0) {
+                configs[0]
+            } else {
+                throw RuntimeException("Failed to find suitable EGLConfig")
+            }
         }
-
-        if (!foundConfig || configs[0] == null) {
-            throw RuntimeException("Failed to find suitable 8-bit EGLConfig")
-        }
-        eglConfig = configs[0]
 
         // Create GLES 3.0 context with fallback to GLES 2.0
         var context = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, intArrayOf(
@@ -910,11 +980,11 @@ void main() {
                 destroyPreviewSurface()
                 if (surface != null && surface.isValid && isReady) {
                     currentSurface = surface
-                    val eglSurf = createWindowSurface(surface)
+                    val eglSurf = createPreviewWindowSurface(surface, activeColorProfile)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
-                        Log.i(TAG, "Preview EGL surface set successfully (${vW}x$vH, stream=${sW}x$sH)")
+                        Log.i(TAG, "Preview EGL surface set successfully (${vW}x$vH, stream=${sW}x$sH, HDR=$isCurrentPreviewHdr)")
                     }
                 }
             } catch (e: Throwable) {
@@ -948,6 +1018,82 @@ void main() {
                 Log.w(TAG, "Error setting encoder surface", e)
             }
         }
+    }
+
+    private fun createPreviewWindowSurface(surface: Surface, profile: ColorProfile): EGLSurface {
+        val config = eglConfig ?: run {
+            Log.w(TAG, "Cannot create preview window surface: EGLConfig is null")
+            return EGL14.EGL_NO_SURFACE
+        }
+        if (!surface.isValid) {
+            Log.w(TAG, "Cannot create preview window surface: Surface is invalid")
+            return EGL14.EGL_NO_SURFACE
+        }
+
+        val isHdr = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
+
+        // Try creating with HDR colorspace if in HDR mode and extension is available
+        if (isHdr && supportsColorspace) {
+            val colorspace = if (profile == ColorProfile.HDR10_PLUS && supportsPqColorspace) {
+                EGL_GL_COLORSPACE_BT2020_PQ_EXT
+            } else if (supportsHlgColorspace) {
+                EGL_GL_COLORSPACE_BT2020_HLG_EXT
+            } else {
+                -1
+            }
+
+            if (colorspace != -1) {
+                val hdrAttribs = intArrayOf(
+                    EGL_GL_COLORSPACE_KHR, colorspace,
+                    EGL14.EGL_NONE
+                )
+                try {
+                    val targetConfig = eglConfig10Bit ?: config
+                    val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, targetConfig, surface, hdrAttribs, 0)
+                    if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                        Log.i(TAG, "Created True Live HDR OLED window surface (colorspace=0x${Integer.toHexString(colorspace)}, config=${if (targetConfig == eglConfig10Bit) "10-bit" else "8-bit"})")
+                        isCurrentPreviewHdr = true
+                        lastPreviewProfile = profile
+                        return eglSurf
+                    }
+                    val err = EGL14.eglGetError()
+                    Log.w(TAG, "eglCreateWindowSurface with HDR colorspace returned NO_SURFACE: 0x${Integer.toHexString(err)}")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Exception creating HDR EGL window surface", e)
+                }
+            }
+        }
+
+        // Standard SDR window surface
+        val defaultAttribs = intArrayOf(EGL14.EGL_NONE)
+        try {
+            val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, defaultAttribs, 0)
+            if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                Log.i(TAG, "Created standard EGL window surface for preview (SDR)")
+                isCurrentPreviewHdr = false
+                lastPreviewProfile = profile
+                return eglSurf
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Exception creating standard EGL window surface", e)
+        }
+
+        // Fallback to 8-bit config if 10-bit was used and failed
+        if (config != eglConfig8Bit && eglConfig8Bit != null) {
+            try {
+                val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig8Bit, surface, defaultAttribs, 0)
+                if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                    Log.i(TAG, "Created 8-bit fallback EGL window surface")
+                    isCurrentPreviewHdr = false
+                    lastPreviewProfile = profile
+                    return eglSurf
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Exception creating 8-bit fallback EGL window surface", e)
+            }
+        }
+
+        return EGL14.EGL_NO_SURFACE
     }
 
     private fun createWindowSurface(surface: Surface): EGLSurface {
