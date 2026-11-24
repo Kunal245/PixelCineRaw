@@ -37,6 +37,7 @@ class CameraSettingsRepository(context: Context) {
         private const val KEY_SHUTTER_ANGLE = "shutter_angle"
         private const val KEY_SHUTTER_SPEED_NS = "shutter_speed_ns"
         private const val KEY_ISO = "iso"
+        private const val KEY_ANTI_BANDING_MODE = "anti_banding_mode"
         private const val KEY_EV_COMPENSATION = "ev_compensation"
         private const val KEY_IS_MANUAL_WB = "is_manual_wb"
         private const val KEY_WB_KELVIN = "wb_kelvin"
@@ -114,6 +115,9 @@ class CameraSettingsRepository(context: Context) {
             val shutterAngle = prefs.getFloat(KEY_SHUTTER_ANGLE, defaultState.shutterAngle)
             val shutterSpeedNs = prefs.getLong(KEY_SHUTTER_SPEED_NS, defaultState.shutterSpeedNs)
             val iso = prefs.getInt(KEY_ISO, defaultState.iso)
+            val antiBandingMode = prefs.getString(KEY_ANTI_BANDING_MODE, null)?.let { name ->
+                try { AntiBandingMode.valueOf(name) } catch (_: Exception) { null }
+            } ?: defaultState.antiBandingMode
             val evCompensation = prefs.getFloat(KEY_EV_COMPENSATION, defaultState.evCompensation)
 
             val isManualWb = prefs.getBoolean(KEY_IS_MANUAL_WB, defaultState.isManualWb)
@@ -175,6 +179,7 @@ class CameraSettingsRepository(context: Context) {
                 shutterAngle = shutterAngle,
                 shutterSpeedNs = shutterSpeedNs,
                 iso = iso,
+                antiBandingMode = antiBandingMode,
                 evCompensation = evCompensation,
                 isManualWb = isManualWb,
                 wbKelvin = wbKelvin,
@@ -226,6 +231,7 @@ class CameraSettingsRepository(context: Context) {
             putFloat(KEY_SHUTTER_ANGLE, state.shutterAngle)
             putLong(KEY_SHUTTER_SPEED_NS, state.shutterSpeedNs)
             putInt(KEY_ISO, state.iso)
+            putString(KEY_ANTI_BANDING_MODE, state.antiBandingMode.name)
             putFloat(KEY_EV_COMPENSATION, state.evCompensation)
             putBoolean(KEY_IS_MANUAL_WB, state.isManualWb)
             putInt(KEY_WB_KELVIN, state.wbKelvin)

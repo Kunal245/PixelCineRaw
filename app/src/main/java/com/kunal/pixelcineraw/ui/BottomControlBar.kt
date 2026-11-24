@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kunal.pixelcineraw.camera.AntiBandingMode
 import com.kunal.pixelcineraw.camera.CinemaState
 import com.kunal.pixelcineraw.camera.ColorMath
 import com.kunal.pixelcineraw.camera.FocusMode
@@ -66,7 +67,15 @@ fun BottomControlBar(
         ) {
             // SHUTTER
             val shutterVal = if (state.shutterUnit == ShutterUnit.ANGLE) {
-                "${state.shutterAngle.toInt()}°"
+                if (state.shutterAngle == 180f && state.antiBandingMode == AntiBandingMode.HZ_50) {
+                    val flickerSpeed = if (state.targetFps <= 30) "1/50s · 50Hz" else "1/100s · 50Hz"
+                    "180° ($flickerSpeed)"
+                } else if (state.shutterAngle == 180f && state.antiBandingMode == AntiBandingMode.HZ_60) {
+                    val flickerSpeed = if (state.targetFps <= 30) "1/60s · 60Hz" else "1/120s · 60Hz"
+                    "180° ($flickerSpeed)"
+                } else {
+                    "${state.shutterAngle.toInt()}°"
+                }
             } else {
                 ColorMath.formatShutterSpeed(state.shutterSpeedNs)
             }

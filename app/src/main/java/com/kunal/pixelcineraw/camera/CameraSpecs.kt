@@ -1,6 +1,7 @@
 package com.kunal.pixelcineraw.camera
 
 import android.graphics.Rect
+import android.hardware.camera2.CameraMetadata
 import android.util.Range
 import android.util.Size
 
@@ -131,5 +132,13 @@ enum class OrientationLockMode(val label: String, val shortLabel: String, val de
     LOCK_LANDSCAPE("LOCK LANDSCAPE", "LANDSCAPE", "Locked to landscape (allows left/right flip for rigs)"),
     LOCK_PORTRAIT("LOCK PORTRAIT", "PORTRAIT", "Locked to upright portrait (for vertical cinema)")
 }
+
+enum class AntiBandingMode(val label: String, val shortLabel: String, val camera2Mode: Int) {
+    HZ_50("50Hz (INDOOR)", "50Hz", CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_50HZ),
+    HZ_60("60Hz (USA/JAPAN)", "60Hz", CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_60HZ),
+    AUTO("AUTO ANTI-BAND", "AUTO", CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO),
+    OFF("ANTI-BAND OFF", "OFF", CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_OFF)
+}
+
 
 

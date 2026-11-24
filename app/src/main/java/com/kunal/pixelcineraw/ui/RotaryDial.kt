@@ -546,18 +546,21 @@ fun CinemaFocusWheelScrubber(
 }
 
 /**
- * Cinema Logarithmic ISO Sensitivity Wheel Scrubber.
+ * Cinema Logarithmic Sub-Stop ISO Sensitivity Wheel Scrubber.
  *
- * Maps logarithmic exposure stops with ~60dp drag throw per exposure stop (20dp per 1/3 EV step),
- * standard presets (100..3200), HI-ISO toggle for 6400+, 120Hz inertial fling decay, and haptics.
+ * Implements iPhone-smooth continuous sub-stop ISO control with locked 130dp/stop relative dragging
+ * (130dp thumb travel = 1 full 2x exposure stop), zero-flash auto-to-manual handoff, standard full-stop
+ * presets (100..3200), HI-ISO toggle for 6400+, 120Hz inertial fling decay, and tactile haptic detents.
  */
 @Composable
 fun CinemaIsoWheelScrubber(
     currentIso: Int,
     activeIsoRange: Range<Int>,
     isManualExposure: Boolean,
+    isAutoIso: Boolean = false,
     onIsoChanged: (Int) -> Unit,
     onToggleExposureMode: () -> Unit,
+    onToggleAutoIso: () -> Unit = {},
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -566,43 +569,32 @@ fun CinemaIsoWheelScrubber(
     val density = LocalDensity.current
 
     var isHiIsoMode by remember { mutableStateOf(currentIso > 3200) }
-
-    val allSteps = remember {
-        listOf(
-            50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640,
-            800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800
-        )
-    }
-
     val maxAccessibleIso = if (isHiIsoMode) activeIsoRange.upper else minOf(3200, activeIsoRange.upper)
-    val accessibleIsoValues = remember(activeIsoRange, maxAccessibleIso) {
-        val filtered = allSteps.filter { it in activeIsoRange.lower..maxAccessibleIso }.toMutableList()
-        if (!filtered.contains(activeIsoRange.lower)) filtered.add(0, activeIsoRange.lower)
-        if (!filtered.contains(maxAccessibleIso)) filtered.add(maxAccessibleIso)
-        filtered.sorted().distinct()
-    }
+    val minIso = activeIsoRange.lower
 
-    val selectedIndex = accessibleIsoValues.indices.minByOrNull { abs(accessibleIsoValues[it] - currentIso) } ?: 0
+    val stopWidthDp = 130.0 // Exactly 130dp thumb drag per 1 exposure stop (2x)
+    val stopWidthPx = with(density) { 130.dp.toPx() }
 
-    // ~60dp drag per exposure stop (each 1/3-stop step is 20dp)
-    val stepWidthPx = with(density) { 20.dp.toPx() }
-    var dragAccumulator by remember(selectedIndex) { mutableFloatStateOf(0f) }
+    var dragStartIso by remember { mutableFloatStateOf(currentIso.toFloat()) }
+    var totalDragDeltaDp by remember { mutableDoubleStateOf(0.0) }
+    var lastHapticIso by remember { mutableIntStateOf(currentIso) }
     var flingJob by remember { mutableStateOf<Job?>(null) }
 
-    // Quick presets
+    // Synchronize dragStartIso when external ISO changes while not dragging
+    LaunchedEffect(currentIso) {
+        if (flingJob == null) {
+            dragStartIso = currentIso.toFloat()
+            totalDragDeltaDp = 0.0
+        }
+    }
+
+    // Standard Cinema Full-Stop Presets
     val standardPresets = if (!isHiIsoMode) {
         listOf(100, 200, 400, 800, 1600, 3200)
     } else {
         listOf(400, 800, 1600, 3200, 6400, 12800)
     }
-    val activePresets = standardPresets
-        .filter { it in activeIsoRange.lower..maxAccessibleIso }
-        .map { iso ->
-            val targetIdx = accessibleIsoValues.indexOf(iso).let {
-                if (it >= 0) it else accessibleIsoValues.indices.minByOrNull { idx -> abs(accessibleIsoValues[idx] - iso) } ?: 0
-            }
-            "$iso" to targetIdx
-        }
+    val activePresets = standardPresets.filter { it in minIso..maxAccessibleIso }
 
     Column(
         modifier = modifier
@@ -658,6 +650,17 @@ fun CinemaIsoWheelScrubber(
                         fontWeight = FontWeight.Bold
                     )
                 }
+                Spacer(modifier = Modifier.width(4.dp))
+                if (isManualExposure) {
+                    TextButton(onClick = onToggleAutoIso) {
+                        Text(
+                            if (isAutoIso) "AUTO ISO ON" else "SHUTTER-PRI AUTO",
+                            color = if (isAutoIso) Color(0xFF00FF66) else Color(0xAAFFFFFF),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
 
             IconButton(
@@ -674,24 +677,25 @@ fun CinemaIsoWheelScrubber(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // 2. Large Central Readout
+        // 2. Large Central Readout with Sub-Stop ISO Indication
+        val readoutText = if (isAutoIso) "AUTO ISO $currentIso" else "ISO $currentIso"
         Text(
-            text = "ISO $currentIso",
-            color = Color.White,
+            text = readoutText,
+            color = if (isAutoIso) Color(0xFF00FF66) else Color.White,
             fontSize = 28.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace
         )
 
-        // 3. Quick-Jump Presets
+        // 3. Quick-Jump Full-Stop Presets
         if (activePresets.isNotEmpty()) {
             Spacer(modifier = Modifier.height(6.dp))
             Row(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                activePresets.forEach { (label, targetIdx) ->
-                    val isSelected = selectedIndex == targetIdx
+                activePresets.forEach { presetIso ->
+                    val isSelected = abs(currentIso - presetIso) <= 5
                     Box(
                         modifier = Modifier
                             .background(
@@ -701,13 +705,15 @@ fun CinemaIsoWheelScrubber(
                             .border(0.5.dp, if (isSelected) Color(0xFFFFCC00) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
                             .clickable {
                                 flingJob?.cancel()
+                                dragStartIso = presetIso.toFloat()
+                                totalDragDeltaDp = 0.0
                                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                onIsoChanged(accessibleIsoValues[targetIdx])
+                                onIsoChanged(presetIso)
                             }
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = label,
+                            text = "$presetIso",
                             color = if (isSelected) Color.Black else Color.White,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
@@ -720,7 +726,7 @@ fun CinemaIsoWheelScrubber(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Horizontal ISO Scrubber Wheel with Inertial Fling
+        // 4. Horizontal ISO Scrubber Wheel with 130dp/Stop Relative Drag & Inertial Fling
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -731,39 +737,45 @@ fun CinemaIsoWheelScrubber(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
                         flingJob?.cancel()
-                        dragAccumulator += delta
-                        val stepsMoved = (-dragAccumulator / stepWidthPx).toInt()
-                        if (stepsMoved != 0) {
-                            val newIdx = (selectedIndex + stepsMoved).coerceIn(0, accessibleIsoValues.size - 1)
-                            if (newIdx != selectedIndex) {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                onIsoChanged(accessibleIsoValues[newIdx])
-                                dragAccumulator = 0f
-                            }
+                        // Negative delta = drag left = increase ISO
+                        val deltaDp = (-delta / density.density).toDouble()
+                        totalDragDeltaDp += deltaDp
+
+                        // Relative drag formula: targetIso = dragStartIso * 2^(totalDragDeltaDp / 130dp)
+                        val calculatedIso = (dragStartIso * 2.0.pow(totalDragDeltaDp / stopWidthDp))
+                            .toFloat()
+                            .coerceIn(minIso.toFloat(), maxAccessibleIso.toFloat())
+
+                        val roundedIso = calculatedIso.roundToInt()
+                        if (abs(roundedIso - lastHapticIso) >= 5) {
+                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            lastHapticIso = roundedIso
                         }
+                        onIsoChanged(roundedIso)
                     },
                     onDragStopped = { velocity ->
-                        if (abs(velocity) > 120f && accessibleIsoValues.size > 1) {
+                        if (abs(velocity) > 100f) {
                             flingJob = coroutineScope.launch {
                                 var lastAnim = 0f
-                                var curIdx = selectedIndex
                                 Animatable(0f).animateDecay(
                                     initialVelocity = -velocity,
-                                    animationSpec = exponentialDecay(frictionMultiplier = 1.8f)
+                                    animationSpec = exponentialDecay(frictionMultiplier = 1.6f)
                                 ) {
                                     val step = value - lastAnim
                                     lastAnim = value
-                                    dragAccumulator += step
-                                    val steps = (dragAccumulator / stepWidthPx).toInt()
-                                    if (steps != 0) {
-                                        val newIdx = (curIdx + steps).coerceIn(0, accessibleIsoValues.size - 1)
-                                        if (newIdx != curIdx) {
-                                            curIdx = newIdx
-                                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                            onIsoChanged(accessibleIsoValues[newIdx])
-                                            dragAccumulator = 0f
-                                        }
+                                    val stepDp = (step / density.density).toDouble()
+                                    totalDragDeltaDp += stepDp
+
+                                    val calculatedIso = (dragStartIso * 2.0.pow(totalDragDeltaDp / stopWidthDp))
+                                        .toFloat()
+                                        .coerceIn(minIso.toFloat(), maxAccessibleIso.toFloat())
+
+                                    val roundedIso = calculatedIso.roundToInt()
+                                    if (abs(roundedIso - lastHapticIso) >= 5) {
+                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                        lastHapticIso = roundedIso
                                     }
+                                    onIsoChanged(roundedIso)
                                 }
                             }
                         }
@@ -775,33 +787,75 @@ fun CinemaIsoWheelScrubber(
                 val cx = size.width / 2f
                 val h = size.height
 
-                val visibleCount = 18
-                for (offset in -visibleCount..visibleCount) {
-                    val idx = selectedIndex + offset
-                    if (idx in accessibleIsoValues.indices) {
-                        val tickX = cx + (offset * stepWidthPx)
-                        val isoVal = accessibleIsoValues[idx]
-                        val isCenter = offset == 0
-                        val isFullStop = isoVal in listOf(50, 100, 200, 400, 800, 1600, 3200, 6400, 12800)
+                // Draw full stops and 1/3-stop graduation marks along the continuous log2 scale
+                val baseStops = listOf(25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800)
+                val safeCurrentIso = maxOf(1f, currentIso.toFloat())
 
-                        val tickH = when {
-                            isCenter -> h * 0.75f
-                            isFullStop -> h * 0.50f
-                            else -> h * 0.25f
+                // Draw full stops
+                baseStops.forEach { stopVal ->
+                    if (stopVal in (minIso / 2)..(maxAccessibleIso * 2)) {
+                        val stopOffsetStops = kotlin.math.ln(stopVal.toDouble() / safeCurrentIso.toDouble()) / kotlin.math.ln(2.0)
+                        val markX = cx + (stopOffsetStops * stopWidthPx).toFloat()
+
+                        if (markX in -40f..(size.width + 40f)) {
+                            val isCenter = abs(markX - cx) < 6f
+                            val tickColor = if (isCenter) Color(0xFFFFCC00) else Color(0xEEFFFFFF)
+
+                            drawLine(
+                                color = tickColor,
+                                start = Offset(markX, h * 0.15f),
+                                end = Offset(markX, h * 0.70f),
+                                strokeWidth = 1.8.dp.toPx()
+                            )
+
+                            // Full-stop text label (e.g. "100", "200")
+                            drawContext.canvas.nativeCanvas.drawText(
+                                "$stopVal",
+                                markX,
+                                h * 0.90f,
+                                android.graphics.Paint().apply {
+                                    color = if (isCenter) android.graphics.Color.YELLOW else android.graphics.Color.WHITE
+                                    textSize = 9.dp.toPx()
+                                    textAlign = android.graphics.Paint.Align.CENTER
+                                    typeface = android.graphics.Typeface.MONOSPACE
+                                    isAntiAlias = true
+                                }
+                            )
                         }
 
-                        val tickColor = when {
-                            isCenter -> Color(0xFFFFCC00)
-                            isFullStop -> Color(0xEEFFFFFF)
-                            else -> Color(0x44FFFFFF)
+                        // Draw 1/3-stop intermediate ticks (+1/3 stop and +2/3 stop)
+                        for (third in 1..2) {
+                            val thirdVal = stopVal * 2.0.pow(third / 3.0)
+                            if (thirdVal <= maxAccessibleIso * 1.5) {
+                                val thirdOffsetStops = kotlin.math.ln(thirdVal / safeCurrentIso.toDouble()) / kotlin.math.ln(2.0)
+                                val thirdX = cx + (thirdOffsetStops * stopWidthPx).toFloat()
+                                if (thirdX in -10f..(size.width + 10f)) {
+                                    drawLine(
+                                        color = Color(0x77FFFFFF),
+                                        start = Offset(thirdX, h * 0.28f),
+                                        end = Offset(thirdX, h * 0.58f),
+                                        strokeWidth = 1.2.dp.toPx()
+                                    )
+                                }
+                            }
                         }
 
-                        drawLine(
-                            color = tickColor,
-                            start = Offset(tickX, (h - tickH) / 2f),
-                            end = Offset(tickX, (h + tickH) / 2f),
-                            strokeWidth = if (isFullStop) 1.5.dp.toPx() else 1.dp.toPx()
-                        )
+                        // Draw fine 1/6-stop micro-ticks
+                        for (sixth in listOf(1, 3, 5)) {
+                            val sixthVal = stopVal * 2.0.pow(sixth / 6.0)
+                            if (sixthVal <= maxAccessibleIso * 1.5) {
+                                val sixthOffsetStops = kotlin.math.ln(sixthVal / safeCurrentIso.toDouble()) / kotlin.math.ln(2.0)
+                                val sixthX = cx + (sixthOffsetStops * stopWidthPx).toFloat()
+                                if (sixthX in -10f..(size.width + 10f)) {
+                                    drawLine(
+                                        color = Color(0x2AFFFFFF),
+                                        start = Offset(sixthX, h * 0.38f),
+                                        end = Offset(sixthX, h * 0.52f),
+                                        strokeWidth = 0.8.dp.toPx()
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 

@@ -40,6 +40,9 @@ fun TopStatusBar(
     onAdvancedSettingsClick: () -> Unit,
     onStabilizationClick: () -> Unit,
     onOrientationLockClick: () -> Unit,
+    onAntiBandingClick: () -> Unit = {},
+    onAntiBandingModeSelected: (AntiBandingMode) -> Unit = {},
+    onAutoShutterClick: () -> Unit = {},
     onResetDefaults: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -96,6 +99,10 @@ fun TopStatusBar(
                         },
                         onFpsSelected = { fps ->
                             onFpsSelected(fps)
+                            showFormatPopover = false
+                        },
+                        onAntiBandingSelected = { mode ->
+                            onAntiBandingModeSelected(mode)
                             showFormatPopover = false
                         },
                         onOpenAdvanced = {
@@ -205,6 +212,14 @@ fun TopStatusBar(
                 highlight = isOrientLocked,
                 onClick = onOrientationLockClick
             )
+
+            // 8. Anti-Banding / Flicker Sync Pill (50Hz / 60Hz / AUTO / OFF)
+            FrostedPill(
+                label = "FLICKER",
+                value = state.antiBandingMode.shortLabel,
+                highlight = state.antiBandingMode != AntiBandingMode.OFF,
+                onClick = onAntiBandingClick
+            )
         }
 
         // Right: Real Live Telemetry Cluster (Storage, Battery %, Tensor G4 Thermal)
@@ -212,6 +227,32 @@ fun TopStatusBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // ND Needed Warning Badge (Bright outdoor light + minimum ISO + highlights clipping)
+            if (state.isNdNeeded) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .background(Color(0x33FF9900), RoundedCornerShape(4.dp))
+                        .border(0.8.dp, Color(0xFFFF9900), RoundedCornerShape(4.dp))
+                        .clickable { onAutoShutterClick() }
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "ND Needed",
+                        tint = Color(0xFFFF9900),
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "ND NEEDED · AUTO SHUTTER",
+                        color = Color(0xFFFFCC00),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
             // USB-C External Mic Indicator
             if (state.isExternalMicConnected) {
                 Row(
@@ -287,6 +328,7 @@ private fun FormatPopoverContent(
     state: CinemaState,
     onResolutionSelected: (CustomResolution) -> Unit,
     onFpsSelected: (Int) -> Unit,
+    onAntiBandingSelected: (AntiBandingMode) -> Unit,
     onOpenAdvanced: () -> Unit,
     onResetDefaults: () -> Unit
 ) {
@@ -370,6 +412,20 @@ private fun FormatPopoverContent(
                 val newAspect = aspectOptions[idx]
                 val res = resolveCinemaResolution(currentTier, newAspect, state.supportedResolutions)
                 onResolutionSelected(res)
+            }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 4. Anti-Banding / Flicker Sync: 50Hz | 60Hz | AUTO | OFF
+        val antiBandingModes = listOf(AntiBandingMode.HZ_50, AntiBandingMode.HZ_60, AntiBandingMode.AUTO, AntiBandingMode.OFF)
+        val selectedAbIdx = antiBandingModes.indexOf(state.antiBandingMode).coerceAtLeast(0)
+        PopoverSegmentedRow(
+            title = "ANTI-BANDING (FLICKER SYNC)",
+            items = listOf("50Hz", "60Hz", "AUTO", "OFF"),
+            selectedIndex = selectedAbIdx,
+            onItemSelected = { idx ->
+                onAntiBandingSelected(antiBandingModes[idx])
             }
         )
 

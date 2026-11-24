@@ -23,10 +23,12 @@ data class CinemaState(
     val isManualExposure: Boolean = true,
     val shutterUnit: ShutterUnit = ShutterUnit.ANGLE,
     val shutterAngle: Float = 180f, // 180 degree rule default
-    val shutterSpeedNs: Long = 20_833_333L, // 1/48s for 24fps default
+    val shutterSpeedNs: Long = 20_000_000L, // 1/50s for 50Hz indoor anti-banding default
     val iso: Int = 100,
     val isAutoIso: Boolean = false,
     val autoIsoCap: Int = 3200,
+    val isNdNeeded: Boolean = false,
+    val antiBandingMode: AntiBandingMode = AntiBandingMode.HZ_50,
     val evCompensation: Float = 0.0f, // -2.0 to +2.0 EV bias
     val isAeAfLocked: Boolean = false,
 

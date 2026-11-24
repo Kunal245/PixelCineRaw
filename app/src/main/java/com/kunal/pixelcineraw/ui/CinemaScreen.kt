@@ -64,11 +64,13 @@ fun CinemaScreen(
             1_000_000_000L / 500,
             1_000_000_000L / 240,
             1_000_000_000L / 120,
+            1_000_000_000L / 100, // 50Hz flicker-free sync
             1_000_000_000L / 96,
             1_000_000_000L / 60,
-            1_000_000_000L / 50,
+            1_000_000_000L / 50,  // 50Hz flicker-free sync
             1_000_000_000L / 48,
             1_000_000_000L / 30,
+            1_000_000_000L / 25,
             1_000_000_000L / 24
         )
     }
@@ -171,6 +173,9 @@ fun CinemaScreen(
                 onAdvancedSettingsClick = { showSettingsDialog = true },
                 onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() },
                 onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() },
+                onAntiBandingClick = { viewModel.cameraController.cycleAntiBandingMode() },
+                onAntiBandingModeSelected = { mode -> viewModel.cameraController.setAntiBandingMode(mode) },
+                onAutoShutterClick = { viewModel.cameraController.setAutoShutter() },
                 onResetDefaults = { viewModel.cameraController.resetToDefaults() }
             )
         }
@@ -305,7 +310,15 @@ fun CinemaScreen(
                             onItemSelected = { _, ns -> viewModel.cameraController.setShutterSpeed(ns) },
                             formatItem = { ColorMath.formatShutterSpeed(it) },
                             onClose = { activeDial = ActiveDial.NONE },
-                            presets = listOf("1/24" to 12, "1/48" to 10, "1/50" to 9, "1/60" to 8, "1/120" to 6, "1/1000" to 3),
+                            presets = listOf(
+                                "1/24" to 14,
+                                "1/48" to 11,
+                                "1/50" to 10,
+                                "1/60" to 9,
+                                "1/100" to 7,
+                                "1/120" to 6,
+                                "1/1000" to 3
+                            ),
                             headerActions = {
                                 TextButton(onClick = { viewModel.cameraController.toggleShutterUnit() }) {
                                     Text("SWITCH TO ANGLE", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -320,8 +333,10 @@ fun CinemaScreen(
                         currentIso = state.iso,
                         activeIsoRange = activeIsoRange,
                         isManualExposure = state.isManualExposure,
+                        isAutoIso = state.isAutoIso,
                         onIsoChanged = { iso -> viewModel.cameraController.setIso(iso) },
                         onToggleExposureMode = { viewModel.cameraController.toggleExposureMode() },
+                        onToggleAutoIso = { viewModel.cameraController.toggleAutoIso() },
                         onClose = { activeDial = ActiveDial.NONE }
                     )
                 }
