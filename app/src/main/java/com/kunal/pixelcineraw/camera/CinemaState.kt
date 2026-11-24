@@ -78,6 +78,7 @@ data class CinemaState(
 
     // Monitoring Overlays & Clean Viewfinder Mode
     val isCleanViewfinder: Boolean = false,
+    val isDebandEnabled: Boolean = false,
     val showHistogram: Boolean = true,
     val histogramData: HistogramData = HistogramData(),
     val showFocusPeaking: Boolean = false,

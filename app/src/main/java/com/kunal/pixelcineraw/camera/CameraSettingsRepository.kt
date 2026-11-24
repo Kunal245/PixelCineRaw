@@ -61,6 +61,7 @@ class CameraSettingsRepository(context: Context) {
         private const val KEY_IS_LUT_BAKE = "is_lut_bake_enabled"
         private const val KEY_ANAMORPHIC = "anamorphic_de_squeeze"
         private const val KEY_GYROFLOW_LOGGING = "is_gyroflow_logging_enabled"
+        private const val KEY_IS_DEBAND_ENABLED = "is_deband_enabled"
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -161,6 +162,7 @@ class CameraSettingsRepository(context: Context) {
             } ?: defaultState.anamorphicDeSqueeze
 
             val isGyroflow = prefs.getBoolean(KEY_GYROFLOW_LOGGING, defaultState.isGyroflowLoggingEnabled)
+            val isDeband = prefs.getBoolean(KEY_IS_DEBAND_ENABLED, defaultState.isDebandEnabled)
 
             defaultState.copy(
                 videoResolution = resolution,
@@ -200,7 +202,8 @@ class CameraSettingsRepository(context: Context) {
                 lutPreset = lutPreset,
                 isLutBakeEnabled = isLutBake,
                 anamorphicDeSqueeze = anamorphic,
-                isGyroflowLoggingEnabled = isGyroflow
+                isGyroflowLoggingEnabled = isGyroflow,
+                isDebandEnabled = isDeband
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load camera settings, using defaults", e)
@@ -254,6 +257,7 @@ class CameraSettingsRepository(context: Context) {
             putBoolean(KEY_IS_LUT_BAKE, state.isLutBakeEnabled)
             putString(KEY_ANAMORPHIC, state.anamorphicDeSqueeze.name)
             putBoolean(KEY_GYROFLOW_LOGGING, state.isGyroflowLoggingEnabled)
+            putBoolean(KEY_IS_DEBAND_ENABLED, state.isDebandEnabled)
             apply()
         }
     }

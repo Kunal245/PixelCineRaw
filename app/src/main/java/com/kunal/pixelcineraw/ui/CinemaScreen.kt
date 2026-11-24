@@ -130,7 +130,8 @@ fun CinemaScreen(
             onSelectBitrate = { viewModel.cameraController.setBitrateMbps(it) },
             onSelectProfile = { viewModel.cameraController.setColorProfile(it) },
             onSelectFormat = { viewModel.cameraController.setRecordingFormat(it) },
-            onSelectCodec = { viewModel.cameraController.setVideoCodec(it) }
+            onSelectCodec = { viewModel.cameraController.setVideoCodec(it) },
+            onToggleDeband = { viewModel.cameraController.setDeband(it) }
         )
     }
 }
@@ -888,11 +889,19 @@ private fun PortraitCinemaLayout(
                     )
                 }
 
-                // Camera Flip & Clean Viewfinder
+                // Camera Flip, Deband & Clean Viewfinder
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    ProSheetToggleCard(
+                        title = "DEBAND",
+                        sub = if (state.isDebandEnabled) "ON (SKY)" else "OFF (FAST)",
+                        isActive = state.isDebandEnabled,
+                        activeColor = Color(0xFF00E5FF),
+                        onClick = { viewModel.cameraController.toggleDeband() },
+                        modifier = Modifier.weight(1f)
+                    )
                     ProSheetToggleCard(
                         title = "CAMERA",
                         sub = if (state.isFrontCamera) "FRONT" else "REAR",
@@ -901,6 +910,12 @@ private fun PortraitCinemaLayout(
                         onClick = { viewModel.cameraController.flipCamera() },
                         modifier = Modifier.weight(1f)
                     )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     ProSheetToggleCard(
                         title = "CLEAN HUD",
                         sub = if (state.isCleanViewfinder) "ON" else "OFF",
@@ -1424,7 +1439,8 @@ fun CinemaSettingsDialog(
     onSelectBitrate: (Int) -> Unit,
     onSelectProfile: (ColorProfile) -> Unit,
     onSelectFormat: (RecordingFormat) -> Unit,
-    onSelectCodec: (VideoCodec) -> Unit
+    onSelectCodec: (VideoCodec) -> Unit,
+    onToggleDeband: (Boolean) -> Unit = {}
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1469,6 +1485,38 @@ fun CinemaSettingsDialog(
                                 selected = state.videoCodec == codec,
                                 onClick = { onSelectCodec(codec) },
                                 label = { Text(codec.label, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+
+                    // Sky Deband Anti-Banding Filter (OFF by default / ON optional)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("SKY DEBAND FILTER", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = if (state.isDebandEnabled) "ON • 2-tap gradient smoothing" else "OFF • Pure 60fps single-pass",
+                                color = if (state.isDebandEnabled) Color(0xFF00E5FF) else Color(0x66FFFFFF),
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = !state.isDebandEnabled,
+                                onClick = { onToggleDeband(false) },
+                                label = { Text("OFF (FAST)", fontSize = 11.sp) }
+                            )
+                            FilterChip(
+                                selected = state.isDebandEnabled,
+                                onClick = { onToggleDeband(true) },
+                                label = { Text("ON (SKY SMOOTHING)", fontSize = 11.sp) }
                             )
                         }
                     }

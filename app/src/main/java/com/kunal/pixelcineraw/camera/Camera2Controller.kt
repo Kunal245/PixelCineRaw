@@ -552,6 +552,7 @@ class Camera2Controller(
                 val activeRange = getActiveSensorIsoRange()
                 it.minSensorIso = activeRange.lower.toFloat()
                 it.maxSensorIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
+                it.setDeband(_state.value.isDebandEnabled)
                 hlgGlRenderer = it
             }
 
@@ -2372,6 +2373,16 @@ class Camera2Controller(
         _state.update { it.copy(anamorphicDeSqueeze = squeeze) }
         hlgGlRenderer?.setAnamorphicScale(squeeze.factor)
         persistState()
+    }
+
+    fun setDeband(enabled: Boolean) {
+        _state.update { it.copy(isDebandEnabled = enabled) }
+        hlgGlRenderer?.setDeband(enabled)
+        persistState()
+    }
+
+    fun toggleDeband() {
+        setDeband(!_state.value.isDebandEnabled)
     }
 
     fun setGyroflowLoggingEnabled(enabled: Boolean) {

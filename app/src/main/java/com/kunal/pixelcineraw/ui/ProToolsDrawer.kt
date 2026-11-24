@@ -199,6 +199,40 @@ fun ProToolsDrawer(
                 }
             }
 
+            // Sky Deband Anti-Banding Filter
+            ToolSectionCard(title = "SKY DEBAND FILTER", icon = Icons.Default.Tune) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Sky Gradient Smoothing",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                text = if (state.isDebandEnabled) "ON: 2-tap diagonal jittered deband" else "OFF: Zero overhead single-pass 60fps",
+                                color = if (state.isDebandEnabled) Color(0xFF00E5FF) else Color(0x88FFFFFF),
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Switch(
+                            checked = state.isDebandEnabled,
+                            onCheckedChange = { cameraController.setDeband(it) },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF00E5FF),
+                                checkedTrackColor = Color(0x4D00E5FF)
+                            )
+                        )
+                    }
+                }
+            }
+
             // 2. Arri-Style False Color
             ToolSectionCard(title = "FALSE COLOR (ARRI)", icon = Icons.Default.FilterVintage) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

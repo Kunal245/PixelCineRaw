@@ -102,6 +102,7 @@ uniform samplerExternalOES sTexture;
 uniform int uColorMode; // 0 = REC.709, 1 = PIXEL-LOG, 2 = HLG / BT.2020, 3 = HDR10+ PQ
 uniform int uFalseColor; // 0 = off, 1 = on
 uniform int uLutPreset;  // 0 = off, 1 = REC.709 PRO, 2 = KODAK 2383, 3 = TEAL & ORANGE
+uniform int uDeband;     // 0 = off (pure single-pass), 1 = on (2-tap diagonal jittered sky smoothing)
 uniform vec2 uTexelSize;
 uniform float uExposureTrim;
 varying vec2 vTextureCoord;
@@ -201,12 +202,46 @@ float ign(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-// Static triangular spatial dither: amplitude = 0.35 / 255.0 right before HLG/PQ curve
+// Fast 2-tap diagonal jittered deband filter (smooths sky bands on demand with only 2 extra samples)
+vec3 applyDebandFast(samplerExternalOES tex, vec2 uv, vec2 texelSize, vec3 center, vec2 fragCoord) {
+    if (texelSize.x <= 0.0 || texelSize.y <= 0.0) {
+        return center;
+    }
+    float rot = ign(fragCoord) * 6.2831853;
+    vec2 dir = vec2(cos(rot), sin(rot));
+    vec2 offset = dir * (6.0 * texelSize);
+
+    vec3 s1 = texture2D(tex, uv + offset).rgb;
+    vec3 s2 = texture2D(tex, uv - offset).rgb;
+
+    vec3 diff1 = abs(center - s1);
+    vec3 diff2 = abs(center - s2);
+    float maxDiff1 = max(max(diff1.r, diff1.g), diff1.b);
+    float maxDiff2 = max(max(diff2.r, diff2.g), diff2.b);
+
+    vec3 accum = center;
+    float totalWeight = 1.0;
+
+    if (maxDiff1 < 0.015) {
+        float w1 = 1.0 - (maxDiff1 / 0.015);
+        accum += s1 * w1;
+        totalWeight += w1;
+    }
+    if (maxDiff2 < 0.015) {
+        float w2 = 1.0 - (maxDiff2 / 0.015);
+        accum += s2 * w2;
+        totalWeight += w2;
+    }
+
+    return accum / totalWeight;
+}
+
+// Static triangular spatial dither: amplitude = 0.25 / 255.0 right before HLG/PQ curve
 vec3 applyTriangularIgnDither(vec3 color, vec2 fragCoord) {
     float n1 = ign(fragCoord);
     float n2 = ign(fragCoord + vec2(1.7, 3.1));
     float tri = (n1 + n2 - 1.0); // Triangular PDF centered at 0.0 in [-1.0, 1.0]
-    float dither = tri * (0.35 / 255.0);
+    float dither = tri * (0.25 / 255.0);
     return max(vec3(0.0), color + vec3(dither));
 }
 
@@ -227,6 +262,10 @@ vec3 applyHighlightShoulder(vec3 color) {
 void main() {
     vec4 src = texture2D(sTexture, vTextureCoord);
     vec3 color = src.rgb;
+
+    if (uDeband == 1) {
+        color = applyDebandFast(sTexture, vTextureCoord, uTexelSize, color, gl_FragCoord.xy);
+    }
 
     // 3D LUT Simulation pass
     if (uLutPreset == 1) {
@@ -301,6 +340,7 @@ void main() {
     private var uColorModeLoc: Int = -1
     private var uFalseColorLoc: Int = -1
     private var uLutPresetLoc: Int = -1
+    private var uDebandLoc: Int = -1
     private var uExposureTrimLoc: Int = -1
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
@@ -388,6 +428,14 @@ void main() {
 
     fun setAnamorphicScale(scale: Float) {
         anamorphicScale = scale
+    }
+
+    @Volatile
+    var isDebandEnabled: Boolean = false
+        private set
+
+    fun setDeband(enabled: Boolean) {
+        isDebandEnabled = enabled
     }
 
     val timestampIsoMap = TimestampIsoMap()
@@ -776,6 +824,7 @@ void main() {
         uTexelSizeLoc = GLES20.glGetUniformLocation(programId, "uTexelSize")
         uFalseColorLoc = GLES20.glGetUniformLocation(programId, "uFalseColor")
         uLutPresetLoc = GLES20.glGetUniformLocation(programId, "uLutPreset")
+        uDebandLoc = GLES20.glGetUniformLocation(programId, "uDeband")
         uExposureTrimLoc = GLES20.glGetUniformLocation(programId, "uExposureTrim")
         checkGlError("initShaders")
     }
@@ -1122,6 +1171,9 @@ void main() {
         }
         if (uLutPresetLoc != -1) {
             GLES20.glUniform1i(uLutPresetLoc, lutPreset)
+        }
+        if (uDebandLoc != -1) {
+            GLES20.glUniform1i(uDebandLoc, if (isDebandEnabled) 1 else 0)
         }
         if (uTexelSizeLoc != -1) {
             val tw = maxOf(1, streamWidth).toFloat()
