@@ -324,7 +324,7 @@ fun TopStatusBar(
  * Format Popover Menu Content with dedicated segmented chips for Resolution, FPS, and Aspect Ratio.
  */
 @Composable
-private fun FormatPopoverContent(
+internal fun FormatPopoverContent(
     state: CinemaState,
     onResolutionSelected: (CustomResolution) -> Unit,
     onFpsSelected: (Int) -> Unit,
@@ -465,7 +465,7 @@ private fun FormatPopoverContent(
  * Codec Popover Menu Content with dedicated chips for Compression Mode and Bitrate.
  */
 @Composable
-private fun CodecPopoverContent(
+internal fun CodecPopoverContent(
     state: CinemaState,
     onIntraModeSelected: (IntraFrameMode) -> Unit,
     onBitrateSelected: (Int) -> Unit
