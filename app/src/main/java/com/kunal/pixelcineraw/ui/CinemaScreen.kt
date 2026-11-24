@@ -3,6 +3,7 @@ package com.kunal.pixelcineraw.ui
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -47,6 +48,7 @@ fun CinemaScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
     var activeDial by remember { mutableStateOf(ActiveDial.NONE) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
