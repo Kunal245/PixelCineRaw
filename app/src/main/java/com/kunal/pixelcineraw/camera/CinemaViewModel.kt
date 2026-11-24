@@ -130,6 +130,10 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                         recordWavSidecar = state.recordWavSidecar
                     )
 
+                    cameraController.onFirstEncoderFrame = { startNs ->
+                        hevcRecorder.onFirstVideoFrame(startNs)
+                    }
+
                     val fileName = hevcRecorder.start()
 
                     cameraController.startRecordingSession(surface, fileName) {
@@ -159,6 +163,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         try {
             when (format) {
                 RecordingFormat.VIDEO_PRO -> {
+                    cameraController.onFirstEncoderFrame = null
                     cameraController.stopRecordingSession {
                         Log.i(TAG, "Camera2 session restored to clean preview mode")
                     }

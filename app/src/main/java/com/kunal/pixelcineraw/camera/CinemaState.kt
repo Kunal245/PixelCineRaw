@@ -58,7 +58,7 @@ data class CinemaState(
     val ispMode: IspMode = IspMode.CLEAN,
     val intraFrameMode: IntraFrameMode = IntraFrameMode.GOP_LONG,
     val encoderChromaBadge: String = "10B 4:2:0 GOP",
-    val recordWavSidecar: Boolean = true,
+    val recordWavSidecar: Boolean = false,
     val colorProfile: ColorProfile = ColorProfile.FLAT_LOG,
     val hdrPipelineStatus: HdrPipelineStatus = HdrPipelineStatus.NONE,
     val recordingFormat: RecordingFormat = RecordingFormat.VIDEO_PRO,

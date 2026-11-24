@@ -265,9 +265,12 @@ void main() {
     private val queryWidth = IntArray(1)
     private val queryHeight = IntArray(1)
 
-    // Strictly monotonic MP4 presentation timestamps for video encoder
-    @Volatile private var firstRecordedFrameTimeNs = -1L
-    @Volatile private var lastRecordedFramePtsNs = -1L
+    // Quantized MP4 presentation timestamps & frame pacing for video encoder
+    @Volatile var targetFps: Int = 60
+    @Volatile private var recordingStartNs: Long = -1L
+    @Volatile private var recordedFrameIndex: Long = 0L
+    @Volatile private var lastInputFrameTimeNs: Long = -1L
+    var onFirstEncoderFrame: ((Long) -> Unit)? = null
 
     @Volatile
     var isReady: Boolean = false
@@ -737,7 +740,8 @@ void main() {
     /**
      * Attaches or detaches the HEVC MediaCodec recording input surface safely.
      */
-    fun setEncoderSurface(surface: Surface?, width: Int, height: Int) {
+    fun setEncoderSurface(surface: Surface?, width: Int, height: Int, fps: Int = 60) {
+        this.targetFps = fps
         val handler = glHandler ?: return
         handler.post {
             try {
@@ -748,9 +752,10 @@ void main() {
                     val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         encoderEglSurface = eglSurf
-                        firstRecordedFrameTimeNs = -1L
-                        lastRecordedFramePtsNs = -1L
-                        Log.i(TAG, "Encoder EGL surface attached (${encoderWidth}x${encoderHeight})")
+                        recordingStartNs = -1L
+                        recordedFrameIndex = 0L
+                        lastInputFrameTimeNs = -1L
+                        Log.i(TAG, "Encoder EGL surface attached (${encoderWidth}x${encoderHeight}, ${targetFps}fps)")
                     }
                 }
             } catch (e: Throwable) {
@@ -807,7 +812,6 @@ void main() {
             // 2. Update hardware buffer onto GL_TEXTURE_EXTERNAL_OES texture
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
-            val timestampNs = st.timestamp
 
             if (!hasLoggedFirstFrame) {
                 hasLoggedFirstFrame = true
@@ -860,19 +864,28 @@ void main() {
                     )
                     checkGlError("drawQuad encoder")
 
-                    // Monotonic, jitter-free presentation timestamp for MP4 frame pacing
-                    if (firstRecordedFrameTimeNs < 0L) {
-                        firstRecordedFrameTimeNs = timestampNs
-                        lastRecordedFramePtsNs = 0L
-                    }
-                    val rawDeltaNs = timestampNs - firstRecordedFrameTimeNs
-                    val ptsNs = if (rawDeltaNs <= lastRecordedFramePtsNs) {
-                        lastRecordedFramePtsNs + 1_000_000L // Clamp minimum frame delta to at least 1ms
-                    } else {
-                        rawDeltaNs
-                    }
-                    lastRecordedFramePtsNs = ptsNs
+                    // Exact quantized mathematical frame cadence (ptsNs = frameIndex * (1_000_000_000L / targetFps))
+                    val nowNs = System.nanoTime()
+                    val frameDurationNs = 1_000_000_000L / maxOf(1, targetFps)
 
+                    if (recordingStartNs < 0L) {
+                        recordingStartNs = nowNs
+                        recordedFrameIndex = 0L
+                        lastInputFrameTimeNs = nowNs
+                        onFirstEncoderFrame?.invoke(recordingStartNs)
+                    } else {
+                        val deltaNs = nowNs - lastInputFrameTimeNs
+                        lastInputFrameTimeNs = nowNs
+                        // Advance frameIndex by 2 if genuine sensor drop > 1.7 * frameDurationNs occurred
+                        if (deltaNs > 1.7 * frameDurationNs) {
+                            val droppedSteps = Math.round(deltaNs.toDouble() / frameDurationNs.toDouble()).toLong().coerceAtLeast(2L)
+                            recordedFrameIndex += droppedSteps
+                        } else {
+                            recordedFrameIndex += 1L
+                        }
+                    }
+
+                    val ptsNs = recordedFrameIndex * frameDurationNs
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, ptsNs)
                     EGL14.eglSwapBuffers(eglDisplay, eSurf)
                 }
@@ -962,8 +975,9 @@ void main() {
             }
             encoderEglSurface = null
         }
-        firstRecordedFrameTimeNs = -1L
-        lastRecordedFramePtsNs = -1L
+        recordingStartNs = -1L
+        recordedFrameIndex = 0L
+        lastInputFrameTimeNs = -1L
     }
 
     fun release() {

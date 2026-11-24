@@ -17,7 +17,9 @@ import com.kunal.pixelcineraw.camera.ColorProfile
 import com.kunal.pixelcineraw.camera.CustomResolution
 import com.kunal.pixelcineraw.camera.IntraFrameMode
 import com.kunal.pixelcineraw.camera.VideoCodec
+import java.io.BufferedOutputStream
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
@@ -106,7 +108,7 @@ class HevcLogRecorder(
 
     private var isHlgRecording = false
     private var activeColorProfile: ColorProfile = ColorProfile.REC709
-    private var shouldRecordWavSidecar: Boolean = true
+    private var shouldRecordWavSidecar: Boolean = false
 
     private val isRecording = AtomicBoolean(false)
 
@@ -116,7 +118,24 @@ class HevcLogRecorder(
     private var wavPfd: ParcelFileDescriptor? = null
     private var wavUri: Uri? = null
     private var wavFileOutputStream: FileOutputStream? = null
+    private var bufferedWavOutputStream: BufferedOutputStream? = null
+    private var wavIoThread: HandlerThread? = null
+    private var wavIoHandler: Handler? = null
     private var wavBytesWritten: Long = 0L
+
+    @Volatile private var recordingStartNs: Long = -1L
+    @Volatile private var hasReceivedFirstVideoFrame: Boolean = false
+    private var targetFps: Int = 60
+    private var videoFrameCount: Long = 0L
+    private var videoMuxedFrameCount: Long = 0L
+
+    fun onFirstVideoFrame(startNs: Long) {
+        if (!hasReceivedFirstVideoFrame) {
+            recordingStartNs = startNs
+            hasReceivedFirstVideoFrame = true
+            Log.i(TAG, "First video frame recorded at startNs=$startNs")
+        }
+    }
 
     var onMetricsUpdate: ((seconds: Long, bytes: Long, droppedFrames: Int) -> Unit)? = null
 
@@ -142,7 +161,7 @@ class HevcLogRecorder(
         colorProfile: ColorProfile,
         codec: VideoCodec = VideoCodec.HEVC_10BIT,
         intraFrameMode: IntraFrameMode = IntraFrameMode.GOP_LONG,
-        recordWavSidecar: Boolean = true
+        recordWavSidecar: Boolean = false
     ): Surface {
         ensureEncoderThread()
         val handler = encoderHandler ?: throw IllegalStateException("Encoder thread handler not ready")
@@ -163,6 +182,11 @@ class HevcLogRecorder(
         }
         audioQueue.clear()
         availableAudioInputBuffers.clear()
+        this.targetFps = fps
+        this.recordingStartNs = -1L
+        this.hasReceivedFirstVideoFrame = false
+        this.videoFrameCount = 0L
+        this.videoMuxedFrameCount = 0L
 
         val width = maxOf(resolution.width, resolution.height)
         val height = minOf(resolution.width, resolution.height)
@@ -265,13 +289,20 @@ class HevcLogRecorder(
 
                     val encodedData = codec.getOutputBuffer(index)
                     if (info.size > 0 && encodedData != null) {
-                        if (firstVideoPtsUs < 0) {
+                        val targetFrameDurationUs = 1_000_000L / maxOf(1, targetFps)
+                        val frameIndex = if (firstVideoPtsUs < 0) {
                             firstVideoPtsUs = info.presentationTimeUs
+                            0L
+                        } else {
+                            val rawStep = (info.presentationTimeUs - firstVideoPtsUs).toDouble() / targetFrameDurationUs.toDouble()
+                            Math.round(rawStep).toLong().coerceAtLeast(videoMuxedFrameCount)
                         }
-                        val normalizedPts = (info.presentationTimeUs - firstVideoPtsUs).coerceAtLeast(0L)
-                        val monotonicPts = if (normalizedPts <= lastVideoPtsUs) lastVideoPtsUs + 1000L else normalizedPts
+                        val quantizedPtsUs = frameIndex * targetFrameDurationUs
+                        val monotonicPts = if (quantizedPtsUs <= lastVideoPtsUs) lastVideoPtsUs + targetFrameDurationUs else quantizedPtsUs
+                        val deltaUs = if (lastVideoPtsUs >= 0L) monotonicPts - lastVideoPtsUs else targetFrameDurationUs
                         lastVideoPtsUs = monotonicPts
                         info.presentationTimeUs = monotonicPts
+                        videoMuxedFrameCount = frameIndex + 1L
 
                         encodedData.position(info.offset)
                         encodedData.limit(info.offset + info.size)
@@ -289,6 +320,10 @@ class HevcLogRecorder(
                                 }
                                 pendingVideoSamples.add(PendingSample(isAudio = false, clone, infoClone))
                             }
+                        }
+
+                        if (videoFrameCount++ % 60 == 0L) {
+                            Log.d(TAG, "Muxer video frame #$videoFrameCount: PTS=${monotonicPts / 1000}ms, delta=${deltaUs / 1000f}ms (target=${1000f / targetFps}ms)")
                         }
 
                         onMetricsUpdate?.invoke(lastVideoPtsUs / 1_000_000L, totalBytesWritten, 0)
@@ -337,7 +372,8 @@ class HevcLogRecorder(
                         val inputBuffer = codec.getInputBuffer(index)
                         inputBuffer?.clear()
                         inputBuffer?.put(chunk)
-                        val ptsUs = (totalAudioBytesFed * 1_000_000L) / (AudioEngine.SAMPLE_RATE * 4L)
+                        val totalSamplesWritten = totalAudioBytesFed / 4L
+                        val ptsUs = (totalSamplesWritten * 1_000_000L) / 48_000L
                         totalAudioBytesFed += chunk.size
                         codec.queueInputBuffer(index, 0, chunk.size, ptsUs, 0)
                     } else {
@@ -424,10 +460,11 @@ class HevcLogRecorder(
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
+            setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = Realtime priority, prevents Tensor G4 from downclocking
+            setInteger(MediaFormat.KEY_OPERATING_RATE, fps) // Forces operating rate (e.g. 60 for 60fps)
             if (intraFrameMode == IntraFrameMode.ALL_INTRA) {
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
             }
-            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
 
             if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC) {
                 setInteger(MediaFormat.KEY_PROFILE, profile)
@@ -505,9 +542,16 @@ class HevcLogRecorder(
                     val wpfd = resolver.openFileDescriptor(wUri, "rw")
                     wavPfd = wpfd
                     if (wpfd != null) {
-                        wavFileOutputStream = FileOutputStream(wpfd.fileDescriptor)
+                        wavIoThread = HandlerThread("PixelCineWavIo", Process.THREAD_PRIORITY_BACKGROUND).apply {
+                            start()
+                            wavIoHandler = Handler(looper)
+                        }
+                        val fos = FileOutputStream(wpfd.fileDescriptor)
+                        wavFileOutputStream = fos
+                        bufferedWavOutputStream = BufferedOutputStream(fos, 256 * 1024)
                         wavBytesWritten = 0L
-                        writeWavHeader(wavFileOutputStream!!, AudioEngine.SAMPLE_RATE, 2, 16)
+                        writeWavHeader(bufferedWavOutputStream!!, AudioEngine.SAMPLE_RATE, 2, 16)
+                        bufferedWavOutputStream?.flush()
                     }
                 }
             } catch (e: Exception) {
@@ -522,14 +566,16 @@ class HevcLogRecorder(
 
         // Connect audio engine callback to feed PCM data to audio encoder and WAV sidecar
         audioEngine.onPcmDataAvailable = { buffer, bytesRead, _ ->
-            if (isRecording.get()) {
+            if (isRecording.get() && hasReceivedFirstVideoFrame) {
                 val chunk = buffer.copyOf(bytesRead)
-                wavFileOutputStream?.let { wavOut ->
-                    try {
-                        wavOut.write(chunk)
-                        wavBytesWritten += bytesRead
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error writing PCM to WAV sidecar", e)
+                if (shouldRecordWavSidecar) {
+                    wavIoHandler?.post {
+                        try {
+                            bufferedWavOutputStream?.write(chunk)
+                            wavBytesWritten += chunk.size
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error writing PCM to WAV sidecar", e)
+                        }
                     }
                 }
                 val handler = encoderHandler
@@ -538,13 +584,15 @@ class HevcLogRecorder(
                         if (isRecording.get()) {
                             val encoder = audioEncoder
                             val freeIndex = availableAudioInputBuffers.poll()
+                            val totalSamplesWritten = totalAudioBytesFed / 4L
+                            val ptsUs = (totalSamplesWritten * 1_000_000L) / 48_000L
+                            totalAudioBytesFed += chunk.size
+
                             if (encoder != null && freeIndex != null) {
                                 try {
                                     val inputBuffer = encoder.getInputBuffer(freeIndex)
                                     inputBuffer?.clear()
                                     inputBuffer?.put(chunk)
-                                    val ptsUs = (totalAudioBytesFed * 1_000_000L) / (AudioEngine.SAMPLE_RATE * 4L)
-                                    totalAudioBytesFed += chunk.size
                                     encoder.queueInputBuffer(freeIndex, 0, chunk.size, ptsUs, 0)
                                 } catch (e: Exception) {
                                     Log.w(TAG, "Error queuing audio buffer asynchronously", e)
@@ -561,7 +609,7 @@ class HevcLogRecorder(
         return fileName
     }
 
-    private fun writeWavHeader(out: FileOutputStream, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+    private fun writeWavHeader(out: OutputStream, sampleRate: Int, channels: Int, bitsPerSample: Int) {
         val header = ByteArray(44)
         val byteRate = sampleRate * channels * bitsPerSample / 8
         val blockAlign = channels * bitsPerSample / 8
@@ -681,39 +729,64 @@ class HevcLogRecorder(
         fileDescriptor = null
 
         // Finalize WAV sidecar file header with exact length
-        try {
-            wavFileOutputStream?.flush()
-            val wpfd = wavPfd
-            if (wpfd != null) {
-                val channel = FileOutputStream(wpfd.fileDescriptor).channel
-                val buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
-                buf.putInt((wavBytesWritten + 36).toInt())
-                buf.flip()
-                channel.position(4)
-                channel.write(buf)
-
-                buf.clear()
-                buf.putInt(wavBytesWritten.toInt())
-                buf.flip()
-                channel.position(40)
-                channel.write(buf)
-                channel.close()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Error finalizing WAV sidecar", e)
-        } finally {
-            try { wavFileOutputStream?.close() } catch (_: Exception) {}
-            wavFileOutputStream = null
-            try { wavPfd?.close() } catch (_: Exception) {}
-            wavPfd = null
-
-            wavUri?.let { uri ->
-                val vals = ContentValues().apply {
-                    put(MediaStore.Audio.Media.IS_PENDING, 0)
+        if (shouldRecordWavSidecar) {
+            try {
+                val latch = java.util.concurrent.CountDownLatch(1)
+                wavIoHandler?.post {
+                    try {
+                        bufferedWavOutputStream?.flush()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error flushing buffered WAV", e)
+                    } finally {
+                        latch.countDown()
+                    }
                 }
-                context.contentResolver.update(uri, vals, null, null)
+                latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {}
+
+            try {
+                bufferedWavOutputStream?.flush()
+                bufferedWavOutputStream?.close()
+                bufferedWavOutputStream = null
+            } catch (_: Exception) {}
+
+            try {
+                val wpfd = wavPfd
+                if (wpfd != null) {
+                    val channel = FileOutputStream(wpfd.fileDescriptor).channel
+                    val buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+                    buf.putInt((wavBytesWritten + 36).toInt())
+                    buf.flip()
+                    channel.position(4)
+                    channel.write(buf)
+
+                    buf.clear()
+                    buf.putInt(wavBytesWritten.toInt())
+                    buf.flip()
+                    channel.position(40)
+                    channel.write(buf)
+                    channel.close()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error finalizing WAV sidecar", e)
+            } finally {
+                try { wavFileOutputStream?.close() } catch (_: Exception) {}
+                wavFileOutputStream = null
+                try { wavPfd?.close() } catch (_: Exception) {}
+                wavPfd = null
+
+                wavIoThread?.quitSafely()
+                wavIoThread = null
+                wavIoHandler = null
+
+                wavUri?.let { uri ->
+                    val vals = ContentValues().apply {
+                        put(MediaStore.Audio.Media.IS_PENDING, 0)
+                    }
+                    context.contentResolver.update(uri, vals, null, null)
+                }
+                wavUri = null
             }
-            wavUri = null
         }
 
         // Mark MP4 file as complete in MediaStore (remove IS_PENDING)

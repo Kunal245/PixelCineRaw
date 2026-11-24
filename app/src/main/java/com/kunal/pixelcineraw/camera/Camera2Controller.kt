@@ -85,6 +85,11 @@ class Camera2Controller(
     // HLG Fallback & OpenGL ES BT.2020 Render Pipeline (Lazily instantiated for HLG10)
     private var hardwareHlgFallback = false
     private var hlgGlRenderer: HlgGlRenderer? = null
+    var onFirstEncoderFrame: ((Long) -> Unit)? = null
+        set(value) {
+            field = value
+            hlgGlRenderer?.onFirstEncoderFrame = value
+        }
 
     // Settings repository
     val settingsRepo = CameraSettingsRepository(context)
@@ -528,7 +533,10 @@ class Camera2Controller(
 
             val streamSize = optimalStreamSize
             val vRes = _state.value.videoResolution
-            val renderer = hlgGlRenderer ?: HlgGlRenderer().also { hlgGlRenderer = it }
+            val renderer = hlgGlRenderer ?: HlgGlRenderer().also {
+                it.onFirstEncoderFrame = onFirstEncoderFrame
+                hlgGlRenderer = it
+            }
 
             if (!renderer.isReady) {
                 renderer.initialize(
@@ -550,7 +558,7 @@ class Camera2Controller(
             renderer.setColorMode(_state.value.colorProfile)
 
             if (videoRecordingSurface != null) {
-                renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height)
+                renderer.setEncoderSurface(videoRecordingSurface, vRes.width, vRes.height, _state.value.targetFps)
             } else {
                 renderer.setEncoderSurface(null, 0, 0)
             }
@@ -627,7 +635,7 @@ class Camera2Controller(
             )
         }
         val vRes = _state.value.videoResolution
-        hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height)
+        hlgGlRenderer?.setEncoderSurface(surface, vRes.width, vRes.height, _state.value.targetFps)
 
         if (_state.value.isGyroflowLoggingEnabled) {
             try {
