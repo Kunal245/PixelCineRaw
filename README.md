@@ -6,7 +6,7 @@
 *Built with Kotlin, Jetpack Compose, Camera2 API, and OpenGL ES 3.0.*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v1.3.0](https://img.shields.io/badge/Release-v1.3.0%20(Stable)-brightgreen.svg)](https://github.com/kunalnimje/PixelCineRaw/releases/tag/v1.3.0)
+[![Release: v1.4.0](https://img.shields.io/badge/Release-v1.4.0%20(Stable)-brightgreen.svg)](https://github.com/kunalnimje/PixelCineRaw/releases/tag/v1.4.0)
 [![Platform](https://img.shields.io/badge/Platform-Android%2014+-green.svg)](https://developer.android.com)
 [![Hardware Tuned](https://img.shields.io/badge/Tuned%20For-Google%20Pixel%209a%20(Tensor%20G4)-orange.svg)](https://store.google.com)
 [![HDR Pipeline](https://img.shields.io/badge/Color-HLG10%20%7C%20HDR10%2B-purple.svg)]()
@@ -20,7 +20,7 @@
 
 **PixelCineRaw** transforms your Android smartphone into a professional cinema camera inspired by Blackmagic Camera and Final Cut Camera. Designed from the metal up for filmmakers, cinematographers, and colorists, it bypasses aggressive consumer computational processing to deliver pristine, organic, filmic imagery.
 
-Unlike stock camera apps that apply heavy spatial noise reduction, aggressive edge sharpening, and crushing 8-bit dynamic range compression, PixelCineRaw gives you **100% manual control over the sensor**, capturing up to **10-bit ALL-Intra 280 Mbps HEVC** footage with wide color gamut **HLG10 / HDR10+ (BT.2020)** color spaces.
+Unlike stock camera apps that apply heavy spatial noise reduction, aggressive edge sharpening, and crushing 8-bit dynamic range compression, PixelCineRaw gives you **100% manual control over the sensor**, capturing up to **10-bit ALL-Intra 280 Mbps HEVC** footage with wide color gamut **HLG10 / HDR10+ (BT.2020)** color spaces and a **1:1 WYSIWYG calibrated OLED viewfinder**.
 
 ---
 
@@ -35,7 +35,11 @@ Unlike stock camera apps that apply heavy spatial noise reduction, aggressive ed
   - `LOCK PORTRAIT`: Locks to upright orientation for vertical cinema workflows.
   - **Recording Hold:** Automatically locks orientation in its current state when recording starts to prevent mid-take aspect ratio disruption.
 
-### 🎞️ Stutter-Free 10-Bit HDR Video Pipeline
+### 🎞️ True 1:1 WYSIWYG Viewfinder & Stutter-Free 10-Bit HDR Pipeline
+- **1:1 WYSIWYG Live SDR & HDR Viewfinder:** Eliminates double-gamma washout across `REC.709` and `PIXEL-LOG` by allocating standard default EGL attributes (`EGL_NONE`) on `eglConfig8Bit` with `SurfaceControl.setDataSpace(DATASPACE_SRGB)` at `1.0x` standard brightness. The live preview matches exported SDR/Log MP4 files **1:1 with deep punchy blacks, rich contrast, and zero fading** in both Portrait and Landscape.
+- **True Live 10-Bit HDR OLED Viewfinder (Actua Display):** Real-time hardware-accelerated 10-bit HDR viewfinder rendering using `EGL_GL_COLORSPACE_BT2020_HLG_EXT` (`0x3540`) for `HLG10` and `EGL_GL_COLORSPACE_BT2020_PQ_EXT` (`0x3340`) for `HDR10+` over a native 10-bit `RGBA_1010102` EGL surface. Directly drives Android 14+ `SurfaceControl.Transaction.setExtendedRangeBrightness(4.0f, 4.0f)` with `ActivityInfo.COLOR_MODE_HDR` to unleash peak HDR OLED display brightness for highlight assessment without tone-mapping clipping.
+- **Orientation Continuity:** Full `onConfigurationChanged` synchronization across `AutoFitSurfaceView`, `MainActivity`, and `HlgGlRenderer` preserves exact `SurfaceControl` data spaces and brightness levels during any rotation.
+- **Default Clean Monitoring & Auto HDR Bypass:** 3D LUT simulation defaults to **OFF** on fresh startup, and automatically bypasses when `HLG10` or `HDR10+` is active so SDR LUTs never distort wide-gamut HDR colorimetry.
 - **Lossless 1:1 Direct Single-Pass HDR Shader:** Zero-blur direct pixel sampling with sub-LSB spatial dithering and smooth cubic highlight shoulder roll-off above 0.82 luminance for sharp, natural 10-bit `HLG10` & `HDR10+` (`BT.2020`) footage at up to 180–280 Mbps with <2ms GPU frame times.
 - **Toggleable Sky DEBAND Filter (`OFF` / `ON`):** Lightweight toggle accessible in both Pro Tools and Codec settings. `OFF` (default) ensures pure zero-overhead single-pass rendering at 60fps, while `ON` executes a 2-tap diagonal jittered debanding lookup with edge-preserving thresholding (`< 0.015`) to eliminate banding across smooth skies on demand.
 - **Zero-Micro-Stutter 10-Bit HEVC Pipeline:** Mathematical quantized monotonic MP4 frame cadence ($16.666\,\text{ms}$ at 60fps, $33.333\,\text{ms}$ at 30fps, $41.666\,\text{ms}$ at 24fps) eliminates erratic durations in `MediaMuxer` and Google Photos.
@@ -43,7 +47,6 @@ Unlike stock camera apps that apply heavy spatial noise reduction, aggressive ed
 - **HLG10 & HDR10+ (BT.2020):** Wide Dynamic Range with 10-bit Rec.2020 colorimetry (`COLOR_STANDARD_BT2020` + `COLOR_TRANSFER_HLG` or `COLOR_TRANSFER_ST2084` PQ) with live 120Hz OLED preview and embedded MP4 metadata.
 - **10-bit ALL-Intra (ALL-I) & Long-GOP:** Frame-by-frame intra coding up to **280 Mbps** for zero temporal compression artifacts, alongside optimized 120 Mbps 10-bit Long-GOP for extended documentary recording.
 - **Universal Zero-Stretch Viewfinder:** 1:1 true-to-life square pixels rendered on both the 120Hz live OLED viewfinder and exported MP4 files across all aspect ratios (`16:9`, `4:3 Open Gate`, `2.39:1 CinemaScope`, `3:4`, `9:16`).
-- **True Live 10-Bit HDR OLED Viewfinder (Actua Display):** Real-time hardware-accelerated 10-bit HDR viewfinder rendering using `EGL_GL_COLORSPACE_BT2020_HLG_EXT` (`0x3540`) for `HLG10` and `EGL_GL_COLORSPACE_BT2020_PQ_EXT` (`0x3340`) for `HDR10+` over a native 10-bit RGBA_1010102 EGL surface. Directly drives Android 14+ `SurfaceControl.Transaction.setExtendedRangeBrightness(4.0f, 4.0f)` with `ActivityInfo.COLOR_MODE_HDR` to unleash peak HDR OLED display brightness for highlight assessment without tone-mapping clipping.
 - **Anamorphic Lens De-Squeeze:** Real-time GL shader preview de-squeezing for 1.33x, 1.55x, and 2.0x anamorphic glass.
 - **Pixel-Log & Rec.709:** Flat logarithmic curve option for post-production grading alongside broadcast-standard Rec.709.
 - **3D LUT Engine:** Live OpenGL ES 3D LUT preview with `.cube` file import and optional "Bake LUT into MP4" toggle.

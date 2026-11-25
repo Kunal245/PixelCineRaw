@@ -87,8 +87,8 @@ data class CinemaState(
     val peakingSensitivity: Float = 0.6f, // 0.1 to 1.0
     val showZebras: Boolean = false,
     val zebraIreThreshold: Int = 95, // 70 to 100%
-    val showLutPreview: Boolean = true,
-    val lutPreset: LutPreset = LutPreset.REC709_NATURAL,
+    val showLutPreview: Boolean = false,
+    val lutPreset: LutPreset = LutPreset.OFF,
     val isLutBakeEnabled: Boolean = false,
     val customLutFileName: String? = null,
     val showFalseColor: Boolean = false,

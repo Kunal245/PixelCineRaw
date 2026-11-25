@@ -94,6 +94,11 @@ class AutoFitSurfaceView @JvmOverloads constructor(
         appliedProfile = null
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
+        super.onConfigurationChanged(newConfig)
+        post { applyColorProfileSurfaceState(activeProfile, force = true) }
+    }
+
     /**
      * Applies color profile surface state across all modes and orientations:
      * - HLG10: DATASPACE_BT2020_HLG + 4.0x ExtendedRangeBrightness + ActivityInfo.COLOR_MODE_HDR

@@ -157,6 +157,9 @@ class MainActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         hideSystemUI()
+        val isHdr = cinemaViewModel.state.value.colorProfile == ColorProfile.HLG_10BIT ||
+                cinemaViewModel.state.value.colorProfile == ColorProfile.HDR10_PLUS
+        window.colorMode = if (isHdr) ActivityInfo.COLOR_MODE_HDR else ActivityInfo.COLOR_MODE_DEFAULT
         val isPort = newConfig.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         val rotation = if (isPort) {
             android.view.Surface.ROTATION_0

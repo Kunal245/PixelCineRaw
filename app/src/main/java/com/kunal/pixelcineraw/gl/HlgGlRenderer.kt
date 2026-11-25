@@ -67,7 +67,6 @@ class HlgGlRenderer {
         private const val EGL_GL_COLORSPACE_KHR = 0x309D
         private const val EGL_GL_COLORSPACE_BT2020_HLG_EXT = 0x3540
         private const val EGL_GL_COLORSPACE_BT2020_PQ_EXT = 0x3340
-        private const val EGL_GL_COLORSPACE_SRGB_KHR = 0x3089
 
         // Full-screen Quad geometry (clip-space bounds)
         private val VERTICES = floatArrayOf(
@@ -425,7 +424,7 @@ void main() {
         private set
 
     @Volatile
-    var currentLutPreset: Int = 1 // 0 = OFF, 1 = REC709_NATURAL, 2 = KODAK_2383, 3 = CINEMA_TEAL
+    var currentLutPreset: Int = 0 // 0 = OFF, 1 = REC709_NATURAL, 2 = KODAK_2383, 3 = CINEMA_TEAL
         private set
 
     @Volatile
@@ -742,9 +741,9 @@ void main() {
         val handler = glHandler ?: return
         handler.post {
             val targetColorspace = when (profile) {
-                ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else -1
-                ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else -1
-                else -> if (supportsColorspace) EGL_GL_COLORSPACE_SRGB_KHR else -1
+                ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else 0
+                ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else 0
+                else -> 0 // Standard default EGL attributes (EGL_NONE) for 1:1 WYSIWYG SDR (REC.709 & PIXEL-LOG)
             }
 
             // Always recreate preview window surface when colorspace target differs from current EGL surface
@@ -988,7 +987,7 @@ void main() {
         val handler = glHandler ?: return
         handler.post {
             try {
-                if (currentSurface == surface && previewEglSurface != null && previewEglSurface != EGL14.EGL_NO_SURFACE) {
+                if (currentSurface == surface && previewEglSurface != null && previewEglSurface != EGL14.EGL_NO_SURFACE && lastPreviewProfile == activeColorProfile) {
                     return@post
                 }
                 destroyPreviewSurface()
@@ -1046,14 +1045,14 @@ void main() {
 
         val isHdr = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
         val targetColorspace = when (profile) {
-            ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else -1
-            ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else -1
-            else -> if (supportsColorspace) EGL_GL_COLORSPACE_SRGB_KHR else -1
+            ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else 0
+            ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else 0
+            else -> 0 // Standard default EGL attributes (EGL_NONE) for 1:1 WYSIWYG SDR (REC.709 & PIXEL-LOG)
         }
 
         val targetConfig = if (isHdr) (eglConfig10Bit ?: config) else (eglConfig8Bit ?: config)
 
-        if (targetColorspace != -1) {
+        if (targetColorspace != 0) {
             val attribs = intArrayOf(
                 EGL_GL_COLORSPACE_KHR, targetColorspace,
                 EGL14.EGL_NONE
@@ -1064,26 +1063,26 @@ void main() {
                     currentEglColorspace = targetColorspace
                     isCurrentPreviewHdr = isHdr
                     lastPreviewProfile = profile
-                    Log.i(TAG, "Created EGL window surface (colorspace=0x${Integer.toHexString(targetColorspace)}, HDR=$isHdr, config=${if (targetConfig == eglConfig10Bit) "10-bit" else "8-bit"})")
+                    Log.i(TAG, "Created HDR EGL window surface (colorspace=0x${Integer.toHexString(targetColorspace)}, HDR=$isHdr, config=${if (targetConfig == eglConfig10Bit) "10-bit" else "8-bit"})")
                     return eglSurf
                 }
                 val err = EGL14.eglGetError()
                 Log.w(TAG, "eglCreateWindowSurface with colorspace 0x${Integer.toHexString(targetColorspace)} returned NO_SURFACE: 0x${Integer.toHexString(err)}")
             } catch (e: Throwable) {
-                Log.w(TAG, "Exception creating EGL window surface with colorspace 0x${Integer.toHexString(targetColorspace)}", e)
+                Log.w(TAG, "Exception creating HDR EGL window surface with colorspace 0x${Integer.toHexString(targetColorspace)}", e)
             }
         }
 
-        // Fallback without colorspace attribute
+        // Standard default EGL attributes (EGL14.EGL_NONE) for 1:1 WYSIWYG SDR (REC.709 & PIXEL-LOG) and fallback
         val defaultAttribs = intArrayOf(EGL14.EGL_NONE)
         try {
-            val fallbackConfig = if (isHdr) (eglConfig10Bit ?: config) else config
+            val fallbackConfig = if (isHdr) (eglConfig10Bit ?: config) else (eglConfig8Bit ?: config)
             val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, fallbackConfig, surface, defaultAttribs, 0)
             if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
                 currentEglColorspace = 0
                 isCurrentPreviewHdr = isHdr
                 lastPreviewProfile = profile
-                Log.i(TAG, "Created fallback standard EGL window surface for preview (HDR=$isHdr)")
+                Log.i(TAG, "Created standard 1:1 WYSIWYG EGL window surface (EGL_NONE, HDR=$isHdr, config=${if (fallbackConfig == eglConfig10Bit) "10-bit" else "8-bit"})")
                 return eglSurf
             }
         } catch (e: Throwable) {
@@ -1209,11 +1208,12 @@ void main() {
 
             val pMatrix = computePreviewMatrix(texMatrix, displayRotation, isFrontCamera)
             val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h, displayRotation, anamorphicScale)
+            val effectiveLut = if (currentColorMode == 2 || currentColorMode == 3) 0 else currentLutPreset
             drawQuad(
                 matrix = pMatrix,
                 aspectMatrix = pAspect,
                 falseColor = if (isFalseColorEnabled) 1 else 0,
-                lutPreset = currentLutPreset
+                lutPreset = effectiveLut
             )
             checkGlError("drawQuad preview")
 
@@ -1285,11 +1285,16 @@ void main() {
 
                     val eMatrix = computeEncoderMatrix(texMatrix, displayRotation, isFrontCamera)
                     val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH, displayRotation, 1.0f)
+                    val effectiveEncoderLut = if (currentColorMode == 2 || currentColorMode == 3) {
+                        0
+                    } else {
+                        if (isLutBakeEnabled) currentLutPreset else 0
+                    }
                     drawQuad(
                         matrix = eMatrix,
                         aspectMatrix = eAspect,
                         falseColor = 0,
-                        lutPreset = if (isLutBakeEnabled) currentLutPreset else 0
+                        lutPreset = effectiveEncoderLut
                     )
                     checkGlError("drawQuad encoder")
 

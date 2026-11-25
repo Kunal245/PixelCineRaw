@@ -12,7 +12,6 @@ import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
-import android.hardware.camera2.params.TonemapCurve
 import android.hardware.display.DisplayManager
 import android.media.Image
 import android.media.ImageReader
@@ -554,6 +553,14 @@ class Camera2Controller(
                 it.minSensorIso = activeRange.lower.toFloat()
                 it.maxSensorIso = minOf(_state.value.autoIsoCap.toFloat(), activeRange.upper.toFloat())
                 it.setDeband(_state.value.isDebandEnabled)
+                val lutMode = when (_state.value.lutPreset) {
+                    LutPreset.OFF -> 0
+                    LutPreset.REC709_NATURAL -> 1
+                    LutPreset.KODAK_2383 -> 2
+                    LutPreset.CINEMA_TEAL -> 3
+                }
+                it.setLutPreset(lutMode)
+                it.setLutBakeEnabled(_state.value.isLutBakeEnabled)
                 hlgGlRenderer = it
             }
 
@@ -929,6 +936,7 @@ class Camera2Controller(
             builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, rggb)
         } else {
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY)
             // Pre-match color gains from previous sensor during physical transition to eliminate color flash
             if (state.isTransitioningLens && lastColorGains != null) {
                 builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, lastColorGains)
@@ -990,15 +998,8 @@ class Camera2Controller(
             builder.set(CaptureRequest.SCALER_CROP_REGION, cachedCropRect)
         }
 
-        // 7. Tone Curves: HLG BT.2100 / HDR10+ PQ vs Flat Log vs SDR
-        val isHdrProfile = state.colorProfile == ColorProfile.HLG_10BIT || state.colorProfile == ColorProfile.HDR10_PLUS
-        if (isHdrProfile) {
-            applyHlgToneCurve(builder)
-        } else if (state.colorProfile == ColorProfile.FLAT_LOG) {
-            applyLogToneCurve(builder)
-        } else {
-            builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_HIGH_QUALITY)
-        }
+        // 7. Tone Curves: High quality ISP tone-mapping across all modes for neutral white highlights
+        builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_HIGH_QUALITY)
 
         // 8. Clean Cinema ISP vs Stock Processing
         if (state.ispMode == IspMode.CLEAN) {
@@ -1034,50 +1035,6 @@ class Camera2Controller(
                 CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
             } else CaptureRequest.NOISE_REDUCTION_MODE_FAST
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, nrMode)
-        }
-    }
-
-    /**
-     * Applies a mathematically accurate 64-point ITU-R BT.2100 HLG OETF contrast curve to the Camera2 pipeline.
-     */
-    private fun applyHlgToneCurve(builder: CaptureRequest.Builder) {
-        try {
-            val points = 64
-            val curve = FloatArray(points * 2)
-            for (i in 0 until points) {
-                val inVal = i.toFloat() / (points - 1)
-                val outVal = ColorMath.hlgOetf(inVal)
-                curve[i * 2] = inVal
-                curve[i * 2 + 1] = outVal
-            }
-            val tonemapCurve = TonemapCurve(curve, curve, curve)
-            builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE)
-            builder.set(CaptureRequest.TONEMAP_CURVE, tonemapCurve)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to apply HLG tone curve", e)
-        }
-    }
-
-    /**
-     * Applies a flat logarithmic tone curve to the Camera2 pipeline for grading headroom.
-     */
-    private fun applyLogToneCurve(builder: CaptureRequest.Builder) {
-        try {
-            // 32-point Cine-Log tone curve lifting shadows while keeping highlights linear
-            val points = 32
-            val curve = FloatArray(points * 2)
-            for (i in 0 until points) {
-                val inVal = i.toFloat() / (points - 1)
-                // Logarithmic transfer: out = ln(1 + 9 * in) / ln(10) (logC / S-Log3 shape)
-                val outVal = Math.log10(1.0 + 9.0 * inVal).toFloat().coerceIn(0.0f, 1.0f)
-                curve[i * 2] = inVal
-                curve[i * 2 + 1] = outVal
-            }
-            val tonemapCurve = TonemapCurve(curve, curve, curve)
-            builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE)
-            builder.set(CaptureRequest.TONEMAP_CURVE, tonemapCurve)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to apply log tonemap curve", e)
         }
     }
 
