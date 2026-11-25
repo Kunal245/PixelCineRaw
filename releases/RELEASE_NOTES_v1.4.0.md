@@ -20,6 +20,7 @@ PixelCineRaw `v1.4.0` introduces the **1:1 WYSIWYG Viewfinder Engine**, bringing
 
 ### 2. Neutral White Highlights & Forward BT.2020 Color Science
 - **Tensor G4 AWB & High-Quality Tonemapping:** `CaptureRequest.TONEMAP_MODE = TONEMAP_MODE_HIGH_QUALITY` and `CaptureRequest.COLOR_CORRECTION_MODE = COLOR_CORRECTION_MODE_HIGH_QUALITY` are enforced across all modes, giving Tensor G4's ISP hardware tonemapper and AWB full latitude to keep indoor tube lights, windows, and walls pure neutral white.
+- **Pure Neutral HDR10+ (PQ) Highlights:** In `encodePq`, replaced per-channel non-linear power expansion (`pow((linear - 0.5)*2.0, 1.4)`) with direct proportional linear mapping (`nits = clamp(linearBt2020 * 1000.0, 0.0, 1000.0)`), completely eliminating blue/cyan halo rings around indoor tube lights and specular reflections.
 - **Scalar Luminance Roll-Off (Zero Highlight Hue Shift):** Highlights in `HLG10`, `HDR10+`, and `PIXEL-LOG` are compressed via scalar luminance $L = \mathbf{x} \cdot (0.2126, 0.7152, 0.0722)$ and scaled proportionally ($\mathbf{x} \cdot (L_{\text{comp}} / L)$) before the column-major `REC709_TO_REC2020` matrix and OETF, completely eliminating cyan/blue tinting in specular highlights.
 
 ### 3. Center-Weighted Tensor Hardware Auto-Exposure (`METER: CENTER`)
@@ -31,4 +32,4 @@ PixelCineRaw `v1.4.0` introduces the **1:1 WYSIWYG Viewfinder Engine**, bringing
 ## 📦 Artifact Verification
 
 - **Package File:** `releases/PixelCineRaw-v1.4.0.apk`
-- **SHA-256 Checksum:** `FF1308EA18EF4DF4E1A4EF131D12986D0A43B682B6C18C07BE01FD5DA3049892`
+- **SHA-256 Checksum:** `DC5F0696A19D790741D5305FCFFE31ABCB5E0728352A13D52DA40365DC9E7EA6`

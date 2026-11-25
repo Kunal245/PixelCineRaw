@@ -142,22 +142,14 @@ const float c1 = 0.8359375;
 const float c2 = 18.8515625;
 const float c3 = 18.6875;
 
-// Maps linear BT.2020 (with diffuse white at 0.5) to calibrated 1,000-nit HDR luminance before PQ encoding
-float pqOetf(float linearBt2020) {
-    float nits = mix(
-        linearBt2020 * 400.0,
-        200.0 + pow(max(0.0, (linearBt2020 - 0.5) * 2.0), 1.4) * 800.0,
-        step(0.5, linearBt2020)
-    );
-    float L = clamp(nits / 10000.0, 0.0, 1.0);
-    float Lm1 = pow(L, m1);
-    float num = c1 + c2 * Lm1;
-    float den = 1.0 + c3 * Lm1;
-    return pow(num / den, m2);
-}
-
-vec3 encodePq(vec3 rgb) {
-    return vec3(pqOetf(rgb.r), pqOetf(rgb.g), pqOetf(rgb.b));
+// Maps linear BT.2020 directly and proportionally to 1,000-nit SMPTE ST.2084 PQ (zero per-channel power distortion)
+vec3 encodePq(vec3 linearBt2020) {
+    vec3 nits = clamp(linearBt2020 * 1000.0, 0.0, 1000.0);
+    vec3 L = nits / 10000.0;
+    vec3 Lm1 = pow(max(vec3(1e-6), L), vec3(m1));
+    vec3 num = vec3(c1) + vec3(c2) * Lm1;
+    vec3 den = vec3(1.0) + vec3(c3) * Lm1;
+    return pow(num / den, vec3(m2));
 }
 
 
