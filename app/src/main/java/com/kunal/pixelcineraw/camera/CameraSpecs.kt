@@ -140,5 +140,11 @@ enum class AntiBandingMode(val label: String, val shortLabel: String, val camera
     OFF("ANTI-BAND OFF", "OFF", CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_OFF)
 }
 
+enum class AeMeteringMode(val label: String, val shortLabel: String, val description: String) {
+    CENTER("CENTER-WEIGHTED", "CENTER", "Center-weighted subject metering (prevents ceiling lights/windows from dimming exposure)"),
+    MATRIX("MATRIX (AVERAGE)", "MATRIX", "Full-frame matrix average metering")
+}
+
+
 
 

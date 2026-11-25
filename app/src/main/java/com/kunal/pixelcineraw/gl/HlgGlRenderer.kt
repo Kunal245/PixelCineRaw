@@ -143,8 +143,14 @@ const float c1 = 0.8359375;
 const float c2 = 18.8515625;
 const float c3 = 18.6875;
 
-float pqOetf(float E) {
-    float L = clamp(E * 0.1, 0.0, 1.0);
+// Maps linear BT.2020 (with diffuse white at 0.5) to calibrated 1,000-nit HDR luminance before PQ encoding
+float pqOetf(float linearBt2020) {
+    float nits = mix(
+        linearBt2020 * 400.0,
+        200.0 + pow(max(0.0, (linearBt2020 - 0.5) * 2.0), 1.4) * 800.0,
+        step(0.5, linearBt2020)
+    );
+    float L = clamp(nits / 10000.0, 0.0, 1.0);
     float Lm1 = pow(L, m1);
     float num = c1 + c2 * Lm1;
     float den = 1.0 + c3 * Lm1;

@@ -162,6 +162,7 @@ class Camera2Controller(
     @Volatile private var latestEvError = 0f
     private var autoIsoSustainedFrames = 0
     private var framesSinceLastHardwareIsoUpdate = 0
+    private var activeTapMeteringRect: MeteringRectangle? = null
 
     init {
         startBackgroundThread()
@@ -771,6 +772,45 @@ class Camera2Controller(
         // 2. Anti-Banding Mode (50Hz / 60Hz / Auto / Off)
         builder.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, state.antiBandingMode.camera2Mode)
 
+        // 2b. AE Metering Regions & Scene Mode Configuration (mcpro24fps Center-Weighted Protection)
+        // Disables Google's aggressive night/backlight scene detection overrides so brightness doesn't pump mid-pan
+        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+        builder.set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_DISABLED)
+
+        val chars = getCameraCharacteristics(spec.cameraId)
+        val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+        if (maxAeRegions > 0) {
+            val tapRect = activeTapMeteringRect
+            if (tapRect != null && state.tapToFocusPoint != null) {
+                builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(tapRect))
+            } else {
+                when (state.aeMeteringMode) {
+                    AeMeteringMode.CENTER -> {
+                        val activeArray = spec.activeArraySize
+                        val cwW = (activeArray.width() * 0.38f).roundToInt()
+                        val cwH = (activeArray.height() * 0.38f).roundToInt()
+                        val cwLeft = activeArray.left + (activeArray.width() - cwW) / 2
+                        val cwTop = activeArray.top + (activeArray.height() - cwH) / 2
+                        val centerRect = MeteringRectangle(
+                            Rect(cwLeft, cwTop, cwLeft + cwW, cwTop + cwH),
+                            1000
+                        )
+                        val aeRegions = if (maxAeRegions >= 2) {
+                            val peripheralRect = MeteringRectangle(activeArray, 150)
+                            arrayOf(centerRect, peripheralRect)
+                        } else {
+                            arrayOf(centerRect)
+                        }
+                        builder.set(CaptureRequest.CONTROL_AE_REGIONS, aeRegions)
+                    }
+                    AeMeteringMode.MATRIX -> {
+                        val fullFrameRect = MeteringRectangle(spec.activeArraySize, MeteringRectangle.METERING_WEIGHT_MAX)
+                        builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(fullFrameRect))
+                    }
+                }
+            }
+        }
+
         // 3. Exposure & Sensitivity (Shutter & ISO & EV)
         val useHardwareAe = !state.isManualExposure || state.isAutoIso
 
@@ -783,7 +823,6 @@ class Camera2Controller(
                     state.colorProfile == ColorProfile.HDR10_PLUS ||
                     state.colorProfile == ColorProfile.FLAT_LOG
 
-            val chars = getCameraCharacteristics(spec.cameraId)
             val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP) ?: android.util.Rational(1, 3)
             val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(-6, 6)
             val stepVal = step.toFloat().coerceAtLeast(0.01f)
@@ -841,7 +880,6 @@ class Camera2Controller(
             val effectiveIso = currentEffectiveIso.coerceIn(activeRange.lower.toFloat(), activeRange.upper.toFloat())
             val applyBase = effectiveIso.roundToInt().coerceIn(activeRange.lower, activeRange.upper)
 
-            val chars = getCameraCharacteristics(spec.cameraId)
             val boostRange = chars.get(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE)
             val supportsBoost = boostRange != null
 
@@ -858,7 +896,6 @@ class Camera2Controller(
         }
 
         // 2b. Torch / Continuous Video Light
-        val chars = getCameraCharacteristics(spec.cameraId)
         val flashAvailable = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
         if (flashAvailable) {
             val flashMode = if (state.isTorchOn) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF
@@ -1746,6 +1783,33 @@ class Camera2Controller(
     }
 
     /**
+     * User Action: AE Metering Mode (Center-Weighted Subject vs Full-Frame Matrix)
+     * Prevents ceiling tube lights, lamps, and windows at frame edges from causing exposure plunges when panning.
+     */
+    fun cycleAeMeteringMode() {
+        val next = when (_state.value.aeMeteringMode) {
+            AeMeteringMode.CENTER -> AeMeteringMode.MATRIX
+            AeMeteringMode.MATRIX -> AeMeteringMode.CENTER
+        }
+        setAeMeteringMode(next)
+    }
+
+    fun setAeMeteringMode(mode: AeMeteringMode) {
+        _state.update { it.copy(aeMeteringMode = mode) }
+        persistState()
+        cameraHandler?.post { applyHardwareParametersRamping(force = true) }
+    }
+
+    /**
+     * Resets any active tap-to-meter / tap-to-focus lock back to the active AE metering mode.
+     */
+    fun resetTapToFocus() {
+        activeTapMeteringRect = null
+        _state.update { it.copy(tapToFocusPoint = null) }
+        cameraHandler?.post { applyHardwareParametersRamping(force = true) }
+    }
+
+    /**
      * User Action: Set Manual Focus Distance (0.0 = Infinity, max = macro) (Synchronized to VSYNC)
      */
     fun setFocusDistance(distance: Float) {
@@ -1856,6 +1920,7 @@ class Camera2Controller(
         val bottom = min(activeArray.height(), sensorYInt + halfArea)
 
         val meteringRect = MeteringRectangle(Rect(left, top, right, bottom), MeteringRectangle.METERING_WEIGHT_MAX)
+        activeTapMeteringRect = meteringRect
 
         _state.update {
             it.copy(

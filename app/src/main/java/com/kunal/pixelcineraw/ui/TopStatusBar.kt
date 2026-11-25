@@ -42,6 +42,8 @@ fun TopStatusBar(
     onOrientationLockClick: () -> Unit,
     onAntiBandingClick: () -> Unit = {},
     onAntiBandingModeSelected: (AntiBandingMode) -> Unit = {},
+    onAeMeteringClick: () -> Unit = {},
+    onAeMeteringModeSelected: (AeMeteringMode) -> Unit = {},
     onAutoShutterClick: () -> Unit = {},
     onResetDefaults: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -103,6 +105,10 @@ fun TopStatusBar(
                         },
                         onAntiBandingSelected = { mode ->
                             onAntiBandingModeSelected(mode)
+                            showFormatPopover = false
+                        },
+                        onAeMeteringModeSelected = { mode ->
+                            onAeMeteringModeSelected(mode)
                             showFormatPopover = false
                         },
                         onOpenAdvanced = {
@@ -220,6 +226,14 @@ fun TopStatusBar(
                 highlight = state.antiBandingMode != AntiBandingMode.OFF,
                 onClick = onAntiBandingClick
             )
+
+            // 9. AE Metering Pill (CENTER / MATRIX) - mcpro24fps anti-dimming
+            FrostedPill(
+                label = "METER",
+                value = state.aeMeteringMode.shortLabel,
+                highlight = state.aeMeteringMode == AeMeteringMode.CENTER,
+                onClick = onAeMeteringClick
+            )
         }
 
         // Right: Real Live Telemetry Cluster (Storage, Battery %, Tensor G4 Thermal)
@@ -329,6 +343,7 @@ internal fun FormatPopoverContent(
     onResolutionSelected: (CustomResolution) -> Unit,
     onFpsSelected: (Int) -> Unit,
     onAntiBandingSelected: (AntiBandingMode) -> Unit,
+    onAeMeteringModeSelected: (AeMeteringMode) -> Unit = {},
     onOpenAdvanced: () -> Unit,
     onResetDefaults: () -> Unit
 ) {
@@ -426,6 +441,20 @@ internal fun FormatPopoverContent(
             selectedIndex = selectedAbIdx,
             onItemSelected = { idx ->
                 onAntiBandingSelected(antiBandingModes[idx])
+            }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 5. AE Metering: CENTER | MATRIX (mcpro24fps anti-dimming)
+        val meteringModes = listOf(AeMeteringMode.CENTER, AeMeteringMode.MATRIX)
+        val selectedMeterIdx = meteringModes.indexOf(state.aeMeteringMode).coerceAtLeast(0)
+        PopoverSegmentedRow(
+            title = "AE METERING (ANTI-DIMMING)",
+            items = listOf("CENTER", "MATRIX"),
+            selectedIndex = selectedMeterIdx,
+            onItemSelected = { idx ->
+                onAeMeteringModeSelected(meteringModes[idx])
             }
         )
 

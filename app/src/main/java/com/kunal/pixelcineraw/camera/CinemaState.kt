@@ -29,6 +29,7 @@ data class CinemaState(
     val autoIsoCap: Int = 3200,
     val isNdNeeded: Boolean = false,
     val antiBandingMode: AntiBandingMode = AntiBandingMode.HZ_50,
+    val aeMeteringMode: AeMeteringMode = AeMeteringMode.CENTER,
     val evCompensation: Float = 0.0f, // -2.0 to +2.0 EV bias
     val isAeAfLocked: Boolean = false,
 

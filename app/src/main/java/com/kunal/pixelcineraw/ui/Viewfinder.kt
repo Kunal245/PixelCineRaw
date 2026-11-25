@@ -90,7 +90,7 @@ fun Viewfinder(
 
     // Apply native HDR extended range brightness and BT.2020 HLG/PQ data space on Pixel 9a OLED
     LaunchedEffect(state.colorProfile) {
-        surfaceViewRef?.setHdrMode(state.colorProfile)
+        surfaceViewRef?.applyColorProfileSurfaceState(state.colorProfile)
     }
 
     val context = LocalContext.current
@@ -176,7 +176,7 @@ fun Viewfinder(
                     val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                     view.setAspectRatio(curW, curH)
                     view.holder.setFixedSize(curW, curH)
-                    view.setHdrMode(state.colorProfile)
+                    view.applyColorProfileSurfaceState(state.colorProfile)
                     view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                 }
             )

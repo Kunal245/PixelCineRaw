@@ -260,6 +260,10 @@ private fun PortraitCinemaLayout(
                                 viewModel.cameraController.setAntiBandingMode(mode)
                                 showFormatPopover = false
                             },
+                            onAeMeteringModeSelected = { mode ->
+                                viewModel.cameraController.setAeMeteringMode(mode)
+                                showFormatPopover = false
+                            },
                             onOpenAdvanced = {
                                 showFormatPopover = false
                                 onShowSettings()
@@ -1153,6 +1157,8 @@ private fun LandscapeCinemaLayout(
                 onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() },
                 onAntiBandingClick = { viewModel.cameraController.cycleAntiBandingMode() },
                 onAntiBandingModeSelected = { mode -> viewModel.cameraController.setAntiBandingMode(mode) },
+                onAeMeteringClick = { viewModel.cameraController.cycleAeMeteringMode() },
+                onAeMeteringModeSelected = { mode -> viewModel.cameraController.setAeMeteringMode(mode) },
                 onAutoShutterClick = { viewModel.cameraController.setAutoShutter() },
                 onResetDefaults = { viewModel.cameraController.resetToDefaults() }
             )
