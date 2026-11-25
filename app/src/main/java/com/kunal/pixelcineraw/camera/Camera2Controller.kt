@@ -997,7 +997,7 @@ class Camera2Controller(
         } else if (state.colorProfile == ColorProfile.FLAT_LOG) {
             applyLogToneCurve(builder)
         } else {
-            builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
+            builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_HIGH_QUALITY)
         }
 
         // 8. Clean Cinema ISP vs Stock Processing

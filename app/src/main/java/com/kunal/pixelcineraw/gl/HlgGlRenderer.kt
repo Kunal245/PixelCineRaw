@@ -292,33 +292,35 @@ void main() {
     }
 
     if (uColorMode == 2) {
-        // HLG / BT.2020 Mode: +1.0 EV (2.0x) linear midtone recovery with smooth highlight roll-off
-        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim;
-        vec3 x = linearRgb * 2.0;
-        linearRgb = (x / (vec3(1.0) + x * 0.35)) * 1.35;
+        // HLG / BT.2020 Mode: +1.0 EV (2.0x) linear midtone recovery with scalar luminance roll-off (zero hue shift)
+        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim * 2.0;
+        float luma = max(dot(linearRgb, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+        float compressedLuma = (luma / (1.0 + luma * 0.35)) * 1.35;
+        linearRgb *= (compressedLuma / luma);
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 dithered = applyTriangularIgnDither(rec2020, gl_FragCoord.xy);
         vec3 hlgRgb = clamp(encodeHlg(dithered), 0.0, 1.0);
         gl_FragColor = vec4(hlgRgb, 1.0);
     } else if (uColorMode == 3) {
-        // HDR10+ (SMPTE ST.2084 PQ): +1.0 EV (2.0x) linear midtone recovery with smooth highlight roll-off
-        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim;
-        vec3 x = linearRgb * 2.0;
-        linearRgb = (x / (vec3(1.0) + x * 0.35)) * 1.35;
+        // HDR10+ (SMPTE ST.2084 PQ): +1.0 EV (2.0x) linear midtone recovery with scalar luminance roll-off (zero hue shift)
+        vec3 linearRgb = pow(max(vec3(0.0), color), vec3(2.2)) * uExposureTrim * 2.0;
+        float luma = max(dot(linearRgb, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+        float compressedLuma = (luma / (1.0 + luma * 0.35)) * 1.35;
+        linearRgb *= (compressedLuma / luma);
         vec3 rec2020 = max(vec3(0.0), REC709_TO_REC2020 * linearRgb);
         vec3 dithered = applyTriangularIgnDither(rec2020, gl_FragCoord.xy);
         vec3 pqRgb = clamp(encodePq(dithered), 0.0, 1.0);
         gl_FragColor = vec4(pqRgb, 1.0);
     } else if (uColorMode == 1) {
-        // PIXEL-LOG (uColorMode == 1): +1.0 EV (2.0x) midtone recovery with smooth highlight roll-off
-        vec3 trimmed = color * uExposureTrim;
-        vec3 x = trimmed * 2.0;
-        vec3 recovered = (x / (vec3(1.0) + x * 0.35)) * 1.35;
-        vec3 dithered = clamp(applyTriangularIgnDither(recovered, gl_FragCoord.xy), 0.0, 1.0);
+        // PIXEL-LOG (uColorMode == 1): +1.0 EV (2.0x) midtone recovery with scalar luminance roll-off (zero hue shift)
+        vec3 linearRgb = color * uExposureTrim * 2.0;
+        float luma = max(dot(linearRgb, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+        float compressedLuma = (luma / (1.0 + luma * 0.35)) * 1.35;
+        linearRgb *= (compressedLuma / luma);
+        vec3 dithered = clamp(applyTriangularIgnDither(linearRgb, gl_FragCoord.xy), 0.0, 1.0);
         gl_FragColor = vec4(dithered, 1.0);
     } else {
-        // REC.709 (uColorMode == 0): standard 0.0 EV compensation, 1.0x output, and smooth highlight shoulder
-        color = applyHighlightShoulder(color);
+        // REC.709 (uColorMode == 0): clean unmodified Rec.709 output for neutral white highlights
         vec3 trimmed = color * uExposureTrim;
         vec3 dithered = clamp(applyTriangularIgnDither(trimmed, gl_FragCoord.xy), 0.0, 1.0);
         gl_FragColor = vec4(dithered, 1.0);
@@ -343,6 +345,7 @@ void main() {
     private var activeColorProfile: ColorProfile = ColorProfile.REC709
     private var isCurrentPreviewHdr: Boolean = false
     private var lastPreviewProfile: ColorProfile = ColorProfile.REC709
+    private var currentEglColorspace: Int = -1
     private var dummyPbufferSurface: EGLSurface = EGL14.EGL_NO_SURFACE
 
     // Window Surfaces
@@ -738,9 +741,14 @@ void main() {
         currentColorMode = mode
         val handler = glHandler ?: return
         handler.post {
-            // Recreate preview window surface when transitioning between SDR and HDR (or between HLG and PQ)
-            val isHdrTarget = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
-            if (isCurrentPreviewHdr != isHdrTarget || (isHdrTarget && lastPreviewProfile != profile)) {
+            val targetColorspace = when (profile) {
+                ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else -1
+                ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else -1
+                else -> if (supportsColorspace) EGL_GL_COLORSPACE_SRGB_KHR else -1
+            }
+
+            // Always recreate preview window surface when colorspace target differs from current EGL surface
+            if (currentEglColorspace != targetColorspace || lastPreviewProfile != profile) {
                 val surf = currentSurface
                 if (surf != null && surf.isValid) {
                     destroyPreviewSurface()
@@ -748,7 +756,7 @@ void main() {
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
-                        Log.i(TAG, "Recreated preview EGL surface for profile $profile (HDR=$isHdrTarget)")
+                        Log.i(TAG, "Recreated preview EGL surface for profile $profile (colorspace=0x${Integer.toHexString(currentEglColorspace)}, HDR=$isCurrentPreviewHdr)")
                     }
                 }
             }
@@ -984,8 +992,8 @@ void main() {
                     return@post
                 }
                 destroyPreviewSurface()
+                currentSurface = surface
                 if (surface != null && surface.isValid && isReady) {
-                    currentSurface = surface
                     val eglSurf = createPreviewWindowSurface(surface, activeColorProfile)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
@@ -1037,47 +1045,45 @@ void main() {
         }
 
         val isHdr = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
+        val targetColorspace = when (profile) {
+            ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else -1
+            ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else -1
+            else -> if (supportsColorspace) EGL_GL_COLORSPACE_SRGB_KHR else -1
+        }
 
-        // Try creating with HDR colorspace if in HDR mode and extension is available
-        if (isHdr && supportsColorspace) {
-            val colorspace = if (profile == ColorProfile.HDR10_PLUS && supportsPqColorspace) {
-                EGL_GL_COLORSPACE_BT2020_PQ_EXT
-            } else if (supportsHlgColorspace) {
-                EGL_GL_COLORSPACE_BT2020_HLG_EXT
-            } else {
-                -1
-            }
+        val targetConfig = if (isHdr) (eglConfig10Bit ?: config) else (eglConfig8Bit ?: config)
 
-            if (colorspace != -1) {
-                val hdrAttribs = intArrayOf(
-                    EGL_GL_COLORSPACE_KHR, colorspace,
-                    EGL14.EGL_NONE
-                )
-                try {
-                    val targetConfig = eglConfig10Bit ?: config
-                    val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, targetConfig, surface, hdrAttribs, 0)
-                    if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
-                        Log.i(TAG, "Created True Live HDR OLED window surface (colorspace=0x${Integer.toHexString(colorspace)}, config=${if (targetConfig == eglConfig10Bit) "10-bit" else "8-bit"})")
-                        isCurrentPreviewHdr = true
-                        lastPreviewProfile = profile
-                        return eglSurf
-                    }
-                    val err = EGL14.eglGetError()
-                    Log.w(TAG, "eglCreateWindowSurface with HDR colorspace returned NO_SURFACE: 0x${Integer.toHexString(err)}")
-                } catch (e: Throwable) {
-                    Log.w(TAG, "Exception creating HDR EGL window surface", e)
+        if (targetColorspace != -1) {
+            val attribs = intArrayOf(
+                EGL_GL_COLORSPACE_KHR, targetColorspace,
+                EGL14.EGL_NONE
+            )
+            try {
+                val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, targetConfig, surface, attribs, 0)
+                if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                    currentEglColorspace = targetColorspace
+                    isCurrentPreviewHdr = isHdr
+                    lastPreviewProfile = profile
+                    Log.i(TAG, "Created EGL window surface (colorspace=0x${Integer.toHexString(targetColorspace)}, HDR=$isHdr, config=${if (targetConfig == eglConfig10Bit) "10-bit" else "8-bit"})")
+                    return eglSurf
                 }
+                val err = EGL14.eglGetError()
+                Log.w(TAG, "eglCreateWindowSurface with colorspace 0x${Integer.toHexString(targetColorspace)} returned NO_SURFACE: 0x${Integer.toHexString(err)}")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Exception creating EGL window surface with colorspace 0x${Integer.toHexString(targetColorspace)}", e)
             }
         }
 
-        // Standard SDR window surface
+        // Fallback without colorspace attribute
         val defaultAttribs = intArrayOf(EGL14.EGL_NONE)
         try {
-            val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, defaultAttribs, 0)
+            val fallbackConfig = if (isHdr) (eglConfig10Bit ?: config) else config
+            val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, fallbackConfig, surface, defaultAttribs, 0)
             if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
-                Log.i(TAG, "Created standard EGL window surface for preview (SDR)")
-                isCurrentPreviewHdr = false
+                currentEglColorspace = 0
+                isCurrentPreviewHdr = isHdr
                 lastPreviewProfile = profile
+                Log.i(TAG, "Created fallback standard EGL window surface for preview (HDR=$isHdr)")
                 return eglSurf
             }
         } catch (e: Throwable) {
@@ -1089,9 +1095,10 @@ void main() {
             try {
                 val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig8Bit, surface, defaultAttribs, 0)
                 if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
-                    Log.i(TAG, "Created 8-bit fallback EGL window surface")
+                    currentEglColorspace = 0
                     isCurrentPreviewHdr = false
                     lastPreviewProfile = profile
+                    Log.i(TAG, "Created 8-bit fallback EGL window surface")
                     return eglSurf
                 }
             } catch (e: Throwable) {
@@ -1099,6 +1106,7 @@ void main() {
             }
         }
 
+        currentEglColorspace = -1
         return EGL14.EGL_NO_SURFACE
     }
 
@@ -1383,7 +1391,7 @@ void main() {
             }
             previewEglSurface = null
         }
-        currentSurface = null
+        currentEglColorspace = -1
     }
 
     private fun destroyEncoderSurface() {
