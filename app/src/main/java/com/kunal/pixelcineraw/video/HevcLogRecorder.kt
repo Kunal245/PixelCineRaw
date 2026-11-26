@@ -123,6 +123,7 @@ class HevcLogRecorder(
     private var isHlgRecording = false
     private var activeColorProfile: ColorProfile = ColorProfile.REC709
     private var shouldRecordWavSidecar: Boolean = false
+    private var orientationHint: Int = 0
 
     private val isRecording = AtomicBoolean(false)
 
@@ -142,6 +143,9 @@ class HevcLogRecorder(
     private var targetFps: Int = 60
     private var videoFrameCount: Long = 0L
     private var videoMuxedFrameCount: Long = 0L
+    private var videoEosLatch: CountDownLatch? = null
+    private var audioEosLatch: CountDownLatch? = null
+    private val audioEosPending = AtomicBoolean(false)
 
     fun onFirstVideoFrame(startNs: Long) {
         if (!hasReceivedFirstVideoFrame) {
@@ -265,7 +269,7 @@ class HevcLogRecorder(
         codec: VideoCodec = VideoCodec.HEVC_10BIT,
         intraFrameMode: IntraFrameMode = IntraFrameMode.GOP_LONG,
         recordWavSidecar: Boolean = false,
-        isPortrait: Boolean = false
+        orientationHint: Int = 0
     ): Surface {
         ensureEncoderThread()
         val videoHandler = encoderHandler ?: throw IllegalStateException("Video encoder thread handler not ready")
@@ -290,13 +294,19 @@ class HevcLogRecorder(
         audioQueue.clear()
         availableAudioInputBuffers.clear()
         this.targetFps = fps
+        this.orientationHint = orientationHint
         this.recordingStartNs = -1L
         this.hasReceivedFirstVideoFrame = false
         this.videoFrameCount = 0L
         this.videoMuxedFrameCount = 0L
+        this.videoEosLatch = CountDownLatch(1)
+        this.audioEosLatch = CountDownLatch(1)
+        this.audioEosPending.set(false)
 
-        val width = if (isPortrait) minOf(resolution.width, resolution.height) else maxOf(resolution.width, resolution.height)
-        val height = if (isPortrait) maxOf(resolution.width, resolution.height) else minOf(resolution.width, resolution.height)
+        // Always configure MediaCodec in native landscape sensor dimensions (e.g. 3840x2160)
+        // so Exynos/Tensor MFC hardware runs in its certified 120fps fast-path across all orientations.
+        val width = maxOf(resolution.width, resolution.height)
+        val height = minOf(resolution.width, resolution.height)
         activeColorProfile = colorProfile
         shouldRecordWavSidecar = recordWavSidecar
 
@@ -443,6 +453,9 @@ class HevcLogRecorder(
                             onMetricsUpdate?.invoke(sec, totalBytesWritten, 0)
                         }
                     }
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        videoEosLatch?.countDown()
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error handling video output buffer", e)
                 } finally {
@@ -467,6 +480,7 @@ class HevcLogRecorder(
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
                 Log.e(TAG, "Video encoder error: ${e.diagnosticInfo}", e)
+                videoEosLatch?.countDown()
             }
         }
     }
@@ -484,6 +498,8 @@ class HevcLogRecorder(
                         val ptsUs = (totalSamplesWritten * 1_000_000L) / 48_000L
                         totalAudioBytesFed += chunk.size
                         codec.queueInputBuffer(index, 0, chunk.size, ptsUs, 0)
+                    } else if (audioEosPending.compareAndSet(true, false)) {
+                        codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                     } else {
                         availableAudioInputBuffers.offer(index)
                     }
@@ -519,6 +535,9 @@ class HevcLogRecorder(
                         }
                         enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = true, clone, infoClone))
                     }
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        audioEosLatch?.countDown()
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error handling audio output buffer", e)
                 } finally {
@@ -534,6 +553,7 @@ class HevcLogRecorder(
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
                 Log.e(TAG, "Audio encoder error: ${e.diagnosticInfo}", e)
+                audioEosLatch?.countDown()
             }
         }
     }
@@ -555,7 +575,8 @@ class HevcLogRecorder(
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
             setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = Realtime priority, prevents Tensor G4 from downclocking
-            setInteger(MediaFormat.KEY_OPERATING_RATE, fps) // Forces operating rate (e.g. 60 for 60fps)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, if (fps >= 60) 120 else fps) // Forces max MFC/CSC OPP at 4K 60fps
+            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             if (intraFrameMode == IntraFrameMode.ALL_INTRA) {
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
             }
@@ -617,8 +638,9 @@ class HevcLogRecorder(
         fileDescriptor = pfd
 
         mediaMuxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).apply {
-            setOrientationHint(0)
+            setOrientationHint(orientationHint)
         }
+        Log.i(TAG, "MediaMuxer initialized for $fileName with orientationHint=$orientationHint")
 
         // Setup simultaneous 48kHz uncompressed PCM .wav sidecar recording if enabled
         if (shouldRecordWavSidecar) {
@@ -764,6 +786,7 @@ class HevcLogRecorder(
             videoEncoder?.signalEndOfInputStream()
         } catch (e: Exception) {
             Log.w(TAG, "Error signaling EOS to video encoder", e)
+            videoEosLatch?.countDown()
         }
 
         val audioHandler = audioEncoderHandler
@@ -774,34 +797,82 @@ class HevcLogRecorder(
                     val freeIndex = availableAudioInputBuffers.poll()
                     if (encoder != null && freeIndex != null) {
                         encoder.queueInputBuffer(freeIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    } else if (encoder != null) {
+                        audioEosPending.set(true)
+                    } else {
+                        audioEosLatch?.countDown()
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error sending audio EOS", e)
+                    audioEosLatch?.countDown()
                 }
+            }
+        } else {
+            audioEosLatch?.countDown()
+        }
+
+        // Wait for EOS callbacks so trailing frames flush cleanly and no MediaCodec buffer is unmapped mid-copy
+        try {
+            videoEosLatch?.await(1000, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {}
+        try {
+            audioEosLatch?.await(500, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {}
+
+        // Serialize stop/release onto the exact HandlerThreads that own the async MediaCodec callbacks
+        val videoHandler = encoderHandler
+        if (videoHandler != null) {
+            val vStopLatch = CountDownLatch(1)
+            videoHandler.post {
+                try {
+                    videoEncoder?.stop()
+                    videoEncoder?.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error releasing video encoder", e)
+                } finally {
+                    videoEncoder = null
+                    vStopLatch.countDown()
+                }
+            }
+            try {
+                vStopLatch.await(1000, TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {}
+        } else {
+            try {
+                videoEncoder?.stop()
+                videoEncoder?.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error releasing video encoder", e)
+            } finally {
+                videoEncoder = null
             }
         }
 
-        // Brief delay to allow final asynchronous output frames to enqueue into muxerQueue
-        try {
-            Thread.sleep(120)
-        } catch (_: Exception) {}
-
-        try {
-            videoEncoder?.stop()
-            videoEncoder?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing video encoder", e)
-        } finally {
-            videoEncoder = null
-        }
-
-        try {
-            audioEncoder?.stop()
-            audioEncoder?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing audio encoder", e)
-        } finally {
-            audioEncoder = null
+        if (audioHandler != null) {
+            val aStopLatch = CountDownLatch(1)
+            audioHandler.post {
+                try {
+                    audioEncoder?.stop()
+                    audioEncoder?.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error releasing audio encoder", e)
+                } finally {
+                    audioEncoder = null
+                    aStopLatch.countDown()
+                }
+            }
+            try {
+                aStopLatch.await(1000, TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {}
+        } else {
+            try {
+                audioEncoder?.stop()
+                audioEncoder?.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error releasing audio encoder", e)
+            } finally {
+                audioEncoder = null
+            }
         }
 
         // Drain all queued samples and stop/release MediaMuxer on the dedicated single-writer thread

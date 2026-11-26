@@ -82,10 +82,7 @@ fun Viewfinder(
         val vRes = state.videoResolution
         val w = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
         val h = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
-        surfaceViewRef?.let { sv ->
-            sv.setAspectRatio(w, h)
-            sv.holder.setFixedSize(w, h)
-        }
+        surfaceViewRef?.setAspectRatio(w, h)
     }
 
     // Apply native HDR extended range brightness and BT.2020 HLG/PQ data space on Pixel 9a OLED
@@ -139,7 +136,6 @@ fun Viewfinder(
                         val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
                         val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                         setAspectRatio(curW, curH)
-                        holder.setFixedSize(curW, curH)
                         setHdrMode(state.colorProfile)
 
                         holder.addCallback(object : SurfaceHolder.Callback {
@@ -175,7 +171,6 @@ fun Viewfinder(
                     val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
                     val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                     view.setAspectRatio(curW, curH)
-                    view.holder.setFixedSize(curW, curH)
                     view.applyColorProfileSurfaceState(state.colorProfile)
                     view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                 }

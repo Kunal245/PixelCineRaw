@@ -387,6 +387,23 @@ class Camera2Controller(
     }
 
     /**
+     * Computes MediaMuxer orientationHint (0, 90, 180, 270) relative to the native
+     * landscape (ROTATION_90) encoder surface so all devices/players rotate upright in hardware.
+     */
+    fun computeVideoOrientationHint(): Int {
+        if (_state.value.orientationLockMode == OrientationLockMode.LOCK_PORTRAIT) {
+            return 90
+        }
+        return when (getDisplayRotation()) {
+            Surface.ROTATION_0 -> 90
+            Surface.ROTATION_90 -> 0
+            Surface.ROTATION_180 -> 270
+            Surface.ROTATION_270 -> 180
+            else -> 90
+        }
+    }
+
+    /**
      * Attaches the preview surface and starts the camera stream.
      */
     fun attachPreviewSurface(surface: Surface) {
@@ -589,7 +606,9 @@ class Camera2Controller(
             renderer.setColorMode(_state.value.colorProfile)
 
             if (videoRecordingSurface != null) {
-                renderer.setEncoderSurface(videoRecordingSurface, prevW, prevH, _state.value.targetFps)
+                val encW = maxOf(vRes.width, vRes.height)
+                val encH = minOf(vRes.width, vRes.height)
+                renderer.setEncoderSurface(videoRecordingSurface, encW, encH, _state.value.targetFps)
             } else {
                 renderer.setEncoderSurface(null, 0, 0)
             }
@@ -654,7 +673,7 @@ class Camera2Controller(
         }
     }
 
-    fun startRecordingSession(surface: Surface, fileName: String, isPortrait: Boolean = false, onStarted: () -> Unit = {}) {
+    fun startRecordingSession(surface: Surface, fileName: String, onStarted: () -> Unit = {}) {
         videoRecordingSurface = surface
         _state.update {
             it.copy(
@@ -666,8 +685,9 @@ class Camera2Controller(
             )
         }
         val vRes = _state.value.videoResolution
-        val encW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
-        val encH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
+        // Always configure GL encoder viewport in native landscape dimensions (max x min)
+        val encW = maxOf(vRes.width, vRes.height)
+        val encH = minOf(vRes.width, vRes.height)
         lastMetricsUpdateTime = 0L
         hlgGlRenderer?.setRecordingActive(true)
         hlgGlRenderer?.setEncoderSurface(surface, encW, encH, _state.value.targetFps)

@@ -119,11 +119,9 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         try {
             when (state.recordingFormat) {
                 RecordingFormat.VIDEO_PRO -> {
-                    val rotation = cameraController.getDisplayRotation()
-                    val isPortrait = rotation == android.view.Surface.ROTATION_0 || rotation == android.view.Surface.ROTATION_180 ||
-                            state.orientationLockMode == OrientationLockMode.LOCK_PORTRAIT
+                    val orientationHint = cameraController.computeVideoOrientationHint()
 
-                    // Prepare hardware video encoder and get recording surface
+                    // Prepare hardware video encoder in native landscape dimensions + MediaMuxer orientationHint
                     val surface = hevcRecorder.prepare(
                         resolution = state.videoResolution,
                         fps = state.targetFps,
@@ -132,7 +130,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                         codec = state.videoCodec,
                         intraFrameMode = state.intraFrameMode,
                         recordWavSidecar = state.recordWavSidecar,
-                        isPortrait = isPortrait
+                        orientationHint = orientationHint
                     )
 
                     cameraController.onFirstEncoderFrame = { startNs ->
@@ -141,8 +139,8 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
                     val fileName = hevcRecorder.start()
 
-                    cameraController.startRecordingSession(surface, fileName, isPortrait) {
-                        Log.i(TAG, "Camera2 session active and streaming to encoder: $fileName (isPortrait=$isPortrait)")
+                    cameraController.startRecordingSession(surface, fileName) {
+                        Log.i(TAG, "Camera2 session active and streaming to landscape encoder: $fileName (orientationHint=$orientationHint)")
                     }
                 }
                 RecordingFormat.RAW_DNG -> {

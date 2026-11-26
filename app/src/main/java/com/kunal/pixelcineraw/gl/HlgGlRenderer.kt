@@ -97,6 +97,28 @@ void main() {
 }
 """
 
+        private const val BLIT_VERTEX_SHADER_CODE = """
+uniform mat4 uTexMatrix;
+attribute vec4 aPosition;
+attribute vec4 aTextureCoord;
+varying vec2 vTextureCoord;
+
+void main() {
+    gl_Position = aPosition;
+    vTextureCoord = (uTexMatrix * aTextureCoord).xy;
+}
+"""
+
+        private const val BLIT_FRAGMENT_SHADER_CODE = """
+precision highp float;
+uniform sampler2D sFboTexture;
+varying vec2 vTextureCoord;
+
+void main() {
+    gl_FragColor = texture2D(sFboTexture, vTextureCoord);
+}
+"""
+
         private const val FRAGMENT_SHADER_CODE = """
 #extension GL_OES_EGL_image_external : require
 precision highp float;
@@ -352,6 +374,7 @@ void main() {
         private set
 
     // Shaders & Geometry Buffers
+    private var isGles3: Boolean = false
     private var programId: Int = 0
     private var aPositionLoc: Int = -1
     private var aTextureCoordLoc: Int = -1
@@ -363,6 +386,18 @@ void main() {
     private var uLutPresetLoc: Int = -1
     private var uDebandLoc: Int = -1
     private var uExposureTrimLoc: Int = -1
+
+    // Single-Pass 10-bit GL_RGB10_A2 FBO & Pass-Through Blit Shader
+    private var blitProgramId: Int = 0
+    private var blitAPositionLoc: Int = -1
+    private var blitATextureCoordLoc: Int = -1
+    private var blitUTexMatrixLoc: Int = -1
+    private var blitSFboTextureLoc: Int = -1
+    private var fboId: Int = 0
+    private var fboTexId: Int = 0
+    private var fboWidth: Int = 0
+    private var fboHeight: Int = 0
+
     private val texMatrix = FloatArray(16)
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -384,9 +419,11 @@ void main() {
 
     private var hasLoggedFirstFrame = false
 
-    // Zero-allocation reusable query buffers for eglQuerySurface
+    // Zero-allocation reusable query & invalidate buffers
     private val queryWidth = IntArray(1)
     private val queryHeight = IntArray(1)
+    private val invalidateFboAttachments = intArrayOf(GLES30.GL_COLOR_ATTACHMENT0)
+    private val invalidateDefaultAttachments = intArrayOf(GLES30.GL_DEPTH, GLES30.GL_STENCIL)
 
     // Quantized MP4 presentation timestamps & frame pacing for video encoder
     @Volatile var targetFps: Int = 60
@@ -530,6 +567,42 @@ void main() {
     private val encoderMatrix = FloatArray(16)
     private val previewAspectMatrix = FloatArray(16)
     private val encoderAspectMatrix = FloatArray(16)
+    private val fboAspectMatrix = FloatArray(16)
+    private val blitRotMatrix = FloatArray(16)
+    private val blitFinalMatrix = FloatArray(16)
+    private val identityMatrix = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
+
+    private fun computeBlitPreviewMatrix(
+        fboW: Int,
+        fboH: Int,
+        outW: Int,
+        outH: Int,
+        rotation: Int,
+        isFront: Boolean,
+        anamorphic: Float
+    ): FloatArray {
+        val aspect = computeAspectMatrix(previewAspectMatrix, fboW, fboH, outW, outH, rotation, anamorphic)
+        val relRotDeg = when (rotation) {
+            Surface.ROTATION_0 -> 90f
+            Surface.ROTATION_90 -> 0f
+            Surface.ROTATION_180 -> -90f
+            Surface.ROTATION_270 -> 180f
+            else -> 90f
+        }
+        Matrix.setIdentityM(blitRotMatrix, 0)
+        if (relRotDeg != 0f) {
+            Matrix.translateM(blitRotMatrix, 0, 0.5f, 0.5f, 0.0f)
+            Matrix.rotateM(blitRotMatrix, 0, relRotDeg, 0.0f, 0.0f, 1.0f)
+            Matrix.translateM(blitRotMatrix, 0, -0.5f, -0.5f, 0.0f)
+        }
+        if (isFront) {
+            Matrix.translateM(blitRotMatrix, 0, 0.5f, 0.5f, 0.0f)
+            Matrix.scaleM(blitRotMatrix, 0, -1.0f, 1.0f, 1.0f)
+            Matrix.translateM(blitRotMatrix, 0, -0.5f, -0.5f, 0.0f)
+        }
+        Matrix.multiplyMM(blitFinalMatrix, 0, blitRotMatrix, 0, aspect, 0)
+        return blitFinalMatrix
+    }
 
     private fun computePreviewMatrix(stMatrix: FloatArray, rotation: Int, isFront: Boolean): FloatArray {
         System.arraycopy(stMatrix, 0, previewMatrix, 0, 16)
@@ -564,29 +637,13 @@ void main() {
         return previewMatrix
     }
 
-    private fun computeEncoderMatrix(stMatrix: FloatArray, rotation: Int, isFront: Boolean): FloatArray {
+    private fun computeLandscapeEncoderMatrix(stMatrix: FloatArray, isFront: Boolean): FloatArray {
         System.arraycopy(stMatrix, 0, encoderMatrix, 0, 16)
-        val rotationDeg = if (isFront) {
-            when (rotation) {
-                Surface.ROTATION_90 -> 90f
-                Surface.ROTATION_270 -> -90f
-                Surface.ROTATION_180 -> 0f
-                else -> 180f
-            }
-        } else {
-            when (rotation) {
-                Surface.ROTATION_90 -> -90f
-                Surface.ROTATION_270 -> 90f
-                Surface.ROTATION_180 -> 180f
-                else -> 0f
-            }
-        }
-        if (rotationDeg != 0f) {
-            Matrix.translateM(encoderMatrix, 0, 0.5f, 0.5f, 0.0f)
-            Matrix.rotateM(encoderMatrix, 0, rotationDeg, 0.0f, 0.0f, 1.0f)
-            Matrix.translateM(encoderMatrix, 0, -0.5f, -0.5f, 0.0f)
-        }
-        // Recorded MP4 stays un-mirrored
+        // Native ROTATION_90 landscape coordinates (un-mirrored) so MediaCodec always encodes hardware-aligned landscape frames
+        val rotationDeg = if (isFront) 90f else -90f
+        Matrix.translateM(encoderMatrix, 0, 0.5f, 0.5f, 0.0f)
+        Matrix.rotateM(encoderMatrix, 0, rotationDeg, 0.0f, 0.0f, 1.0f)
+        Matrix.translateM(encoderMatrix, 0, -0.5f, -0.5f, 0.0f)
         return encoderMatrix
     }
 
@@ -792,20 +849,44 @@ void main() {
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
 
-        // 1. Try 10-bit RGBA_1010102 config for true HDR OLED display
-        val configAttribs10 = intArrayOf(
+        // 1. Try 10-bit RGBA_1010102 config (preferring EGL_RECORDABLE_ANDROID for MediaCodec fast-path)
+        val configAttribs10Recordable = intArrayOf(
             EGL14.EGL_RED_SIZE, 10,
             EGL14.EGL_GREEN_SIZE, 10,
             EGL14.EGL_BLUE_SIZE, 10,
             EGL14.EGL_ALPHA_SIZE, 2,
+            EGL14.EGL_DEPTH_SIZE, 0,
+            EGL14.EGL_STENCIL_SIZE, 0,
+            EGL14.EGL_SAMPLE_BUFFERS, 0,
             EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+            EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_NONE
         )
 
         var found10 = EGL14.eglChooseConfig(
-            eglDisplay, configAttribs10, 0, configs, 0, 1, numConfigs, 0
+            eglDisplay, configAttribs10Recordable, 0, configs, 0, 1, numConfigs, 0
         ) && numConfigs[0] > 0 && configs[0] != null
+
+        if (found10) {
+            Log.i(TAG, "10-bit EGLConfig supports EGL_RECORDABLE_ANDROID=1")
+        } else {
+            val configAttribs10 = intArrayOf(
+                EGL14.EGL_RED_SIZE, 10,
+                EGL14.EGL_GREEN_SIZE, 10,
+                EGL14.EGL_BLUE_SIZE, 10,
+                EGL14.EGL_ALPHA_SIZE, 2,
+                EGL14.EGL_DEPTH_SIZE, 0,
+                EGL14.EGL_STENCIL_SIZE, 0,
+                EGL14.EGL_SAMPLE_BUFFERS, 0,
+                EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_NONE
+            )
+            found10 = EGL14.eglChooseConfig(
+                eglDisplay, configAttribs10, 0, configs, 0, 1, numConfigs, 0
+            ) && numConfigs[0] > 0 && configs[0] != null
+        }
 
         if (!found10) {
             val configAttribs10WindowOnly = intArrayOf(
@@ -813,6 +894,9 @@ void main() {
                 EGL14.EGL_GREEN_SIZE, 10,
                 EGL14.EGL_BLUE_SIZE, 10,
                 EGL14.EGL_ALPHA_SIZE, 2,
+                EGL14.EGL_DEPTH_SIZE, 0,
+                EGL14.EGL_STENCIL_SIZE, 0,
+                EGL14.EGL_SAMPLE_BUFFERS, 0,
                 EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
                 EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
                 EGL14.EGL_NONE
@@ -824,7 +908,7 @@ void main() {
 
         if (found10) {
             eglConfig10Bit = configs[0]
-            Log.i(TAG, "Selected 10-bit RGBA_1010102 EGLConfig for Actua OLED HDR preview")
+            Log.i(TAG, "Selected 10-bit RGBA_1010102 EGLConfig")
         }
 
         // 2. Standard 8-bit RGBA_8888 config
@@ -833,6 +917,9 @@ void main() {
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
+            EGL14.EGL_DEPTH_SIZE, 0,
+            EGL14.EGL_STENCIL_SIZE, 0,
+            EGL14.EGL_SAMPLE_BUFFERS, 0,
             EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR or EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL_RECORDABLE_ANDROID, 1,
@@ -869,7 +956,10 @@ void main() {
             EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
             EGL14.EGL_NONE
         ), 0)
-        if (context == EGL14.EGL_NO_CONTEXT) {
+        if (context != EGL14.EGL_NO_CONTEXT) {
+            isGles3 = true
+        } else {
+            isGles3 = false
             context = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, intArrayOf(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
                 EGL14.EGL_NONE
@@ -919,6 +1009,29 @@ void main() {
         uLutPresetLoc = GLES20.glGetUniformLocation(programId, "uLutPreset")
         uDebandLoc = GLES20.glGetUniformLocation(programId, "uDeband")
         uExposureTrimLoc = GLES20.glGetUniformLocation(programId, "uExposureTrim")
+
+        // Compile ultra-fast pass-through blit shader for single-pass FBO distribution
+        val blitVert = loadShader(GLES20.GL_VERTEX_SHADER, BLIT_VERTEX_SHADER_CODE)
+        val blitFrag = loadShader(GLES20.GL_FRAGMENT_SHADER, BLIT_FRAGMENT_SHADER_CODE)
+        blitProgramId = GLES20.glCreateProgram()
+        GLES20.glAttachShader(blitProgramId, blitVert)
+        GLES20.glAttachShader(blitProgramId, blitFrag)
+        GLES20.glLinkProgram(blitProgramId)
+
+        val blitLinkStatus = IntArray(1)
+        GLES20.glGetProgramiv(blitProgramId, GLES20.GL_LINK_STATUS, blitLinkStatus, 0)
+        if (blitLinkStatus[0] != GLES20.GL_TRUE) {
+            val error = GLES20.glGetProgramInfoLog(blitProgramId)
+            GLES20.glDeleteProgram(blitProgramId)
+            blitProgramId = 0
+            Log.w(TAG, "Failed to link FBO blit program, will fall back to dual-pass: $error")
+        } else {
+            blitAPositionLoc = GLES20.glGetAttribLocation(blitProgramId, "aPosition")
+            blitATextureCoordLoc = GLES20.glGetAttribLocation(blitProgramId, "aTextureCoord")
+            blitUTexMatrixLoc = GLES20.glGetUniformLocation(blitProgramId, "uTexMatrix")
+            blitSFboTextureLoc = GLES20.glGetUniformLocation(blitProgramId, "sFboTexture")
+        }
+
         checkGlError("initShaders")
     }
 
@@ -1017,16 +1130,25 @@ void main() {
             try {
                 destroyEncoderSurface()
                 if (surface != null && surface.isValid && isReady) {
-                    encoderWidth = width
-                    encoderHeight = height
+                    // Always enforce native landscape dimensions for encoder & single-pass FBO
+                    encoderWidth = maxOf(width, height)
+                    encoderHeight = minOf(width, height)
                     val eglSurf = createWindowSurface(surface)
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         encoderEglSurface = eglSurf
                         recordingStartNs = -1L
                         recordedFrameIndex = 0L
                         lastInputFrameTimeNs = -1L
-                        Log.i(TAG, "Encoder EGL surface attached (${encoderWidth}x${encoderHeight}, ${targetFps}fps)")
+                        val currentSurf = previewEglSurface ?: dummyPbufferSurface
+                        if (currentSurf != EGL14.EGL_NO_SURFACE &&
+                            EGL14.eglMakeCurrent(eglDisplay, currentSurf, currentSurf, eglContext)
+                        ) {
+                            ensureFbo(encoderWidth, encoderHeight)
+                        }
+                        Log.i(TAG, "Encoder EGL surface attached (${encoderWidth}x${encoderHeight}, ${targetFps}fps, fboId=$fboId)")
                     }
+                } else {
+                    destroyFbo()
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "Error setting encoder surface", e)
@@ -1111,7 +1233,12 @@ void main() {
     }
 
     private fun createWindowSurface(surface: Surface): EGLSurface {
-        val config = eglConfig ?: run {
+        val isHdrOr10Bit = activeColorProfile != ColorProfile.REC709
+        val config = if (isHdrOr10Bit) {
+            (eglConfig10Bit ?: eglConfig8Bit ?: eglConfig)
+        } else {
+            (eglConfig8Bit ?: eglConfig)
+        } ?: run {
             Log.w(TAG, "Cannot create window surface: EGLConfig is null")
             return EGL14.EGL_NO_SURFACE
         }
@@ -1121,10 +1248,10 @@ void main() {
         }
 
         try {
-            // Standard EGL window surface (rock-solid 8-bit RGBA8888, zero driver stalls)
             val defaultAttribs = intArrayOf(EGL14.EGL_NONE)
             val eglSurf = EGL14.eglCreateWindowSurface(eglDisplay, config, surface, defaultAttribs, 0)
             if (eglSurf != null && eglSurf != EGL14.EGL_NO_SURFACE) {
+                Log.i(TAG, "Created encoder EGL window surface (config=${if (config == eglConfig10Bit) "10-bit" else "8-bit"})")
                 return eglSurf
             }
             Log.w(TAG, "Failed to create EGL window surface: 0x${Integer.toHexString(EGL14.eglGetError())}")
@@ -1197,39 +1324,57 @@ void main() {
                 Log.d("PixelCineHDR", "GL frame rendered successfully (mode=$currentColorMode)")
             }
 
-            // 3. Render directly to Viewfinder using full SurfaceView dimensions
+            // 3. Render pipeline: Single-pass 10-bit GL_RGB10_A2 FBO when recording & shaders match,
+            // cutting fragment shading load by ~50% at 4K 60fps.
             EGL14.eglQuerySurface(eglDisplay, pSurf, EGL14.EGL_WIDTH, queryWidth, 0)
             EGL14.eglQuerySurface(eglDisplay, pSurf, EGL14.EGL_HEIGHT, queryHeight, 0)
             val w = if (queryWidth[0] > 0) queryWidth[0] else previewWidth
             val h = if (queryHeight[0] > 0) queryHeight[0] else previewHeight
 
-            GLES20.glViewport(0, 0, w, h)
-            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-            val pMatrix = computePreviewMatrix(texMatrix, displayRotation, isFrontCamera)
-            val pAspect = computeAspectMatrix(previewAspectMatrix, streamWidth, streamHeight, w, h, displayRotation, anamorphicScale)
-            val effectiveLut = if (currentColorMode == 2 || currentColorMode == 3) 0 else currentLutPreset
-            drawQuad(
-                matrix = pMatrix,
-                aspectMatrix = pAspect,
-                falseColor = if (isFalseColorEnabled) 1 else 0,
-                lutPreset = effectiveLut
-            )
-            checkGlError("drawQuad preview")
-
-            // Pause glReadPixels histogram extraction while recording to eliminate GPU pipeline stalls
-            val isRecordingNow = isRecordingActive || (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE)
-            if (!isRecordingNow) {
-                extractHistogram(w, h)
+            val effectivePreviewLut = if (currentColorMode == 2 || currentColorMode == 3) 0 else currentLutPreset
+            val effectiveEncoderLut = if (currentColorMode == 2 || currentColorMode == 3) {
+                0
+            } else {
+                if (isLutBakeEnabled) currentLutPreset else 0
             }
+            val canUseSinglePassFbo = eSurf != null &&
+                eSurf != EGL14.EGL_NO_SURFACE &&
+                !isFalseColorEnabled &&
+                (effectivePreviewLut == effectiveEncoderLut) &&
+                blitProgramId != 0 &&
+                ensureFbo(encoderWidth, encoderHeight)
 
-            // Viewfinder screen pass: call eglSwapBuffers immediately.
-            // NOTE: Do NOT call eglPresentationTimeANDROID on display windowSurface - SurfaceFlinger will pace it immediately!
-            EGL14.eglSwapBuffers(eglDisplay, pSurf)
+            if (canUseSinglePassFbo) {
+                // Pass 1: Heavy color science shader ONCE into 10-bit GL_RGB10_A2 landscape FBO
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+                GLES20.glViewport(0, 0, fboWidth, fboHeight)
+                if (isGles3) {
+                    GLES30.glInvalidateFramebuffer(GLES30.GL_FRAMEBUFFER, 1, invalidateFboAttachments, 0)
+                }
+                val fboMatrix = computeLandscapeEncoderMatrix(texMatrix, isFrontCamera)
+                val fboAspect = computeAspectMatrix(
+                    fboAspectMatrix, streamWidth, streamHeight, fboWidth, fboHeight, Surface.ROTATION_90, 1.0f
+                )
+                drawQuad(
+                    matrix = fboMatrix,
+                    aspectMatrix = fboAspect,
+                    falseColor = 0,
+                    lutPreset = effectiveEncoderLut
+                )
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-            // 4. Render to MediaCodec HEVC Encoder if recording (exact upright matrix matching viewfinder)
-            if (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE) {
+                // Pass 2a: Blit FBO to Viewfinder (pSurf is already current)
+                GLES20.glViewport(0, 0, w, h)
+                GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                val pBlitMatrix = computeBlitPreviewMatrix(
+                    fboWidth, fboHeight, w, h, displayRotation, isFrontCamera, anamorphicScale
+                )
+                drawBlitQuad(fboTexId, pBlitMatrix)
+                invalidateDefaultDepthStencil()
+                EGL14.eglSwapBuffers(eglDisplay, pSurf)
+
+                // Pass 2b: Blit FBO 1:1 to landscape MediaCodec Encoder Surface (zero rotation!)
                 if (EGL14.eglMakeCurrent(eglDisplay, eSurf, eSurf, eglContext)) {
                     EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_WIDTH, queryWidth, 0)
                     EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_HEIGHT, queryHeight, 0)
@@ -1239,46 +1384,64 @@ void main() {
                     GLES20.glViewport(0, 0, encW, encH)
                     GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    drawBlitQuad(fboTexId, identityMatrix)
+                    invalidateDefaultDepthStencil()
+                    submitEncoderFrame(eSurf)
+                }
+            } else {
+                // Direct Viewfinder Pass (idle preview, False Color, or unbaked LUT preview)
+                GLES20.glViewport(0, 0, w, h)
+                GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                    val eMatrix = computeEncoderMatrix(texMatrix, displayRotation, isFrontCamera)
-                    val eAspect = computeAspectMatrix(encoderAspectMatrix, streamWidth, streamHeight, encW, encH, displayRotation, 1.0f)
-                    val effectiveEncoderLut = if (currentColorMode == 2 || currentColorMode == 3) {
-                        0
-                    } else {
-                        if (isLutBakeEnabled) currentLutPreset else 0
+                val pMatrix = computePreviewMatrix(texMatrix, displayRotation, isFrontCamera)
+                val pAspect = computeAspectMatrix(
+                    previewAspectMatrix, streamWidth, streamHeight, w, h, displayRotation, anamorphicScale
+                )
+                drawQuad(
+                    matrix = pMatrix,
+                    aspectMatrix = pAspect,
+                    falseColor = if (isFalseColorEnabled) 1 else 0,
+                    lutPreset = effectivePreviewLut
+                )
+                checkGlError("drawQuad preview")
+
+                // Pause glReadPixels histogram extraction while recording to eliminate GPU pipeline stalls
+                val isRecordingNow = isRecordingActive || (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE)
+                if (!isRecordingNow) {
+                    extractHistogram(w, h)
+                }
+
+                invalidateDefaultDepthStencil()
+                EGL14.eglSwapBuffers(eglDisplay, pSurf)
+
+                // Render to MediaCodec HEVC Encoder in native landscape (ROTATION_90) when recording
+                if (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE) {
+                    if (EGL14.eglMakeCurrent(eglDisplay, eSurf, eSurf, eglContext)) {
+                        EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_WIDTH, queryWidth, 0)
+                        EGL14.eglQuerySurface(eglDisplay, eSurf, EGL14.EGL_HEIGHT, queryHeight, 0)
+                        val encW = if (queryWidth[0] > 0) queryWidth[0] else encoderWidth
+                        val encH = if (queryHeight[0] > 0) queryHeight[0] else encoderHeight
+
+                        GLES20.glViewport(0, 0, encW, encH)
+                        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                        val eMatrix = computeLandscapeEncoderMatrix(texMatrix, isFrontCamera)
+                        val eAspect = computeAspectMatrix(
+                            encoderAspectMatrix, streamWidth, streamHeight, encW, encH, Surface.ROTATION_90, 1.0f
+                        )
+                        drawQuad(
+                            matrix = eMatrix,
+                            aspectMatrix = eAspect,
+                            falseColor = 0,
+                            lutPreset = effectiveEncoderLut
+                        )
+                        checkGlError("drawQuad encoder")
+
+                        invalidateDefaultDepthStencil()
+                        submitEncoderFrame(eSurf)
                     }
-                    drawQuad(
-                        matrix = eMatrix,
-                        aspectMatrix = eAspect,
-                        falseColor = 0,
-                        lutPreset = effectiveEncoderLut
-                    )
-                    checkGlError("drawQuad encoder")
-
-                    // Exact quantized mathematical frame cadence (ptsNs = frameIndex * (1_000_000_000L / targetFps))
-                    val nowNs = System.nanoTime()
-                    val frameDurationNs = 1_000_000_000L / maxOf(1, targetFps)
-
-                    if (recordingStartNs < 0L) {
-                        recordingStartNs = nowNs
-                        recordedFrameIndex = 0L
-                        lastInputFrameTimeNs = nowNs
-                        onFirstEncoderFrame?.invoke(recordingStartNs)
-                    } else {
-                        val deltaNs = nowNs - lastInputFrameTimeNs
-                        lastInputFrameTimeNs = nowNs
-                        // Advance frameIndex by 2 if genuine sensor drop > 1.7 * frameDurationNs occurred
-                        if (deltaNs > 1.7 * frameDurationNs) {
-                            val droppedSteps = Math.round(deltaNs.toDouble() / frameDurationNs.toDouble()).toLong().coerceAtLeast(2L)
-                            recordedFrameIndex += droppedSteps
-                        } else {
-                            recordedFrameIndex += 1L
-                        }
-                    }
-
-                    val ptsNs = recordedFrameIndex * frameDurationNs
-                    EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, ptsNs)
-                    EGL14.eglSwapBuffers(eglDisplay, eSurf)
                 }
             }
         } catch (e: Exception) {
@@ -1382,6 +1545,137 @@ void main() {
         GLES20.glDisableVertexAttribArray(aTextureCoordLoc)
     }
 
+    private fun drawBlitQuad(texId: Int, texMatrix: FloatArray) {
+        GLES20.glUseProgram(blitProgramId)
+        GLES20.glUniformMatrix4fv(blitUTexMatrixLoc, 1, false, texMatrix, 0)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+        GLES20.glUniform1i(blitSFboTextureLoc, 0)
+
+        GLES20.glEnableVertexAttribArray(blitAPositionLoc)
+        GLES20.glVertexAttribPointer(blitAPositionLoc, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+
+        GLES20.glEnableVertexAttribArray(blitATextureCoordLoc)
+        GLES20.glVertexAttribPointer(blitATextureCoordLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        GLES20.glDisableVertexAttribArray(blitAPositionLoc)
+        GLES20.glDisableVertexAttribArray(blitATextureCoordLoc)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+    }
+
+    private fun submitEncoderFrame(eSurf: EGLSurface) {
+        val nowNs = System.nanoTime()
+        val frameDurationNs = 1_000_000_000L / maxOf(1, targetFps)
+
+        if (recordingStartNs < 0L) {
+            recordingStartNs = nowNs
+            recordedFrameIndex = 0L
+            lastInputFrameTimeNs = nowNs
+            onFirstEncoderFrame?.invoke(recordingStartNs)
+        } else {
+            val deltaNs = nowNs - lastInputFrameTimeNs
+            lastInputFrameTimeNs = nowNs
+            if (deltaNs > 1.7 * frameDurationNs) {
+                val droppedSteps = Math.round(deltaNs.toDouble() / frameDurationNs.toDouble()).toLong().coerceAtLeast(2L)
+                recordedFrameIndex += droppedSteps
+            } else {
+                recordedFrameIndex += 1L
+            }
+        }
+
+        val ptsNs = recordedFrameIndex * frameDurationNs
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eSurf, ptsNs)
+        EGL14.eglSwapBuffers(eglDisplay, eSurf)
+    }
+
+    private fun invalidateDefaultDepthStencil() {
+        if (isGles3) {
+            GLES30.glInvalidateFramebuffer(GLES30.GL_FRAMEBUFFER, 2, invalidateDefaultAttachments, 0)
+        }
+    }
+
+    private fun ensureFbo(width: Int, height: Int): Boolean {
+        if (!isGles3 || width <= 0 || height <= 0) return false
+        if (fboId != 0 && fboTexId != 0 && fboWidth == width && fboHeight == height) {
+            return true
+        }
+        destroyFbo()
+
+        val texIds = IntArray(1)
+        GLES20.glGenTextures(1, texIds, 0)
+        val tex = texIds[0]
+        if (tex == 0) return false
+
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES30.glTexImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            GLES30.GL_RGB10_A2,
+            width,
+            height,
+            0,
+            GLES20.GL_RGBA,
+            GLES30.GL_UNSIGNED_INT_2_10_10_10_REV,
+            null
+        )
+
+        val fboIds = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboIds, 0)
+        val fbo = fboIds[0]
+        if (fbo == 0) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            GLES20.glDeleteTextures(1, texIds, 0)
+            return false
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER,
+            GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D,
+            tex,
+            0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            Log.w(TAG, "GL_RGB10_A2 FBO incomplete: status=0x${Integer.toHexString(status)}")
+            GLES20.glDeleteFramebuffers(1, fboIds, 0)
+            GLES20.glDeleteTextures(1, texIds, 0)
+            return false
+        }
+
+        fboId = fbo
+        fboTexId = tex
+        fboWidth = width
+        fboHeight = height
+        Log.i(TAG, "Created 10-bit GL_RGB10_A2 FBO (${width}x${height})")
+        return true
+    }
+
+    private fun destroyFbo() {
+        if (fboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
+            fboId = 0
+        }
+        if (fboTexId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(fboTexId), 0)
+            fboTexId = 0
+        }
+        fboWidth = 0
+        fboHeight = 0
+    }
+
     private fun checkGlError(op: String) {
         val error = GLES20.glGetError()
         if (error != GLES20.GL_NO_ERROR) {
@@ -1436,6 +1730,7 @@ void main() {
             handler.post {
                 destroyPreviewSurface()
                 destroyEncoderSurface()
+                destroyFbo()
 
                 if (dummyPbufferSurface != EGL14.EGL_NO_SURFACE) {
                     try {
@@ -1447,6 +1742,11 @@ void main() {
                 if (programId != 0) {
                     GLES20.glDeleteProgram(programId)
                     programId = 0
+                }
+
+                if (blitProgramId != 0) {
+                    GLES20.glDeleteProgram(blitProgramId)
+                    blitProgramId = 0
                 }
 
                 if (oesTextureId != 0) {
