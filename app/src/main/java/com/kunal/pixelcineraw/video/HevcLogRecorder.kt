@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
@@ -25,6 +26,8 @@ import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -73,28 +76,36 @@ class HevcLogRecorder(
         }
     }
 
-    private data class PendingSample(
-        val isAudio: Boolean,
-        val data: ByteBuffer,
-        val info: MediaCodec.BufferInfo
-    )
+    private sealed class MuxerCommand {
+        class AddVideoTrack(val format: MediaFormat) : MuxerCommand()
+        class AddAudioTrack(val format: MediaFormat) : MuxerCommand()
+        class WriteSample(val isAudio: Boolean, val data: ByteBuffer, val info: MediaCodec.BufferInfo) : MuxerCommand()
+        class FlushAndStop(val latch: CountDownLatch) : MuxerCommand()
+    }
 
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
     private var mediaMuxer: MediaMuxer? = null
     private var inputSurface: Surface? = null
 
-    // Dedicated asynchronous encoder thread & handler
+    // Dedicated decoupled threads: video encoder, audio encoder, and single-writer MediaMuxer
     private var encoderThread: HandlerThread? = null
     private var encoderHandler: Handler? = null
+    private var audioEncoderThread: HandlerThread? = null
+    private var audioEncoderHandler: Handler? = null
+    private var muxerThread: HandlerThread? = null
+    private var muxerHandler: Handler? = null
 
+    // Single-writer lock-free MediaMuxer queue (zero contention between Video, Audio, and AudioRecord)
+    private val muxerQueue = ConcurrentLinkedQueue<MuxerCommand>()
+    private val muxerDrainScheduled = AtomicBoolean(false)
+
+    // Owned exclusively by muxerThread once started
     private var videoTrackIndex = -1
     private var audioTrackIndex = -1
     private var isMuxerStarted = false
-    private val muxerLock = Any()
-
-    private val pendingVideoSamples = mutableListOf<PendingSample>()
-    private val pendingAudioSamples = mutableListOf<PendingSample>()
+    private val pendingVideoSamples = mutableListOf<MuxerCommand.WriteSample>()
+    private val pendingAudioSamples = mutableListOf<MuxerCommand.WriteSample>()
 
     private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
     private val availableAudioInputBuffers = ConcurrentLinkedQueue<Int>()
@@ -104,7 +115,10 @@ class HevcLogRecorder(
     private var firstAudioPtsUs = -1L
     private var lastAudioPtsUs = -1L
     private var totalAudioBytesFed = 0L
-    private var totalBytesWritten = 0L
+    @Volatile private var totalBytesWritten = 0L
+
+    private var lastMetricsUpdateSec = -1L
+    private var lastMetricsUpdateMs = 0L
 
     private var isHlgRecording = false
     private var activeColorProfile: ColorProfile = ColorProfile.REC709
@@ -143,9 +157,98 @@ class HevcLogRecorder(
 
     private fun ensureEncoderThread() {
         if (encoderThread == null) {
-            encoderThread = HandlerThread("PixelCineEncoderThread", Process.THREAD_PRIORITY_URGENT_AUDIO).apply {
+            encoderThread = HandlerThread("PixelCineVideoEncoder", Process.THREAD_PRIORITY_URGENT_AUDIO).apply {
                 start()
                 encoderHandler = Handler(looper)
+            }
+        }
+        if (audioEncoderThread == null) {
+            audioEncoderThread = HandlerThread("PixelCineAudioEncoder", Process.THREAD_PRIORITY_AUDIO).apply {
+                start()
+                audioEncoderHandler = Handler(looper)
+            }
+        }
+        if (muxerThread == null) {
+            muxerThread = HandlerThread("PixelCineMuxerWriter", Process.THREAD_PRIORITY_DISPLAY).apply {
+                start()
+                muxerHandler = Handler(looper)
+            }
+        }
+    }
+
+    private fun enqueueMuxerCommand(cmd: MuxerCommand) {
+        muxerQueue.offer(cmd)
+        if (muxerDrainScheduled.compareAndSet(false, true)) {
+            muxerHandler?.post { drainMuxerQueue() }
+        }
+    }
+
+    private fun drainMuxerQueue() {
+        while (true) {
+            muxerDrainScheduled.set(false)
+            while (true) {
+                val cmd = muxerQueue.poll() ?: break
+                processMuxerCommand(cmd)
+            }
+            if (muxerQueue.isEmpty() || !muxerDrainScheduled.compareAndSet(false, true)) {
+                break
+            }
+        }
+    }
+
+    private fun processMuxerCommand(cmd: MuxerCommand) {
+        when (cmd) {
+            is MuxerCommand.AddVideoTrack -> {
+                val muxer = mediaMuxer ?: return
+                if (!isMuxerStarted && videoTrackIndex < 0) {
+                    videoTrackIndex = muxer.addTrack(cmd.format)
+                    Log.i(TAG, "Video track added on single-writer muxer thread: $videoTrackIndex")
+                    checkAndStartMuxer(muxer)
+                }
+            }
+            is MuxerCommand.AddAudioTrack -> {
+                val muxer = mediaMuxer ?: return
+                if (!isMuxerStarted && audioTrackIndex < 0) {
+                    audioTrackIndex = muxer.addTrack(cmd.format)
+                    Log.i(TAG, "Audio track added on single-writer muxer thread: $audioTrackIndex")
+                    checkAndStartMuxer(muxer)
+                }
+            }
+            is MuxerCommand.WriteSample -> {
+                val muxer = mediaMuxer ?: return
+                if (isMuxerStarted) {
+                    val trackIdx = if (cmd.isAudio) audioTrackIndex else videoTrackIndex
+                    if (trackIdx >= 0) {
+                        try {
+                            muxer.writeSampleData(trackIdx, cmd.data, cmd.info)
+                            totalBytesWritten += cmd.info.size
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error writing sample on muxer thread (audio=${cmd.isAudio})", e)
+                        }
+                    }
+                } else {
+                    if (cmd.isAudio) {
+                        pendingAudioSamples.add(cmd)
+                    } else {
+                        pendingVideoSamples.add(cmd)
+                    }
+                }
+            }
+            is MuxerCommand.FlushAndStop -> {
+                try {
+                    if (isMuxerStarted) {
+                        mediaMuxer?.stop()
+                    }
+                    mediaMuxer?.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error releasing MediaMuxer", e)
+                } finally {
+                    mediaMuxer = null
+                    isMuxerStarted = false
+                    pendingVideoSamples.clear()
+                    pendingAudioSamples.clear()
+                    cmd.latch.countDown()
+                }
             }
         }
     }
@@ -165,22 +268,25 @@ class HevcLogRecorder(
         isPortrait: Boolean = false
     ): Surface {
         ensureEncoderThread()
-        val handler = encoderHandler ?: throw IllegalStateException("Encoder thread handler not ready")
+        val videoHandler = encoderHandler ?: throw IllegalStateException("Video encoder thread handler not ready")
+        val audioHandler = audioEncoderHandler ?: throw IllegalStateException("Audio encoder thread handler not ready")
 
         // Reset tracking state
-        synchronized(muxerLock) {
-            videoTrackIndex = -1
-            audioTrackIndex = -1
-            isMuxerStarted = false
-            firstVideoPtsUs = -1L
-            lastVideoPtsUs = -1L
-            firstAudioPtsUs = -1L
-            lastAudioPtsUs = -1L
-            totalAudioBytesFed = 0L
-            totalBytesWritten = 0L
-            pendingVideoSamples.clear()
-            pendingAudioSamples.clear()
-        }
+        muxerQueue.clear()
+        muxerDrainScheduled.set(false)
+        videoTrackIndex = -1
+        audioTrackIndex = -1
+        isMuxerStarted = false
+        firstVideoPtsUs = -1L
+        lastVideoPtsUs = -1L
+        firstAudioPtsUs = -1L
+        lastAudioPtsUs = -1L
+        totalAudioBytesFed = 0L
+        totalBytesWritten = 0L
+        lastMetricsUpdateSec = -1L
+        lastMetricsUpdateMs = 0L
+        pendingVideoSamples.clear()
+        pendingAudioSamples.clear()
         audioQueue.clear()
         availableAudioInputBuffers.clear()
         this.targetFps = fps
@@ -248,7 +354,7 @@ class HevcLogRecorder(
                     val encoder = MediaCodec.createEncoderByType(targetMime)
 
                     // Asynchronous Callback Mode: MUST be called before configure()
-                    encoder.setCallback(createVideoCallback(), handler)
+                    encoder.setCallback(createVideoCallback(), videoHandler)
                     encoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                     inputSurface = encoder.createInputSurface()
                     videoEncoder = encoder
@@ -268,7 +374,7 @@ class HevcLogRecorder(
             throw lastEx ?: IllegalStateException("Failed to configure video encoder")
         }
 
-        // Configure Studio-grade Audio Encoder (AAC 48kHz Stereo 320kbps) with asynchronous callback
+        // Configure Studio-grade Audio Encoder (AAC 48kHz Stereo 320kbps) on its own dedicated thread
         val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AudioEngine.SAMPLE_RATE, 2).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             setInteger(MediaFormat.KEY_BIT_RATE, 320_000)
@@ -276,7 +382,7 @@ class HevcLogRecorder(
         }
 
         audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
-            setCallback(createAudioCallback(), handler)
+            setCallback(createAudioCallback(), audioHandler)
             configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
 
@@ -315,26 +421,27 @@ class HevcLogRecorder(
                         encodedData.position(info.offset)
                         encodedData.limit(info.offset + info.size)
 
-                        synchronized(muxerLock) {
-                            if (isMuxerStarted) {
-                                mediaMuxer?.writeSampleData(videoTrackIndex, encodedData, info)
-                                totalBytesWritten += info.size
-                            } else {
-                                val clone = ByteBuffer.allocate(info.size)
-                                clone.put(encodedData)
-                                clone.flip()
-                                val infoClone = MediaCodec.BufferInfo().apply {
-                                    set(0, info.size, info.presentationTimeUs, info.flags)
-                                }
-                                pendingVideoSamples.add(PendingSample(isAudio = false, clone, infoClone))
-                            }
+                        // Copy into non-blocking queue and immediately release hardware output buffer
+                        val clone = ByteBuffer.allocate(info.size)
+                        clone.put(encodedData)
+                        clone.flip()
+                        val infoClone = MediaCodec.BufferInfo().apply {
+                            set(0, info.size, info.presentationTimeUs, info.flags)
                         }
+                        enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = false, clone, infoClone))
 
                         if (videoFrameCount++ % 60 == 0L) {
                             Log.d(TAG, "Muxer video frame #$videoFrameCount: PTS=${monotonicPts / 1000}ms, delta=${deltaUs / 1000f}ms (target=${1000f / targetFps}ms)")
                         }
 
-                        onMetricsUpdate?.invoke(lastVideoPtsUs / 1_000_000L, totalBytesWritten, 0)
+                        // Throttle UI telemetry metrics strictly to 1Hz
+                        val sec = lastVideoPtsUs / 1_000_000L
+                        val nowMs = SystemClock.uptimeMillis()
+                        if (sec != lastMetricsUpdateSec || nowMs - lastMetricsUpdateMs >= 1000L) {
+                            lastMetricsUpdateSec = sec
+                            lastMetricsUpdateMs = nowMs
+                            onMetricsUpdate?.invoke(sec, totalBytesWritten, 0)
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error handling video output buffer", e)
@@ -346,23 +453,16 @@ class HevcLogRecorder(
             }
 
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                synchronized(muxerLock) {
-                    if (!isMuxerStarted) {
-                        val muxer = mediaMuxer ?: return
-                        if (activeColorProfile == ColorProfile.HLG_10BIT) {
-                            format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
-                            format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
-                            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
-                        } else if (activeColorProfile == ColorProfile.HDR10_PLUS) {
-                            format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
-                            format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_ST2084)
-                            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
-                        }
-                        videoTrackIndex = muxer.addTrack(format)
-                        Log.i(TAG, "Video track added: $videoTrackIndex")
-                        checkAndStartMuxer(muxer)
-                    }
+                if (activeColorProfile == ColorProfile.HLG_10BIT) {
+                    format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
+                    format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
+                    format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                } else if (activeColorProfile == ColorProfile.HDR10_PLUS) {
+                    format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
+                    format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_ST2084)
+                    format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
                 }
+                enqueueMuxerCommand(MuxerCommand.AddVideoTrack(format))
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -411,20 +511,13 @@ class HevcLogRecorder(
                         encodedData.position(info.offset)
                         encodedData.limit(info.offset + info.size)
 
-                        synchronized(muxerLock) {
-                            if (isMuxerStarted) {
-                                mediaMuxer?.writeSampleData(audioTrackIndex, encodedData, info)
-                                totalBytesWritten += info.size
-                            } else {
-                                val clone = ByteBuffer.allocate(info.size)
-                                clone.put(encodedData)
-                                clone.flip()
-                                val infoClone = MediaCodec.BufferInfo().apply {
-                                    set(0, info.size, info.presentationTimeUs, info.flags)
-                                }
-                                pendingAudioSamples.add(PendingSample(isAudio = true, clone, infoClone))
-                            }
+                        val clone = ByteBuffer.allocate(info.size)
+                        clone.put(encodedData)
+                        clone.flip()
+                        val infoClone = MediaCodec.BufferInfo().apply {
+                            set(0, info.size, info.presentationTimeUs, info.flags)
                         }
+                        enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = true, clone, infoClone))
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error handling audio output buffer", e)
@@ -436,14 +529,7 @@ class HevcLogRecorder(
             }
 
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                synchronized(muxerLock) {
-                    if (!isMuxerStarted) {
-                        val muxer = mediaMuxer ?: return
-                        audioTrackIndex = muxer.addTrack(format)
-                        Log.i(TAG, "Audio track added: $audioTrackIndex")
-                        checkAndStartMuxer(muxer)
-                    }
-                }
+                enqueueMuxerCommand(MuxerCommand.AddAudioTrack(format))
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -586,7 +672,7 @@ class HevcLogRecorder(
                         }
                     }
                 }
-                val handler = encoderHandler
+                val handler = audioEncoderHandler
                 if (handler != null) {
                     handler.post {
                         if (isRecording.get()) {
@@ -642,27 +728,26 @@ class HevcLogRecorder(
         out.write(header, 0, 44)
     }
 
+    // Invoked exclusively on muxerThread
     private fun checkAndStartMuxer(muxer: MediaMuxer) {
-        synchronized(muxerLock) {
-            if (videoTrackIndex >= 0 && audioTrackIndex >= 0 && !isMuxerStarted) {
-                muxer.start()
-                isMuxerStarted = true
-                Log.i(TAG, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex")
+        if (videoTrackIndex >= 0 && audioTrackIndex >= 0 && !isMuxerStarted) {
+            muxer.start()
+            isMuxerStarted = true
+            Log.i(TAG, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex")
 
-                // Flush buffered video frames (including keyframe)
-                for (sample in pendingVideoSamples) {
-                    muxer.writeSampleData(videoTrackIndex, sample.data, sample.info)
-                    totalBytesWritten += sample.info.size
-                }
-                pendingVideoSamples.clear()
-
-                // Flush buffered audio packets
-                for (sample in pendingAudioSamples) {
-                    muxer.writeSampleData(audioTrackIndex, sample.data, sample.info)
-                    totalBytesWritten += sample.info.size
-                }
-                pendingAudioSamples.clear()
+            // Flush buffered video frames (including keyframe)
+            for (sample in pendingVideoSamples) {
+                muxer.writeSampleData(videoTrackIndex, sample.data, sample.info)
+                totalBytesWritten += sample.info.size
             }
+            pendingVideoSamples.clear()
+
+            // Flush buffered audio packets
+            for (sample in pendingAudioSamples) {
+                muxer.writeSampleData(audioTrackIndex, sample.data, sample.info)
+                totalBytesWritten += sample.info.size
+            }
+            pendingAudioSamples.clear()
         }
     }
 
@@ -681,9 +766,9 @@ class HevcLogRecorder(
             Log.w(TAG, "Error signaling EOS to video encoder", e)
         }
 
-        val handler = encoderHandler
-        if (handler != null) {
-            handler.post {
+        val audioHandler = audioEncoderHandler
+        if (audioHandler != null) {
+            audioHandler.post {
                 try {
                     val encoder = audioEncoder
                     val freeIndex = availableAudioInputBuffers.poll()
@@ -696,42 +781,35 @@ class HevcLogRecorder(
             }
         }
 
-        // Brief delay to allow final asynchronous output frames to flush to muxer
+        // Brief delay to allow final asynchronous output frames to enqueue into muxerQueue
         try {
             Thread.sleep(120)
         } catch (_: Exception) {}
 
-        synchronized(muxerLock) {
-            try {
-                videoEncoder?.stop()
-                videoEncoder?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error releasing video encoder", e)
-            } finally {
-                videoEncoder = null
-            }
-
-            try {
-                audioEncoder?.stop()
-                audioEncoder?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error releasing audio encoder", e)
-            } finally {
-                audioEncoder = null
-            }
-
-            try {
-                if (isMuxerStarted) {
-                    mediaMuxer?.stop()
-                }
-                mediaMuxer?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error releasing MediaMuxer", e)
-            } finally {
-                mediaMuxer = null
-                isMuxerStarted = false
-            }
+        try {
+            videoEncoder?.stop()
+            videoEncoder?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing video encoder", e)
+        } finally {
+            videoEncoder = null
         }
+
+        try {
+            audioEncoder?.stop()
+            audioEncoder?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing audio encoder", e)
+        } finally {
+            audioEncoder = null
+        }
+
+        // Drain all queued samples and stop/release MediaMuxer on the dedicated single-writer thread
+        val stopLatch = CountDownLatch(1)
+        enqueueMuxerCommand(MuxerCommand.FlushAndStop(stopLatch))
+        try {
+            stopLatch.await(2000, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {}
 
         fileDescriptor?.close()
         fileDescriptor = null
@@ -814,5 +892,11 @@ class HevcLogRecorder(
         encoderThread?.quitSafely()
         encoderThread = null
         encoderHandler = null
+        audioEncoderThread?.quitSafely()
+        audioEncoderThread = null
+        audioEncoderHandler = null
+        muxerThread?.quitSafely()
+        muxerThread = null
+        muxerHandler = null
     }
 }

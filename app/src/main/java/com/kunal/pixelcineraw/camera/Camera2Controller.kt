@@ -155,6 +155,7 @@ class Camera2Controller(
     private var pendingHistogramData: HistogramData? = null
     private var isHistogramDispatchScheduled = false
     private var lastAudioUpdateTime = 0L
+    private var lastMetricsUpdateTime = 0L
 
     // iPhone-Style Cinema Auto-ISO Controller State (180° Shutter + AUTO ISO)
     @Volatile private var currentContinuousIso = _state.value.iso.toFloat()
@@ -667,6 +668,8 @@ class Camera2Controller(
         val vRes = _state.value.videoResolution
         val encW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
         val encH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
+        lastMetricsUpdateTime = 0L
+        hlgGlRenderer?.setRecordingActive(true)
         hlgGlRenderer?.setEncoderSurface(surface, encW, encH, _state.value.targetFps)
 
         if (_state.value.isGyroflowLoggingEnabled) {
@@ -698,6 +701,7 @@ class Camera2Controller(
         } catch (e: Exception) {
             Log.w(TAG, "Error stopping Gyroflow logger", e)
         }
+        hlgGlRenderer?.setRecordingActive(false)
         hlgGlRenderer?.setEncoderSurface(null, 0, 0)
         videoRecordingSurface = null
         _state.update { it.copy(isRecording = false) }
@@ -2179,6 +2183,8 @@ class Camera2Controller(
     }
 
     fun setRecordingActive(active: Boolean, path: String? = null) {
+        if (active) lastMetricsUpdateTime = 0L
+        hlgGlRenderer?.setRecordingActive(active)
         _state.update {
             it.copy(
                 isRecording = active,
@@ -2191,7 +2197,8 @@ class Camera2Controller(
 
     fun updateAudioLevels(peakL: Float, peakR: Float) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastAudioUpdateTime < 66L) { // ~15Hz throttle for UI VU bars
+        val throttleMs = if (_state.value.isRecording) 83L else 66L // 12Hz while recording, ~15Hz in standby
+        if (now - lastAudioUpdateTime < throttleMs) {
             return
         }
         lastAudioUpdateTime = now
@@ -2201,6 +2208,11 @@ class Camera2Controller(
     }
 
     fun updateRecordingMetrics(seconds: Long, bytes: Long, droppedFrames: Int) {
+        val now = SystemClock.uptimeMillis()
+        if (seconds == _state.value.recordingTimeSeconds && now - lastMetricsUpdateTime < 1000L) {
+            return // 1Hz UI timer & byte readout throttle
+        }
+        lastMetricsUpdateTime = now
         _state.update {
             it.copy(
                 recordingTimeSeconds = seconds,

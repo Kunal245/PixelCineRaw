@@ -513,6 +513,15 @@ void main() {
     }
 
     // Real-time downsampled histogram & luma telemetry extraction (10 fps, 16x16 thumbnail ~0.02ms)
+    // Paused automatically while recording to prevent GPU glReadPixels pipeline stalls
+    @Volatile
+    var isRecordingActive: Boolean = false
+        private set
+
+    fun setRecordingActive(active: Boolean) {
+        isRecordingActive = active
+    }
+
     private var lastHistogramSampleTimeMs: Long = 0L
     private val histogramPixelBuffer = ByteBuffer.allocateDirect(16 * 16 * 4).order(ByteOrder.nativeOrder())
     var onHistogramExtracted: ((HistogramData) -> Unit)? = null
@@ -1209,54 +1218,10 @@ void main() {
             )
             checkGlError("drawQuad preview")
 
-            // Real-time downsampled histogram & scene luma telemetry extraction (10 fps, 16x16 thumbnail ~0.02ms)
-            val nowMs = SystemClock.uptimeMillis()
-            if (nowMs - lastHistogramSampleTimeMs >= 100L && onHistogramExtracted != null && w >= 16 && h >= 16) {
-                lastHistogramSampleTimeMs = nowMs
-                try {
-                    histogramPixelBuffer.rewind()
-                    GLES20.glReadPixels(w / 2 - 8, h / 2 - 8, 16, 16, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, histogramPixelBuffer)
-                    histogramPixelBuffer.rewind()
-
-                    val rCounts = IntArray(32)
-                    val gCounts = IntArray(32)
-                    val bCounts = IntArray(32)
-                    val lCounts = IntArray(32)
-                    var maxCount = 1
-
-                    for (i in 0 until 256) {
-                        val r = histogramPixelBuffer.get().toInt() and 0xFF
-                        val g = histogramPixelBuffer.get().toInt() and 0xFF
-                        val b = histogramPixelBuffer.get().toInt() and 0xFF
-                        histogramPixelBuffer.get() // skip alpha
-                        val luma = (0.2126f * r + 0.7152f * g + 0.0722f * b).toInt().coerceIn(0, 255)
-
-                        val rBin = r shr 3
-                        val gBin = g shr 3
-                        val bBin = b shr 3
-                        val lBin = luma shr 3
-
-                        rCounts[rBin]++
-                        gCounts[gBin]++
-                        bCounts[bBin]++
-                        lCounts[lBin]++
-
-                        if (rCounts[rBin] > maxCount) maxCount = rCounts[rBin]
-                        if (gCounts[gBin] > maxCount) maxCount = gCounts[gBin]
-                        if (bCounts[bBin] > maxCount) maxCount = bCounts[bBin]
-                        if (lCounts[lBin] > maxCount) maxCount = lCounts[lBin]
-                    }
-
-                    val redBins = FloatArray(32) { rCounts[it].toFloat() / maxCount }
-                    val greenBins = FloatArray(32) { gCounts[it].toFloat() / maxCount }
-                    val blueBins = FloatArray(32) { bCounts[it].toFloat() / maxCount }
-                    val lumaBins = FloatArray(32) { lCounts[it].toFloat() / maxCount }
-
-                    val data = HistogramData(redBins, greenBins, blueBins, lumaBins)
-                    onHistogramExtracted?.invoke(data)
-                } catch (e: Exception) {
-                    // Ignore transient buffer access issues
-                }
+            // Pause glReadPixels histogram extraction while recording to eliminate GPU pipeline stalls
+            val isRecordingNow = isRecordingActive || (eSurf != null && eSurf != EGL14.EGL_NO_SURFACE)
+            if (!isRecordingNow) {
+                extractHistogram(w, h)
             }
 
             // Viewfinder screen pass: call eglSwapBuffers immediately.
@@ -1318,6 +1283,58 @@ void main() {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error rendering GL frame", e)
+        }
+    }
+
+    private fun extractHistogram(w: Int, h: Int) {
+        val nowMs = SystemClock.uptimeMillis()
+        if (nowMs - lastHistogramSampleTimeMs < 100L || onHistogramExtracted == null || w < 16 || h < 16) {
+            return
+        }
+        lastHistogramSampleTimeMs = nowMs
+        try {
+            histogramPixelBuffer.rewind()
+            GLES20.glReadPixels(w / 2 - 8, h / 2 - 8, 16, 16, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, histogramPixelBuffer)
+            histogramPixelBuffer.rewind()
+
+            val rCounts = IntArray(32)
+            val gCounts = IntArray(32)
+            val bCounts = IntArray(32)
+            val lCounts = IntArray(32)
+            var maxCount = 1
+
+            for (i in 0 until 256) {
+                val r = histogramPixelBuffer.get().toInt() and 0xFF
+                val g = histogramPixelBuffer.get().toInt() and 0xFF
+                val b = histogramPixelBuffer.get().toInt() and 0xFF
+                histogramPixelBuffer.get() // skip alpha
+                val luma = (0.2126f * r + 0.7152f * g + 0.0722f * b).toInt().coerceIn(0, 255)
+
+                val rBin = r shr 3
+                val gBin = g shr 3
+                val bBin = b shr 3
+                val lBin = luma shr 3
+
+                rCounts[rBin]++
+                gCounts[gBin]++
+                bCounts[bBin]++
+                lCounts[lBin]++
+
+                if (rCounts[rBin] > maxCount) maxCount = rCounts[rBin]
+                if (gCounts[gBin] > maxCount) maxCount = gCounts[gBin]
+                if (bCounts[bBin] > maxCount) maxCount = bCounts[bBin]
+                if (lCounts[lBin] > maxCount) maxCount = lCounts[lBin]
+            }
+
+            val redBins = FloatArray(32) { rCounts[it].toFloat() / maxCount }
+            val greenBins = FloatArray(32) { gCounts[it].toFloat() / maxCount }
+            val blueBins = FloatArray(32) { bCounts[it].toFloat() / maxCount }
+            val lumaBins = FloatArray(32) { lCounts[it].toFloat() / maxCount }
+
+            val data = HistogramData(redBins, greenBins, blueBins, lumaBins)
+            onHistogramExtracted?.invoke(data)
+        } catch (_: Exception) {
+            // Ignore transient buffer access issues
         }
     }
 

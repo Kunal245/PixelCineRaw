@@ -3,6 +3,7 @@ package com.kunal.pixelcineraw.ui
 import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
+import android.os.SystemClock
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
@@ -24,9 +25,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -158,6 +159,38 @@ private fun PortraitCinemaLayout(
     val context = LocalContext.current
     var showFormatPopover by remember { mutableStateOf(false) }
     var showProSheet by remember { mutableStateOf(false) }
+
+    // 1Hz recording timer & 12Hz VU meter UI throttle during recording
+    var throttledRecordingSeconds by remember { mutableLongStateOf(state.recordingTimeSeconds) }
+    var throttledRecordedBytes by remember { mutableLongStateOf(state.recordedBytes) }
+    var lastTimerUiUpdateMs by remember { mutableLongStateOf(0L) }
+    if (!state.isRecording) {
+        throttledRecordingSeconds = 0L
+        throttledRecordedBytes = 0L
+        lastTimerUiUpdateMs = 0L
+    } else {
+        val nowMs = SystemClock.uptimeMillis()
+        if (state.recordingTimeSeconds != throttledRecordingSeconds || nowMs - lastTimerUiUpdateMs >= 1000L) {
+            throttledRecordingSeconds = state.recordingTimeSeconds
+            throttledRecordedBytes = state.recordedBytes
+            lastTimerUiUpdateMs = nowMs
+        }
+    }
+
+    var throttledAudioPeakL by remember { mutableFloatStateOf(state.audioPeakDbL) }
+    var throttledAudioPeakR by remember { mutableFloatStateOf(state.audioPeakDbR) }
+    var lastVuUiUpdateMs by remember { mutableLongStateOf(0L) }
+    if (!state.isRecording) {
+        throttledAudioPeakL = state.audioPeakDbL
+        throttledAudioPeakR = state.audioPeakDbR
+    } else {
+        val nowMs = SystemClock.uptimeMillis()
+        if (nowMs - lastVuUiUpdateMs >= 83L) { // 12Hz
+            throttledAudioPeakL = state.audioPeakDbL
+            throttledAudioPeakR = state.audioPeakDbR
+            lastVuUiUpdateMs = nowMs
+        }
+    }
 
     val vRes = state.videoResolution
     val resWidth = minOf(vRes.width, vRes.height)
@@ -443,8 +476,8 @@ private fun PortraitCinemaLayout(
                             .background(Color(0xFFFF0033), CircleShape)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    val mins = state.recordingTimeSeconds / 60
-                    val secs = state.recordingTimeSeconds % 60
+                    val mins = throttledRecordingSeconds / 60
+                    val secs = throttledRecordingSeconds % 60
                     Text(
                         text = "REC %02d:%02d".format(mins, secs),
                         color = Color.White,
@@ -463,9 +496,9 @@ private fun PortraitCinemaLayout(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 if (state.isRecording) {
-                    val mins = state.recordingTimeSeconds / 60
-                    val secs = state.recordingTimeSeconds % 60
-                    val mbRecorded = state.recordedBytes / (1024 * 1024)
+                    val mins = throttledRecordingSeconds / 60
+                    val secs = throttledRecordingSeconds % 60
+                    val mbRecorded = throttledRecordedBytes / (1024 * 1024)
                     Row(
                         modifier = Modifier
                             .background(Color(0xCCFF1744), RoundedCornerShape(12.dp))
@@ -707,7 +740,11 @@ private fun PortraitCinemaLayout(
                 Box(
                     modifier = Modifier
                         .size(70.dp)
-                        .scale(if (state.isRecording) pulseScale else 1.0f)
+                        .graphicsLayer {
+                            val s = if (state.isRecording) pulseScale else 1.0f
+                            scaleX = s
+                            scaleY = s
+                        }
                         .clip(CircleShape)
                         .background(Color.Transparent)
                         .border(3.dp, Color.White, CircleShape)
@@ -751,9 +788,9 @@ private fun PortraitCinemaLayout(
                             fontFamily = FontFamily.Monospace
                         )
                         Spacer(modifier = Modifier.height(2.dp))
-                        VuBar(peakDb = state.audioPeakDbL)
+                        VuBar(peakDb = throttledAudioPeakL)
                         Spacer(modifier = Modifier.height(2.dp))
-                        VuBar(peakDb = state.audioPeakDbR)
+                        VuBar(peakDb = throttledAudioPeakR)
                     }
 
                     // AE/AF Lock Button
