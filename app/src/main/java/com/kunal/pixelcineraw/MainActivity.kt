@@ -3,14 +3,15 @@ package com.kunal.pixelcineraw
 import android.Manifest
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.Surface
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
@@ -41,11 +42,17 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // True 100% edge-to-edge rendering so the live camera viewfinder fills behind transparent system bars
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+
         // Keep OLED screen awake during filming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        // Hide system status and navigation bars for immersive cinema viewfinder
-        hideSystemUI()
 
         startOrientationListener()
 
@@ -156,7 +163,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        hideSystemUI()
         val isHdr = cinemaViewModel.state.value.colorProfile == ColorProfile.HLG_10BIT ||
                 cinemaViewModel.state.value.colorProfile == ColorProfile.HDR10_PLUS
         window.colorMode = if (isHdr) ActivityInfo.COLOR_MODE_HDR else ActivityInfo.COLOR_MODE_DEFAULT
@@ -176,7 +182,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        hideSystemUI()
         orientationEventListener?.enable()
     }
 
@@ -189,13 +194,6 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         orientationEventListener?.disable()
         orientationEventListener = null
-    }
-
-    private fun hideSystemUI() {
-        window.insetsController?.let { controller ->
-            controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-            controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
     }
 }
 

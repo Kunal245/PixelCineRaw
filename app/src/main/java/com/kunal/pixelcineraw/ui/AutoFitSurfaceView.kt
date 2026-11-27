@@ -33,6 +33,7 @@ class AutoFitSurfaceView @JvmOverloads constructor(
 
     private var aspectRatioWidth = 0
     private var aspectRatioHeight = 0
+    private var fullBleedMode = true
     private var isHdrEnabled = false
     private var activeProfile: ColorProfile = ColorProfile.REC709
     private var appliedProfile: ColorProfile? = null
@@ -58,6 +59,16 @@ class AutoFitSurfaceView @JvmOverloads constructor(
     }
 
     /**
+     * Enables or disables edge-to-edge full-bleed center-crop viewfinder filling.
+     */
+    fun setFullBleed(enabled: Boolean) {
+        if (fullBleedMode != enabled) {
+            fullBleedMode = enabled
+            requestLayout()
+        }
+    }
+
+    /**
      * Sets the aspect ratio for this view.
      * The size of the view will be measured based on the ratio calculated from the parameters.
      */
@@ -75,7 +86,8 @@ class AutoFitSurfaceView @JvmOverloads constructor(
         val width = View.MeasureSpec.getSize(widthMeasureSpec)
         val height = View.MeasureSpec.getSize(heightMeasureSpec)
 
-        if (aspectRatioWidth == 0 || aspectRatioHeight == 0) {
+        if (fullBleedMode || aspectRatioWidth == 0 || aspectRatioHeight == 0) {
+            // Fill 100% edge-to-edge; HlgGlRenderer.computeAspectMatrix performs 1:1 square-pixel center-crop
             setMeasuredDimension(width, height)
         } else {
             // Fits within parent preserving aspect ratio (aspect-fit / letterbox / pillarbox)

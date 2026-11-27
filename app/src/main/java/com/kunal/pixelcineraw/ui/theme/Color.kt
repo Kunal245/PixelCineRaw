@@ -56,6 +56,30 @@ val CinemaCyan = Color(0xFF00C8E0)
 /** REC.709 indicator – pure green */
 val CinemaGreen = Color(0xFF00E676)
 
+// ─── Cinema Design System v2.0.0 (Leica Lux / Halide Mark II / Kino) ─────────
+/** Dynamic-Island & floating deck glass (#0D0F12 at 74% alpha) */
+val CinemaCapsuleBg = Color(0xBD0D0F12)
+
+/** Floating popover / quick-sheet glass (#0D0F12 at 86% alpha) */
+val CinemaGlassSheetBg = Color(0xDB0D0F12)
+
+/** Recording tally crimson-tinted capsule background */
+val CinemaTallyBg = Color(0xD6120B0D)
+
+/** Top 0.5dp specular glass highlight (#FFFFFF at 18% alpha) */
+val CinemaSpecularTop = Color(0x2EFFFFFF)
+
+/** Subtle bottom perimeter glass border (#FFFFFF at 8% alpha) */
+val CinemaSpecularBottom = Color(0x14FFFFFF)
+
+/** Anodized metallic bezel gradient colors */
+val CinemaAnodizedLight = Color(0xFF3E434C)
+val CinemaAnodizedDark = Color(0xFF17191E)
+
+/** Deep Crimson Glass shutter tones */
+val CinemaCrimsonGlassTop = Color(0xFFFF3D4A)
+val CinemaCrimsonGlassCore = Color(0xFFD91826)
+
 // Legacy Material3 colors (kept for Theme.kt compatibility)
 val Purple80 = Color(0xFFD0BCFF)
 val PurpleGrey80 = Color(0xFFCCC2DC)

@@ -2,15 +2,9 @@ package com.kunal.pixelcineraw.ui
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,83 +46,8 @@ import java.util.Locale
 private val TabularRailStyle = TextStyle(fontFeatureSettings = TABULAR_NUMS)
 
 /**
- * Tactile Apple Pro / Arri Alexa concentric cinema shutter button.
- *
- * Runs the circle -> rounded-square core morph and subtle recording pulse strictly in
- * `drawBehind` + `graphicsLayer` with zero Compose layout invalidations (`<= 0.5%` jank).
- */
-@Composable
-fun CinemaShutterButton(
-    isRecording: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    outerSize: Dp = 68.dp,
-    innerCircleSize: Dp = 54.dp,
-    innerSquareSize: Dp = 26.dp
-) {
-    val haptic = LocalHapticFeedback.current
-    val morphProgress by animateFloatAsState(
-        targetValue = if (isRecording) 1f else 0f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
-        label = "shutterMorph"
-    )
-
-    val infiniteTransition = rememberInfiniteTransition(label = "RecCorePulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "RecCoreScale"
-    )
-
-    Box(
-        modifier = modifier
-            .size(outerSize)
-            .graphicsLayer {
-                val s = if (isRecording) pulseScale else 1.0f
-                scaleX = s
-                scaleY = s
-            }
-            .drawBehind {
-                val ringStroke = 2.5.dp.toPx()
-                val ringRadius = (size.minDimension - ringStroke) / 2f
-                drawCircle(
-                    color = CinemaWhite,
-                    radius = ringRadius,
-                    style = Stroke(width = ringStroke)
-                )
-
-                val startPx = innerCircleSize.toPx()
-                val endPx = innerSquareSize.toPx()
-                val currentSize = startPx + (endPx - startPx) * morphProgress
-                val startRadius = startPx / 2f
-                val endRadius = 8.dp.toPx()
-                val corner = startRadius + (endRadius - startRadius) * morphProgress
-                val topLeftOffset = Offset(
-                    x = (size.width - currentSize) / 2f,
-                    y = (size.height - currentSize) / 2f
-                )
-
-                drawRoundRect(
-                    color = CinemaCrimson,
-                    topLeft = topLeftOffset,
-                    size = Size(currentSize, currentSize),
-                    cornerRadius = CornerRadius(corner, corner)
-                )
-            }
-            .clip(CircleShape)
-            .clickable {
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                onClick()
-            }
-    )
-}
-
-/**
- * v1.5.0 Right-hand cinema thumb action rail (Matte Obsidian + 0.75dp hairline borders).
+ * Legacy Right-hand cinema thumb action rail (retained for compatibility;
+ * v2.0.0 uses BottomControlBar's HeroCinemaShutterButton and LandscapeSideDeck).
  */
 @Composable
 fun RightActionRail(

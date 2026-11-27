@@ -115,9 +115,9 @@ fun CinemaZoomHub(
     val onZoomChangedState = rememberUpdatedState(onZoomChanged)
 
     val presets = remember(minZoom, maxZoom) {
-        val all = listOf(0.5f to "0.5", 1.0f to "1x", 2.0f to "2", 5.0f to "5")
+        val all = listOf(0.5f to "0.5×", 1.0f to "1×", 2.0f to "2×")
         val filtered = all.filter { (ratio, _) -> ratio >= minZoom - 0.05f && ratio <= maxZoom + 0.05f }
-        if (filtered.isNotEmpty()) filtered else listOf(minZoom to String.format(Locale.US, "%.1f", minZoom))
+        if (filtered.isNotEmpty()) filtered else listOf(minZoom to String.format(Locale.US, "%.1f×", minZoom))
     }
     val presetsState = rememberUpdatedState(presets)
 
@@ -165,15 +165,15 @@ fun CinemaZoomHub(
 
     val expandProgress by animateFloatAsState(
         targetValue = if (isExpanded) 1f else 0f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.82f),
         label = "zoomExpandProgress"
     )
     val expandProgressState = rememberUpdatedState(expandProgress)
 
-    val collapsedWidthDp = (presets.size * 42 + 16).coerceAtLeast(108).dp
-    val expandedWidthDp = 276.dp
-    val collapsedHeightDp = 38.dp
-    val expandedHeightDp = 52.dp
+    val collapsedWidthDp = (presets.size * 44 + 14).coerceAtLeast(106).dp
+    val expandedWidthDp = 284.dp
+    val collapsedHeightDp = 36.dp
+    val expandedHeightDp = 48.dp
 
     val sweepPx = with(density) { 700.dp.toPx() }
 
@@ -200,12 +200,12 @@ fun CinemaZoomHub(
 
     val majorStops = remember(minZoom, maxZoom) {
         listOf(
-            0.5f to "0.5x",
-            1.0f to "1x",
-            2.0f to "2x",
-            3.0f to "3x",
-            5.0f to "5x",
-            8.0f to "8x"
+            0.5f to "0.5×",
+            1.0f to "1×",
+            2.0f to "2×",
+            3.0f to "3×",
+            5.0f to "5×",
+            8.0f to "8×"
         ).filter { (z, _) -> z >= minZoom - 0.05f && z <= maxZoom + 0.05f }
     }
 
@@ -239,22 +239,26 @@ fun CinemaZoomHub(
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = (-30).dp)
+                .offset(y = (-28).dp)
                 .graphicsLayer {
                     alpha = expandProgress
                     translationY = (1f - expandProgress) * 6.dp.toPx()
                 }
                 .drawBehind {
-                    val r = CornerRadius(6.dp.toPx())
-                    drawRoundRect(color = CinemaPillBgDark, cornerRadius = r)
-                    drawRoundRect(color = CinemaBorderActive, cornerRadius = r, style = Stroke(0.75.dp.toPx()))
+                    val r = CornerRadius(10.dp.toPx())
+                    drawRoundRect(color = CinemaGlassSheetBg, cornerRadius = r)
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(listOf(CinemaSpecularTop, CinemaSpecularBottom)),
+                        cornerRadius = r,
+                        style = Stroke(0.5.dp.toPx())
+                    )
                 }
-                .padding(horizontal = 8.dp, vertical = 3.dp)
+                .padding(horizontal = 9.dp, vertical = 3.dp)
         ) {
             Text(
-                text = String.format(Locale.US, "%.1fx · %s", currentZoom, ZoomMath.formatFocalLength(currentZoom)),
+                text = String.format(Locale.US, "%.1f× · %s", currentZoom, ZoomMath.formatFocalLength(currentZoom)),
                 color = CinemaAmber,
-                fontSize = 10.5.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Black,
                 fontFamily = FontFamily.Monospace,
                 style = TabularZoomStyle
@@ -276,27 +280,26 @@ fun CinemaZoomHub(
                     val drawH = ch + (eh - ch) * p
                     val left = (size.width - drawW) / 2f
                     val top = (size.height - drawH) / 2f
-                    val cr = (19.dp.toPx() + (12.dp.toPx() - 19.dp.toPx()) * p)
+                    val cr = (18.dp.toPx() + (16.dp.toPx() - 18.dp.toPx()) * p)
                     val corner = CornerRadius(cr, cr)
 
                     drawRoundRect(
-                        color = CinemaPillBgDark,
+                        color = CinemaCapsuleBg,
                         topLeft = Offset(left, top),
                         size = Size(drawW, drawH),
                         cornerRadius = corner
                     )
-                    val borderCol = Color(
-                        red = CinemaBorderInactive.red + (CinemaBorderActive.red - CinemaBorderInactive.red) * p,
-                        green = CinemaBorderInactive.green + (CinemaBorderActive.green - CinemaBorderInactive.green) * p,
-                        blue = CinemaBorderInactive.blue + (CinemaBorderActive.blue - CinemaBorderInactive.blue) * p,
-                        alpha = CinemaBorderInactive.alpha + (CinemaBorderActive.alpha - CinemaBorderInactive.alpha) * p
-                    )
                     drawRoundRect(
-                        color = borderCol,
+                        brush = Brush.verticalGradient(
+                            listOf(
+                                if (p > 0.5f) CinemaAmber.copy(alpha = 0.45f) else CinemaSpecularTop,
+                                CinemaSpecularBottom
+                            )
+                        ),
                         topLeft = Offset(left, top),
                         size = Size(drawW, drawH),
                         cornerRadius = corner,
-                        style = Stroke(0.75.dp.toPx())
+                        style = Stroke(0.5.dp.toPx())
                     )
                 }
                 .pointerInput(collapsedWidthDp, expandedWidthDp) {
@@ -430,18 +433,23 @@ fun CinemaZoomHub(
                 presets.forEachIndexed { index, (presetVal, label) ->
                     val isSelected = (index == activeIndex)
                     val displayLabel = if (isSelected && abs(currentZoom - presetVal) > 0.15f) {
-                        String.format(Locale.US, "%.1f", currentZoom)
+                        String.format(Locale.US, "%.1f×", currentZoom)
                     } else {
                         label
                     }
 
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
+                            .size(width = 36.dp, height = 28.dp)
                             .drawBehind {
                                 if (isSelected) {
-                                    drawCircle(color = Color(0x28FFFFFF))
-                                    drawCircle(color = CinemaBorderActive, style = Stroke(0.75.dp.toPx()))
+                                    val r = CornerRadius(14.dp.toPx())
+                                    drawRoundRect(color = Color(0x28FFFFFF), cornerRadius = r)
+                                    drawRoundRect(
+                                        brush = Brush.verticalGradient(listOf(CinemaSpecularTop, CinemaSpecularBottom)),
+                                        cornerRadius = r,
+                                        style = Stroke(0.5.dp.toPx())
+                                    )
                                 }
                             },
                         contentAlignment = Alignment.Center
@@ -449,10 +457,11 @@ fun CinemaZoomHub(
                         Text(
                             text = displayLabel,
                             color = if (isSelected) CinemaAmber else CinemaWhite.copy(alpha = 0.85f),
-                            fontSize = 10.5.sp,
+                            fontSize = 10.sp,
                             fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
                             fontFamily = FontFamily.Monospace,
-                            style = TabularZoomStyle
+                            style = TabularZoomStyle,
+                            maxLines = 1
                         )
                     }
                 }

@@ -70,14 +70,18 @@ fun MonitoringOverlays(
             )
         }
 
-        // 5. Real-Time Movable RGB / Luma Histogram (Top Right HUD by default)
+        // 5. Real-Time Movable RGB / Luma Histogram (Top Right HUD, safe from Dynamic Island & Side Deck)
+        val isPortrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+            android.content.res.Configuration.ORIENTATION_PORTRAIT
         if (state.showHistogram) {
             MovableHistogramHUD(
                 data = state.histogramData,
                 isHlg = state.colorProfile == ColorProfile.HLG_10BIT,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 52.dp, end = 16.dp)
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(top = if (isPortrait) 56.dp else 14.dp, end = 14.dp)
             )
         }
 
@@ -86,8 +90,10 @@ fun MonitoringOverlays(
             LumaWaveformHUD(
                 data = state.histogramData,
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(bottom = 60.dp, start = 16.dp)
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(top = 56.dp, start = 14.dp)
             )
         }
 
@@ -96,14 +102,16 @@ fun MonitoringOverlays(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 52.dp, start = 16.dp)
-                    .background(Color(0x99000000), RoundedCornerShape(4.dp))
-                    .border(0.7.dp, Color(0xFF00E5FF), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(top = if (state.showWaveform) 152.dp else 56.dp, start = 14.dp)
+                    .background(Color(0xBD0D0F12), RoundedCornerShape(8.dp))
+                    .border(0.5.dp, Color(0x66F5A623), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
             ) {
                 Text(
-                    text = "LUT: ${state.lutPreset.label}${if (state.isLutBakeEnabled) " (BAKED)" else ""}",
-                    color = Color(0xFF00E5FF),
+                    text = "LUT · ${state.lutPreset.label}${if (state.isLutBakeEnabled) " (BAKED)" else ""}",
+                    color = Color(0xFFF5A623),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
@@ -113,19 +121,23 @@ fun MonitoringOverlays(
 
         // 6b. False Color Active Legend
         if (state.showFalseColor) {
+            val topOff = (if (state.showWaveform) 152.dp else 56.dp) +
+                (if (state.showLutPreview && state.lutPreset != com.kunal.pixelcineraw.camera.LutPreset.OFF) 26.dp else 0.dp)
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 80.dp, start = 16.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
-                    .border(0.8.dp, Color(0xFFFF5252), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(top = topOff, start = 14.dp)
+                    .background(Color(0xBD0D0F12), RoundedCornerShape(8.dp))
+                    .border(0.5.dp, Color(0x88FF2D3B), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(6.dp).background(Color(0xFFFF1744), CircleShape))
+                    Box(modifier = Modifier.size(6.dp).background(Color(0xFFFF2D3B), CircleShape))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "FALSE COLOR (ARRI)",
+                        text = "FALSE COLOR",
                         color = Color(0xFFFF5252),
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
@@ -137,49 +149,26 @@ fun MonitoringOverlays(
 
         // 6c. Anamorphic De-Squeeze Badge
         if (state.anamorphicDeSqueeze != com.kunal.pixelcineraw.camera.AnamorphicDeSqueeze.OFF) {
+            val topOff = (if (state.showWaveform) 152.dp else 56.dp) +
+                (if (state.showLutPreview && state.lutPreset != com.kunal.pixelcineraw.camera.LutPreset.OFF) 26.dp else 0.dp) +
+                (if (state.showFalseColor) 26.dp else 0.dp)
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = if (state.showFalseColor) 108.dp else 80.dp, start = 16.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
-                    .border(0.8.dp, Color(0xFFFFD700), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(top = topOff, start = 14.dp)
+                    .background(Color(0xBD0D0F12), RoundedCornerShape(8.dp))
+                    .border(0.5.dp, Color(0x88F5A623), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
             ) {
                 Text(
-                    text = "ANAMORPHIC: ${state.anamorphicDeSqueeze.label}",
-                    color = Color(0xFFFFD700),
+                    text = "ANAMORPHIC · ${state.anamorphicDeSqueeze.label}",
+                    color = Color(0xFFF5A623),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
-            }
-        }
-
-        // 7. True 10-Bit HLG HDR Active Indicator Badge
-        if (state.colorProfile == ColorProfile.HLG_10BIT) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = if (state.showFalseColor || state.anamorphicDeSqueeze != com.kunal.pixelcineraw.camera.AnamorphicDeSqueeze.OFF) 136.dp else if (state.showLutPreview) 80.dp else 52.dp, start = 16.dp)
-                    .background(Color(0xD9101216), RoundedCornerShape(4.dp))
-                    .border(0.8.dp, Color(0xFFFFD700), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 7.dp, vertical = 2.5.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .background(Color(0xFFFFD700), CircleShape)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "HDR · HLG10",
-                        color = Color(0xFFFFD700),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
             }
         }
     }

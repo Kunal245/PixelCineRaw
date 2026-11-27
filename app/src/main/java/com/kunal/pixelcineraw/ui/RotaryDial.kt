@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
@@ -87,8 +88,8 @@ fun <T> RotaryWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
-            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .background(CinemaGlassSheetBg, RoundedCornerShape(22.dp))
+            .border(0.5.dp, CinemaSpecularTop, RoundedCornerShape(22.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -129,7 +130,7 @@ fun <T> RotaryWheelScrubber(
         Text(
             text = if (currentItem != null) formatItem(currentItem) else "--",
             color = CinemaWhite,
-            fontSize = 26.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
             style = TabularDialStyle
@@ -181,9 +182,9 @@ fun <T> RotaryWheelScrubber(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(54.dp)
-                .background(CinemaObsidian, RoundedCornerShape(8.dp))
-                .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(8.dp))
+                .height(46.dp)
+                .background(Color(0x66060709), RoundedCornerShape(12.dp))
+                .border(0.5.dp, CinemaSpecularBottom, RoundedCornerShape(12.dp))
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
@@ -339,8 +340,8 @@ fun CinemaFocusWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
-            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .background(CinemaGlassSheetBg, RoundedCornerShape(22.dp))
+            .border(0.5.dp, CinemaSpecularTop, RoundedCornerShape(22.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -383,7 +384,7 @@ fun CinemaFocusWheelScrubber(
         Text(
             text = readoutText,
             color = CinemaWhite,
-            fontSize = 26.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
             style = TabularDialStyle
@@ -580,8 +581,8 @@ fun CinemaIsoWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
-            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .background(CinemaGlassSheetBg, RoundedCornerShape(22.dp))
+            .border(0.5.dp, CinemaSpecularTop, RoundedCornerShape(22.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -663,7 +664,7 @@ fun CinemaIsoWheelScrubber(
         Text(
             text = readoutText,
             color = if (isAutoIso) CinemaAutoGreen else CinemaWhite,
-            fontSize = 26.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
             style = TabularDialStyle
@@ -712,9 +713,9 @@ fun CinemaIsoWheelScrubber(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(54.dp)
-                .background(CinemaObsidian, RoundedCornerShape(8.dp))
-                .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(8.dp))
+                .height(46.dp)
+                .background(Color(0x66060709), RoundedCornerShape(12.dp))
+                .border(0.5.dp, CinemaSpecularBottom, RoundedCornerShape(12.dp))
                 .pointerInput(isHiIsoMode) {
                     var anchorIso = currentIsoState.value.toDouble()
                     var cumulativeDxDp = 0.0
@@ -899,8 +900,8 @@ fun CinemaWhiteBalanceWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
-            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .background(CinemaGlassSheetBg, RoundedCornerShape(22.dp))
+            .border(0.5.dp, CinemaSpecularTop, RoundedCornerShape(22.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -945,7 +946,7 @@ fun CinemaWhiteBalanceWheelScrubber(
         Text(
             text = "${currentKelvin}K",
             color = CinemaWhite,
-            fontSize = 26.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
             style = TabularDialStyle
