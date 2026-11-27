@@ -85,9 +85,13 @@ fun Viewfinder(
         surfaceViewRef?.setAspectRatio(w, h)
     }
 
-    // Apply native HDR extended range brightness and BT.2020 HLG/PQ data space on Pixel 9a OLED
-    LaunchedEffect(state.colorProfile) {
-        surfaceViewRef?.applyColorProfileSurfaceState(state.colorProfile)
+    // Apply native HDR extended range brightness, BT.2020 HLG/PQ data space, and recording frame-rate lock
+    LaunchedEffect(state.colorProfile, state.isRecording, state.targetFps) {
+        surfaceViewRef?.applyColorProfileSurfaceState(
+            profile = state.colorProfile,
+            isRecording = state.isRecording,
+            targetFps = state.targetFps
+        )
     }
 
     val context = LocalContext.current
@@ -136,12 +140,22 @@ fun Viewfinder(
                         val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
                         val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                         setAspectRatio(curW, curH)
-                        setHdrMode(state.colorProfile)
+                        applyColorProfileSurfaceState(
+                            profile = state.colorProfile,
+                            isRecording = state.isRecording,
+                            targetFps = state.targetFps
+                        )
 
                         holder.addCallback(object : SurfaceHolder.Callback {
                             override fun surfaceCreated(holder: SurfaceHolder) {
                                 surfaceViewRef = this@apply
-                                setHdrMode(state.colorProfile)
+                                val curState = viewModel.state.value
+                                applyColorProfileSurfaceState(
+                                    profile = curState.colorProfile,
+                                    force = true,
+                                    isRecording = curState.isRecording,
+                                    targetFps = curState.targetFps
+                                )
                                 display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                                 val surface = holder.surface
                                 if (surface.isValid) {
@@ -150,13 +164,19 @@ fun Viewfinder(
                             }
 
                             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                                val curRes = viewModel.state.value.videoResolution
+                                val curState = viewModel.state.value
+                                val curRes = curState.videoResolution
                                 val isPort = display?.rotation == android.view.Surface.ROTATION_0 || display?.rotation == android.view.Surface.ROTATION_180 ||
-                                        viewModel.state.value.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
+                                        curState.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
                                 val cW = if (isPort) minOf(curRes.width, curRes.height) else maxOf(curRes.width, curRes.height)
                                 val cH = if (isPort) maxOf(curRes.width, curRes.height) else minOf(curRes.width, curRes.height)
                                 setAspectRatio(cW, cH)
-                                setHdrMode(state.colorProfile)
+                                applyColorProfileSurfaceState(
+                                    profile = curState.colorProfile,
+                                    force = false,
+                                    isRecording = curState.isRecording,
+                                    targetFps = curState.targetFps
+                                )
                                 display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                             }
 
@@ -171,7 +191,11 @@ fun Viewfinder(
                     val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
                     val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
                     view.setAspectRatio(curW, curH)
-                    view.applyColorProfileSurfaceState(state.colorProfile)
+                    view.applyColorProfileSurfaceState(
+                        profile = state.colorProfile,
+                        isRecording = state.isRecording,
+                        targetFps = state.targetFps
+                    )
                     view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                 }
             )

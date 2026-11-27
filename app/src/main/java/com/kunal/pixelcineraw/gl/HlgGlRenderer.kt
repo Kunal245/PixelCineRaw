@@ -1,9 +1,11 @@
 package com.kunal.pixelcineraw.gl
 
+import android.content.Context
 import android.graphics.SurfaceTexture
 import android.opengl.*
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.PerformanceHintManager
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
@@ -59,7 +61,7 @@ class TimestampIsoMap(private val capacity: Int = 32) {
     }
 }
 
-class HlgGlRenderer {
+class HlgGlRenderer(private val context: Context? = null) {
 
     companion object {
         private const val TAG = "HlgGlRenderer"
@@ -342,9 +344,12 @@ void main() {
 """
     }
 
-    // GL Threading
+    // GL Threading & ADPF PerformanceHintManager
     private var glThread: HandlerThread? = null
     private var glHandler: Handler? = null
+    private var performanceHintSession: PerformanceHintManager.Session? = null
+    @Volatile
+    private var adpfTargetWorkDurationNs: Long = 16_666_666L
 
     // EGL State
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
@@ -426,7 +431,9 @@ void main() {
     private val invalidateDefaultAttachments = intArrayOf(GLES30.GL_DEPTH, GLES30.GL_STENCIL)
 
     // Quantized MP4 presentation timestamps & frame pacing for video encoder
-    @Volatile var targetFps: Int = 60
+    @Volatile
+    var targetFps: Int = 60
+        private set
     @Volatile private var recordingStartNs: Long = -1L
     @Volatile private var recordedFrameIndex: Long = 0L
     @Volatile private var lastInputFrameTimeNs: Long = -1L
@@ -725,6 +732,31 @@ void main() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to set THREAD_PRIORITY_URGENT_DISPLAY on GL thread", e)
                 }
+                try {
+                    val targetNs = (1_000_000_000L / maxOf(1, targetFps)).coerceAtLeast(1_000_000L)
+                    adpfTargetWorkDurationNs = targetNs
+                    val mgr = context?.getSystemService(PerformanceHintManager::class.java)
+                    if (mgr != null && performanceHintSession == null) {
+                        performanceHintSession = mgr.createHintSession(intArrayOf(Process.myTid()), targetNs)
+                        Log.i(TAG, "ADPF PerformanceHintManager session created on PixelCineHlgGl (targetWorkDuration=${targetNs / 1_000_000.0}ms)")
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "ADPF PerformanceHintManager unavailable on device", e)
+                }
+            }
+        }
+    }
+
+    fun setTargetFps(fps: Int) {
+        val clampedFps = maxOf(1, fps)
+        this.targetFps = clampedFps
+        val targetNs = (1_000_000_000L / clampedFps).coerceAtLeast(1_000_000L)
+        adpfTargetWorkDurationNs = targetNs
+        glHandler?.post {
+            try {
+                performanceHintSession?.updateTargetWorkDuration(targetNs)
+            } catch (e: Throwable) {
+                Log.w(TAG, "Failed to update ADPF targetWorkDuration", e)
             }
         }
     }
@@ -798,14 +830,11 @@ void main() {
         currentColorMode = mode
         val handler = glHandler ?: return
         handler.post {
-            val targetColorspace = when (profile) {
-                ColorProfile.HLG_10BIT -> if (supportsColorspace && supportsHlgColorspace) EGL_GL_COLORSPACE_BT2020_HLG_EXT else 0
-                ColorProfile.HDR10_PLUS -> if (supportsColorspace && supportsPqColorspace) EGL_GL_COLORSPACE_BT2020_PQ_EXT else 0
-                else -> 0 // Standard default EGL attributes (EGL_NONE) for 1:1 WYSIWYG SDR (REC.709 & PIXEL-LOG)
-            }
+            val targetIsHdr = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
 
-            // Always recreate preview window surface when colorspace target differs from current EGL surface
-            if (currentEglColorspace != targetColorspace || lastPreviewProfile != profile) {
+            // Recreate preview EGL surface ONLY when crossing SDR <-> HDR boundary (8-bit vs 10-bit/colorspace);
+            // toggling REC709 <-> PIXEL-LOG or HLG10 <-> HDR10+ updates uColorMode instantaneously with zero black flash.
+            if (previewEglSurface == null || previewEglSurface == EGL14.EGL_NO_SURFACE || isCurrentPreviewHdr != targetIsHdr) {
                 val surf = currentSurface
                 if (surf != null && surf.isValid) {
                     destroyPreviewSurface()
@@ -813,9 +842,12 @@ void main() {
                     if (eglSurf != EGL14.EGL_NO_SURFACE) {
                         previewEglSurface = eglSurf
                         EGL14.eglMakeCurrent(eglDisplay, eglSurf, eglSurf, eglContext)
-                        Log.i(TAG, "Recreated preview EGL surface for profile $profile (colorspace=0x${Integer.toHexString(currentEglColorspace)}, HDR=$isCurrentPreviewHdr)")
+                        Log.i(TAG, "Recreated preview EGL surface for SDR/HDR boundary transition -> $profile (colorspace=0x${Integer.toHexString(currentEglColorspace)}, HDR=$isCurrentPreviewHdr)")
                     }
                 }
+            } else {
+                lastPreviewProfile = profile
+                Log.i(TAG, "Instant zero-flash color profile switch -> $profile (uColorMode=$mode)")
             }
 
             if (isReady && programId != 0) {
@@ -1101,7 +1133,8 @@ void main() {
         val handler = glHandler ?: return
         handler.post {
             try {
-                if (currentSurface == surface && previewEglSurface != null && previewEglSurface != EGL14.EGL_NO_SURFACE && lastPreviewProfile == activeColorProfile) {
+                val targetIsHdr = activeColorProfile == ColorProfile.HLG_10BIT || activeColorProfile == ColorProfile.HDR10_PLUS
+                if (currentSurface == surface && previewEglSurface != null && previewEglSurface != EGL14.EGL_NO_SURFACE && isCurrentPreviewHdr == targetIsHdr) {
                     return@post
                 }
                 destroyPreviewSurface()
@@ -1124,10 +1157,16 @@ void main() {
      * Attaches or detaches the HEVC MediaCodec recording input surface safely.
      */
     fun setEncoderSurface(surface: Surface?, width: Int, height: Int, fps: Int = 60) {
-        this.targetFps = fps
+        val clampedFps = maxOf(1, fps)
+        this.targetFps = clampedFps
+        val targetNs = (1_000_000_000L / clampedFps).coerceAtLeast(1_000_000L)
+        adpfTargetWorkDurationNs = targetNs
         val handler = glHandler ?: return
         handler.post {
             try {
+                try {
+                    performanceHintSession?.updateTargetWorkDuration(targetNs)
+                } catch (_: Throwable) {}
                 destroyEncoderSurface()
                 if (surface != null && surface.isValid && isReady) {
                     // Always enforce native landscape dimensions for encoder & single-pass FBO
@@ -1275,6 +1314,7 @@ void main() {
             return
         }
 
+        val frameStartNs = System.nanoTime()
         try {
             // 1. MUST make EGL context current BEFORE calling updateTexImage()
             if (!EGL14.eglMakeCurrent(eglDisplay, pSurf, pSurf, eglContext)) {
@@ -1446,6 +1486,11 @@ void main() {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error rendering GL frame", e)
+        } finally {
+            val actualWorkNs = (System.nanoTime() - frameStartNs).coerceAtLeast(1L)
+            try {
+                performanceHintSession?.reportActualWorkDuration(actualWorkNs)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -1728,6 +1773,10 @@ void main() {
         val handler = glHandler
         if (handler != null) {
             handler.post {
+                try {
+                    performanceHintSession?.close()
+                } catch (_: Throwable) {}
+                performanceHintSession = null
                 destroyPreviewSurface()
                 destroyEncoderSurface()
                 destroyFbo()

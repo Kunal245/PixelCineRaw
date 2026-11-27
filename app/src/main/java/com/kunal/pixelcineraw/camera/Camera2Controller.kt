@@ -560,8 +560,9 @@ class Camera2Controller(
 
             val streamSize = optimalStreamSize
             val vRes = _state.value.videoResolution
-            val renderer = hlgGlRenderer ?: HlgGlRenderer().also {
+            val renderer = hlgGlRenderer ?: HlgGlRenderer(context).also {
                 it.onFirstEncoderFrame = onFirstEncoderFrame
+                it.setTargetFps(_state.value.targetFps)
                 it.onHistogramExtracted = { data ->
                     updateHistogramData(data)
                 }
@@ -1976,6 +1977,7 @@ class Camera2Controller(
                 shutterSpeedNs = newShutterNs
             )
         }
+        hlgGlRenderer?.setTargetFps(fps)
         persistState()
         createAndSetRepeatingRequest()
     }

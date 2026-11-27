@@ -10,6 +10,7 @@ import android.os.Environment
 import android.os.PowerManager
 import android.os.StatFs
 import kotlinx.coroutines.*
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
@@ -25,6 +26,7 @@ class SystemTelemetryMonitor(
     private val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
     private var isMonitoring = false
     private var monitorJob: Job? = null
+    private var thermalExecutor: ExecutorService? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
@@ -40,7 +42,9 @@ class SystemTelemetryMonitor(
         isMonitoring = true
 
         try {
-            powerManager.addThermalStatusListener(Executors.newSingleThreadExecutor(), thermalListener)
+            val executor = Executors.newSingleThreadExecutor()
+            thermalExecutor = executor
+            powerManager.addThermalStatusListener(executor, thermalListener)
         } catch (e: Exception) {
             // Ignore on devices without thermal HAL
         }
@@ -65,6 +69,8 @@ class SystemTelemetryMonitor(
         } catch (e: Exception) {
             // Ignore
         }
+        thermalExecutor?.shutdownNow()
+        thermalExecutor = null
     }
 
     fun pollTelemetry() {

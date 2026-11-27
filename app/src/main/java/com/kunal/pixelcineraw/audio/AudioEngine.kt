@@ -6,17 +6,16 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaRecorder
 import android.util.Log
 import kotlinx.coroutines.*
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.log10
 import kotlin.math.max
 
 /**
  * Professional 48kHz 16-bit Stereo Audio Engine supporting USB-C external microphones,
- * manual gain, and real-time dB VU metering.
+ * manual gain, real-time dB VU metering, and CLOCK_MONOTONIC AudioTimestamp alignment.
  */
 class AudioEngine(
     private val context: Context,
@@ -33,6 +32,7 @@ class AudioEngine(
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val audioTimestamp = AudioTimestamp()
 
     @Volatile
     var isRunning = false
@@ -40,7 +40,7 @@ class AudioEngine(
 
     var audioGain = 1.0f
 
-    // Callback when raw PCM buffer is available for video muxer encoder
+    // Callback when raw PCM buffer is available for video muxer encoder (timestamp in CLOCK_MONOTONIC us)
     var onPcmDataAvailable: ((buffer: ByteArray, bytesRead: Int, presentationTimeUs: Long) -> Unit)? = null
 
     @SuppressLint("MissingPermission")
@@ -51,34 +51,50 @@ class AudioEngine(
         val bufferSize = max(minBufferSize * 2, 8192)
 
         try {
-            audioRecord = AudioRecord(
+            val record = AudioRecord(
                 MediaRecorder.AudioSource.CAMCORDER,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
                 bufferSize
             )
+            audioRecord = record
 
             // Prefer USB-C external microphone if connected
-            routeToUsbMicIfAvailable(audioRecord!!)
+            routeToUsbMicIfAvailable(record)
 
-            audioRecord?.startRecording()
+            record.startRecording()
             isRunning = true
 
             recordingJob = scope.launch {
                 val audioBuffer = ByteArray(bufferSize)
-                var startTimeUs = System.nanoTime() / 1000
+                var totalFramesRead = 0L
 
                 while (isActive && isRunning) {
-                    val bytesRead = audioRecord?.read(audioBuffer, 0, bufferSize) ?: -1
+                    val bytesRead = record.read(audioBuffer, 0, bufferSize)
                     if (bytesRead > 0) {
-                        val ptsUs = (System.nanoTime() / 1000) - startTimeUs
+                        val chunkFrames = bytesRead / 4L
+                        val chunkStartFrame = totalFramesRead
+                        totalFramesRead += chunkFrames
 
-                        // Calculate stereo peaks in dB
+                        val hasTimestamp = try {
+                            record.getTimestamp(audioTimestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS
+                        } catch (_: Throwable) {
+                            false
+                        }
+                        val chunkMonotonicNs = if (hasTimestamp && audioTimestamp.nanoTime > 0L) {
+                            val frameDelta = chunkStartFrame - audioTimestamp.framePosition
+                            audioTimestamp.nanoTime + (frameDelta * 1_000_000_000L) / SAMPLE_RATE
+                        } else {
+                            System.nanoTime() - (chunkFrames * 1_000_000_000L) / SAMPLE_RATE
+                        }
+                        val monotonicPtsUs = (chunkMonotonicNs / 1000L).coerceAtLeast(0L)
+
+                        // Calculate stereo peaks in dB (zero allocation)
                         calculateVuPeaks(audioBuffer, bytesRead)
 
                         // Pass to audio track in video muxer if recording
-                        onPcmDataAvailable?.invoke(audioBuffer, bytesRead, ptsUs)
+                        onPcmDataAvailable?.invoke(audioBuffer, bytesRead, monotonicPtsUs)
                     }
                 }
             }
@@ -121,22 +137,23 @@ class AudioEngine(
     }
 
     private fun calculateVuPeaks(buffer: ByteArray, bytesRead: Int) {
-        val shortBuffer = ByteBuffer.wrap(buffer, 0, bytesRead)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .asShortBuffer()
-
         var maxL = 0
         var maxR = 0
 
-        val numSamples = shortBuffer.remaining()
-        var i = 0
-        while (i < numSamples) {
-            val sampleL = kotlin.math.abs(shortBuffer.get(i).toInt())
-            val sampleR = if (i + 1 < numSamples) kotlin.math.abs(shortBuffer.get(i + 1).toInt()) else sampleL
+        var byteIdx = 0
+        while (byteIdx + 1 < bytesRead) {
+            val rawL = ((buffer[byteIdx + 1].toInt() shl 8) or (buffer[byteIdx].toInt() and 0xFF)).toShort().toInt()
+            val sampleL = kotlin.math.abs(rawL)
+            val sampleR = if (byteIdx + 3 < bytesRead) {
+                val rawR = ((buffer[byteIdx + 3].toInt() shl 8) or (buffer[byteIdx + 2].toInt() and 0xFF)).toShort().toInt()
+                kotlin.math.abs(rawR)
+            } else {
+                sampleL
+            }
 
             if (sampleL > maxL) maxL = sampleL
             if (sampleR > maxR) maxR = sampleR
-            i += 2
+            byteIdx += 4
         }
 
         // Apply software gain

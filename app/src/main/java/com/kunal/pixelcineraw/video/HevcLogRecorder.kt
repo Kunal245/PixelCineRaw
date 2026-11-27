@@ -25,6 +25,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -46,6 +47,12 @@ class HevcLogRecorder(
     companion object {
         private const val TAG = "HevcLogRecorder"
         const val HEVC_PROFILE_MAIN_422_10 = 0x4000 // Android framework HEVC 10-bit 4:2:2 profile constant
+        private const val VIDEO_POOL_CAPACITY = 20
+        private const val VIDEO_BUFFER_SIZE = 2 * 1024 * 1024
+        private const val AUDIO_POOL_CAPACITY = 32
+        private const val AUDIO_BUFFER_SIZE = 8 * 1024
+        private const val PCM_POOL_CAPACITY = 32
+        private const val PCM_BUFFER_SIZE = 32 * 1024
 
         fun probeHasMain42210(): Boolean {
             try {
@@ -79,9 +86,20 @@ class HevcLogRecorder(
     private sealed class MuxerCommand {
         class AddVideoTrack(val format: MediaFormat) : MuxerCommand()
         class AddAudioTrack(val format: MediaFormat) : MuxerCommand()
-        class WriteSample(val isAudio: Boolean, val data: ByteBuffer, val info: MediaCodec.BufferInfo) : MuxerCommand()
+        class WriteSample(
+            val isAudio: Boolean,
+            val data: ByteBuffer,
+            val info: MediaCodec.BufferInfo,
+            val isPooled: Boolean
+        ) : MuxerCommand()
         class FlushAndStop(val latch: CountDownLatch) : MuxerCommand()
     }
+
+    private class PcmChunk(
+        var data: ByteArray = ByteArray(PCM_BUFFER_SIZE),
+        var size: Int = 0,
+        var ptsUs: Long = 0L
+    )
 
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
@@ -96,6 +114,12 @@ class HevcLogRecorder(
     private var muxerThread: HandlerThread? = null
     private var muxerHandler: Handler? = null
 
+    // Pre-allocated zero-GC ring pools (video direct ByteBuffers, audio direct ByteBuffers, PCM chunks)
+    private val videoBufferPool = ArrayBlockingQueue<ByteBuffer>(VIDEO_POOL_CAPACITY)
+    private val audioBufferPool = ArrayBlockingQueue<ByteBuffer>(AUDIO_POOL_CAPACITY)
+    private val pcmChunkPool = ArrayBlockingQueue<PcmChunk>(PCM_POOL_CAPACITY)
+    @Volatile private var poolsAllocated = false
+
     // Single-writer lock-free MediaMuxer queue (zero contention between Video, Audio, and AudioRecord)
     private val muxerQueue = ConcurrentLinkedQueue<MuxerCommand>()
     private val muxerDrainScheduled = AtomicBoolean(false)
@@ -107,14 +131,13 @@ class HevcLogRecorder(
     private val pendingVideoSamples = mutableListOf<MuxerCommand.WriteSample>()
     private val pendingAudioSamples = mutableListOf<MuxerCommand.WriteSample>()
 
-    private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val audioQueue = ConcurrentLinkedQueue<PcmChunk>()
     private val availableAudioInputBuffers = ConcurrentLinkedQueue<Int>()
 
     private var firstVideoPtsUs = -1L
     private var lastVideoPtsUs = -1L
-    private var firstAudioPtsUs = -1L
     private var lastAudioPtsUs = -1L
-    private var totalAudioBytesFed = 0L
+    private var lastQueuedAudioPtsUs = -1L
     @Volatile private var totalBytesWritten = 0L
 
     private var lastMetricsUpdateSec = -1L
@@ -200,6 +223,39 @@ class HevcLogRecorder(
         }
     }
 
+    private fun ensurePoolsAllocated() {
+        if (poolsAllocated) return
+        while (videoBufferPool.remainingCapacity() > 0) {
+            videoBufferPool.offer(ByteBuffer.allocateDirect(VIDEO_BUFFER_SIZE))
+        }
+        while (audioBufferPool.remainingCapacity() > 0) {
+            audioBufferPool.offer(ByteBuffer.allocateDirect(AUDIO_BUFFER_SIZE))
+        }
+        while (pcmChunkPool.remainingCapacity() > 0) {
+            pcmChunkPool.offer(PcmChunk())
+        }
+        poolsAllocated = true
+        Log.i(TAG, "Pre-allocated zero-GC muxer pools: video=${VIDEO_POOL_CAPACITY}x${VIDEO_BUFFER_SIZE / 1024}KB, audio=${AUDIO_POOL_CAPACITY}x${AUDIO_BUFFER_SIZE / 1024}KB, pcm=${PCM_POOL_CAPACITY}x${PCM_BUFFER_SIZE / 1024}KB")
+    }
+
+    private fun recycleSampleBuffer(sample: MuxerCommand.WriteSample) {
+        if (!sample.isPooled) return
+        sample.data.clear()
+        if (sample.isAudio) {
+            audioBufferPool.offer(sample.data)
+        } else {
+            videoBufferPool.offer(sample.data)
+        }
+    }
+
+    private fun recyclePcmChunk(chunk: PcmChunk) {
+        chunk.size = 0
+        chunk.ptsUs = 0L
+        if (chunk.data.size == PCM_BUFFER_SIZE) {
+            pcmChunkPool.offer(chunk)
+        }
+    }
+
     private fun processMuxerCommand(cmd: MuxerCommand) {
         when (cmd) {
             is MuxerCommand.AddVideoTrack -> {
@@ -219,16 +275,22 @@ class HevcLogRecorder(
                 }
             }
             is MuxerCommand.WriteSample -> {
-                val muxer = mediaMuxer ?: return
+                val muxer = mediaMuxer
+                if (muxer == null) {
+                    recycleSampleBuffer(cmd)
+                    return
+                }
                 if (isMuxerStarted) {
                     val trackIdx = if (cmd.isAudio) audioTrackIndex else videoTrackIndex
-                    if (trackIdx >= 0) {
-                        try {
+                    try {
+                        if (trackIdx >= 0) {
                             muxer.writeSampleData(trackIdx, cmd.data, cmd.info)
                             totalBytesWritten += cmd.info.size
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error writing sample on muxer thread (audio=${cmd.isAudio})", e)
                         }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error writing sample on muxer thread (audio=${cmd.isAudio})", e)
+                    } finally {
+                        recycleSampleBuffer(cmd)
                     }
                 } else {
                     if (cmd.isAudio) {
@@ -247,10 +309,16 @@ class HevcLogRecorder(
                 } catch (e: Exception) {
                     Log.w(TAG, "Error releasing MediaMuxer", e)
                 } finally {
+                    for (sample in pendingVideoSamples) {
+                        recycleSampleBuffer(sample)
+                    }
+                    pendingVideoSamples.clear()
+                    for (sample in pendingAudioSamples) {
+                        recycleSampleBuffer(sample)
+                    }
+                    pendingAudioSamples.clear()
                     mediaMuxer = null
                     isMuxerStarted = false
-                    pendingVideoSamples.clear()
-                    pendingAudioSamples.clear()
                     cmd.latch.countDown()
                 }
             }
@@ -272,26 +340,34 @@ class HevcLogRecorder(
         orientationHint: Int = 0
     ): Surface {
         ensureEncoderThread()
+        ensurePoolsAllocated()
         val videoHandler = encoderHandler ?: throw IllegalStateException("Video encoder thread handler not ready")
         val audioHandler = audioEncoderHandler ?: throw IllegalStateException("Audio encoder thread handler not ready")
 
-        // Reset tracking state
-        muxerQueue.clear()
+        // Reset tracking state (reclaiming any stray queued items into pools)
+        while (true) {
+            val cmd = muxerQueue.poll() ?: break
+            if (cmd is MuxerCommand.WriteSample) recycleSampleBuffer(cmd)
+        }
         muxerDrainScheduled.set(false)
         videoTrackIndex = -1
         audioTrackIndex = -1
         isMuxerStarted = false
         firstVideoPtsUs = -1L
         lastVideoPtsUs = -1L
-        firstAudioPtsUs = -1L
         lastAudioPtsUs = -1L
-        totalAudioBytesFed = 0L
+        lastQueuedAudioPtsUs = -1L
         totalBytesWritten = 0L
         lastMetricsUpdateSec = -1L
         lastMetricsUpdateMs = 0L
+        for (sample in pendingVideoSamples) recycleSampleBuffer(sample)
         pendingVideoSamples.clear()
+        for (sample in pendingAudioSamples) recycleSampleBuffer(sample)
         pendingAudioSamples.clear()
-        audioQueue.clear()
+        while (true) {
+            val c = audioQueue.poll() ?: break
+            recyclePcmChunk(c)
+        }
         availableAudioInputBuffers.clear()
         this.targetFps = fps
         this.orientationHint = orientationHint
@@ -431,14 +507,17 @@ class HevcLogRecorder(
                         encodedData.position(info.offset)
                         encodedData.limit(info.offset + info.size)
 
-                        // Copy into non-blocking queue and immediately release hardware output buffer
-                        val clone = ByteBuffer.allocate(info.size)
+                        // Copy into pre-allocated direct ByteBuffer from ring pool and immediately release hardware output buffer
+                        val pooled = if (info.size <= VIDEO_BUFFER_SIZE) videoBufferPool.poll() else null
+                        val isPooled = pooled != null
+                        val clone = pooled ?: ByteBuffer.allocateDirect(info.size)
+                        clone.clear()
                         clone.put(encodedData)
                         clone.flip()
                         val infoClone = MediaCodec.BufferInfo().apply {
                             set(0, info.size, info.presentationTimeUs, info.flags)
                         }
-                        enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = false, clone, infoClone))
+                        enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = false, clone, infoClone, isPooled))
 
                         if (videoFrameCount++ % 60 == 0L) {
                             Log.d(TAG, "Muxer video frame #$videoFrameCount: PTS=${monotonicPts / 1000}ms, delta=${deltaUs / 1000f}ms (target=${1000f / targetFps}ms)")
@@ -491,13 +570,13 @@ class HevcLogRecorder(
                 try {
                     val chunk = audioQueue.poll()
                     if (chunk != null) {
+                        val size = chunk.size
+                        val ptsUs = chunk.ptsUs
                         val inputBuffer = codec.getInputBuffer(index)
                         inputBuffer?.clear()
-                        inputBuffer?.put(chunk)
-                        val totalSamplesWritten = totalAudioBytesFed / 4L
-                        val ptsUs = (totalSamplesWritten * 1_000_000L) / 48_000L
-                        totalAudioBytesFed += chunk.size
-                        codec.queueInputBuffer(index, 0, chunk.size, ptsUs, 0)
+                        inputBuffer?.put(chunk.data, 0, size)
+                        recyclePcmChunk(chunk)
+                        codec.queueInputBuffer(index, 0, size, ptsUs, 0)
                     } else if (audioEosPending.compareAndSet(true, false)) {
                         codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                     } else {
@@ -516,24 +595,25 @@ class HevcLogRecorder(
 
                     val encodedData = codec.getOutputBuffer(index)
                     if (info.size > 0 && encodedData != null) {
-                        if (firstAudioPtsUs < 0) {
-                            firstAudioPtsUs = info.presentationTimeUs
-                        }
-                        val normalizedPts = (info.presentationTimeUs - firstAudioPtsUs).coerceAtLeast(0L)
-                        val monotonicPts = if (normalizedPts <= lastAudioPtsUs) lastAudioPtsUs + 1000L else normalizedPts
+                        // Preserve initial CLOCK_MONOTONIC alignment offset against video PTS 0us
+                        val rawPtsUs = info.presentationTimeUs.coerceAtLeast(0L)
+                        val monotonicPts = if (rawPtsUs <= lastAudioPtsUs) lastAudioPtsUs + 1000L else rawPtsUs
                         lastAudioPtsUs = monotonicPts
                         info.presentationTimeUs = monotonicPts
 
                         encodedData.position(info.offset)
                         encodedData.limit(info.offset + info.size)
 
-                        val clone = ByteBuffer.allocate(info.size)
+                        val pooled = if (info.size <= AUDIO_BUFFER_SIZE) audioBufferPool.poll() else null
+                        val isPooled = pooled != null
+                        val clone = pooled ?: ByteBuffer.allocateDirect(info.size)
+                        clone.clear()
                         clone.put(encodedData)
                         clone.flip()
                         val infoClone = MediaCodec.BufferInfo().apply {
                             set(0, info.size, info.presentationTimeUs, info.flags)
                         }
-                        enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = true, clone, infoClone))
+                        enqueueMuxerCommand(MuxerCommand.WriteSample(isAudio = true, clone, infoClone, isPooled))
                     }
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                         audioEosLatch?.countDown()
@@ -575,7 +655,7 @@ class HevcLogRecorder(
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
             setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = Realtime priority, prevents Tensor G4 from downclocking
-            setInteger(MediaFormat.KEY_OPERATING_RATE, if (fps >= 60) 120 else fps) // Forces max MFC/CSC OPP at 4K 60fps
+            setInteger(MediaFormat.KEY_OPERATING_RATE, fps) // Exact native clock rate without over-volting Exynos MFC
             setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             if (intraFrameMode == IntraFrameMode.ALL_INTRA) {
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
@@ -680,15 +760,15 @@ class HevcLogRecorder(
         videoEncoder?.start()
         audioEncoder?.start()
 
-        // Connect audio engine callback to feed PCM data to audio encoder and WAV sidecar
-        audioEngine.onPcmDataAvailable = { buffer, bytesRead, _ ->
-            if (isRecording.get() && hasReceivedFirstVideoFrame) {
-                val chunk = buffer.copyOf(bytesRead)
+        // Connect audio engine callback to feed PCM data to audio encoder (zero-alloc pool) and WAV sidecar
+        audioEngine.onPcmDataAvailable = { buffer, bytesRead, monotonicPtsUs ->
+            if (isRecording.get() && hasReceivedFirstVideoFrame && bytesRead > 0) {
                 if (shouldRecordWavSidecar) {
+                    val wavCopy = buffer.copyOf(bytesRead)
                     wavIoHandler?.post {
                         try {
-                            bufferedWavOutputStream?.write(chunk)
-                            wavBytesWritten += chunk.size
+                            bufferedWavOutputStream?.write(wavCopy)
+                            wavBytesWritten += wavCopy.size
                         } catch (e: Exception) {
                             Log.w(TAG, "Error writing PCM to WAV sidecar", e)
                         }
@@ -696,26 +776,47 @@ class HevcLogRecorder(
                 }
                 val handler = audioEncoderHandler
                 if (handler != null) {
+                    val pooledChunk = if (bytesRead <= PCM_BUFFER_SIZE) pcmChunkPool.poll() else null
+                    val chunk = if (pooledChunk != null) {
+                        System.arraycopy(buffer, 0, pooledChunk.data, 0, bytesRead)
+                        pooledChunk.size = bytesRead
+                        pooledChunk
+                    } else {
+                        PcmChunk(data = buffer.copyOf(bytesRead), size = bytesRead)
+                    }
+                    chunk.ptsUs = monotonicPtsUs
+
                     handler.post {
                         if (isRecording.get()) {
+                            val videoEpochUs = recordingStartNs / 1000L
+                            val relativePtsUs = (chunk.ptsUs - videoEpochUs).coerceAtLeast(0L)
+                            val ptsUs = if (relativePtsUs <= lastQueuedAudioPtsUs) {
+                                lastQueuedAudioPtsUs + 1000L
+                            } else {
+                                relativePtsUs
+                            }
+                            lastQueuedAudioPtsUs = ptsUs
+                            chunk.ptsUs = ptsUs
+
                             val encoder = audioEncoder
                             val freeIndex = availableAudioInputBuffers.poll()
-                            val totalSamplesWritten = totalAudioBytesFed / 4L
-                            val ptsUs = (totalSamplesWritten * 1_000_000L) / 48_000L
-                            totalAudioBytesFed += chunk.size
-
                             if (encoder != null && freeIndex != null) {
                                 try {
+                                    val size = chunk.size
                                     val inputBuffer = encoder.getInputBuffer(freeIndex)
                                     inputBuffer?.clear()
-                                    inputBuffer?.put(chunk)
-                                    encoder.queueInputBuffer(freeIndex, 0, chunk.size, ptsUs, 0)
+                                    inputBuffer?.put(chunk.data, 0, size)
+                                    recyclePcmChunk(chunk)
+                                    encoder.queueInputBuffer(freeIndex, 0, size, ptsUs, 0)
                                 } catch (e: Exception) {
+                                    recyclePcmChunk(chunk)
                                     Log.w(TAG, "Error queuing audio buffer asynchronously", e)
                                 }
                             } else {
                                 audioQueue.offer(chunk)
                             }
+                        } else {
+                            recyclePcmChunk(chunk)
                         }
                     }
                 }
@@ -757,17 +858,25 @@ class HevcLogRecorder(
             isMuxerStarted = true
             Log.i(TAG, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex")
 
-            // Flush buffered video frames (including keyframe)
+            // Flush buffered video frames (including keyframe) and immediately recycle pooled buffers
             for (sample in pendingVideoSamples) {
-                muxer.writeSampleData(videoTrackIndex, sample.data, sample.info)
-                totalBytesWritten += sample.info.size
+                try {
+                    muxer.writeSampleData(videoTrackIndex, sample.data, sample.info)
+                    totalBytesWritten += sample.info.size
+                } finally {
+                    recycleSampleBuffer(sample)
+                }
             }
             pendingVideoSamples.clear()
 
-            // Flush buffered audio packets
+            // Flush buffered audio packets and immediately recycle pooled buffers
             for (sample in pendingAudioSamples) {
-                muxer.writeSampleData(audioTrackIndex, sample.data, sample.info)
-                totalBytesWritten += sample.info.size
+                try {
+                    muxer.writeSampleData(audioTrackIndex, sample.data, sample.info)
+                    totalBytesWritten += sample.info.size
+                } finally {
+                    recycleSampleBuffer(sample)
+                }
             }
             pendingAudioSamples.clear()
         }
@@ -954,6 +1063,10 @@ class HevcLogRecorder(
             context.contentResolver.update(uri, values, null, null)
         }
 
+        while (true) {
+            val c = audioQueue.poll() ?: break
+            recyclePcmChunk(c)
+        }
         inputSurface?.release()
         inputSurface = null
     }
@@ -969,5 +1082,9 @@ class HevcLogRecorder(
         muxerThread?.quitSafely()
         muxerThread = null
         muxerHandler = null
+        videoBufferPool.clear()
+        audioBufferPool.clear()
+        pcmChunkPool.clear()
+        poolsAllocated = false
     }
 }

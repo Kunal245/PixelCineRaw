@@ -340,6 +340,9 @@ private fun PortraitCinemaLayout(
                         fontFamily = FontFamily.Monospace
                     )
                 }
+
+                // Compact WARM / HOT Thermal Pill (hidden when thermal status == NONE)
+                ThermalIndicator(status = state.thermalStatus)
             }
 
             // Right: Minimal Torch, Orientation Lock, and Pro Tools (•••) Icon

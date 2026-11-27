@@ -735,10 +735,12 @@ fun FrostedPill(
 
 @Composable
 fun ThermalIndicator(status: ThermalStatus) {
+    if (status == ThermalStatus.NOMINAL) return
+
     val (dotColor, text) = when (status) {
-        ThermalStatus.NOMINAL -> Pair(Color(0xFF00FF66), "COOL")
         ThermalStatus.LIGHT, ThermalStatus.MODERATE -> Pair(Color(0xFFFFCC00), "WARM")
         ThermalStatus.SEVERE, ThermalStatus.EMERGENCY -> Pair(Color(0xFFFF2222), "HOT")
+        ThermalStatus.NOMINAL -> return
     }
 
     Row(

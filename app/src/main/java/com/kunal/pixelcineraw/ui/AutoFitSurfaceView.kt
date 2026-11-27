@@ -8,6 +8,7 @@ import android.hardware.DataSpace
 import android.os.Build
 import android.util.AttributeSet
 import android.util.Log
+import android.view.Surface
 import android.view.SurfaceControl
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -18,7 +19,7 @@ import com.kunal.pixelcineraw.camera.ColorProfile
  * Google's official Camera2 zero-stretch SurfaceView with true Actua OLED HDR boost.
  * Maintains exact aspect ratio via onMeasure without any matrix distortion.
  * Surface format is kept stable so surfaceDestroyed never fires during color profile switching.
- * Automatically applies DATASPACE_BT2020_HLG/PQ and extended-range brightness (4.0x) on Android 14+.
+ * Locks display pacing to exact targetFps during recording and gently tapers HDR EDR from 4.0x to 2.0x.
  */
 class AutoFitSurfaceView @JvmOverloads constructor(
     context: Context,
@@ -35,6 +36,10 @@ class AutoFitSurfaceView @JvmOverloads constructor(
     private var isHdrEnabled = false
     private var activeProfile: ColorProfile = ColorProfile.REC709
     private var appliedProfile: ColorProfile? = null
+    private var activeRecording: Boolean = false
+    private var appliedRecording: Boolean? = null
+    private var activeTargetFps: Int = 60
+    private var appliedFrameRate: Float = -1f
 
     init {
         holder.addCallback(this)
@@ -83,31 +88,73 @@ class AutoFitSurfaceView @JvmOverloads constructor(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        post { applyColorProfileSurfaceState(activeProfile, force = true) }
+        post {
+            applyColorProfileSurfaceState(
+                profile = activeProfile,
+                force = true,
+                isRecording = activeRecording,
+                targetFps = activeTargetFps
+            )
+        }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        post { applyColorProfileSurfaceState(activeProfile, force = true) }
+        post {
+            applyColorProfileSurfaceState(
+                profile = activeProfile,
+                force = true,
+                isRecording = activeRecording,
+                targetFps = activeTargetFps
+            )
+        }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         appliedProfile = null
+        appliedRecording = null
+        appliedFrameRate = -1f
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
         super.onConfigurationChanged(newConfig)
-        post { applyColorProfileSurfaceState(activeProfile, force = true) }
+        post {
+            applyColorProfileSurfaceState(
+                profile = activeProfile,
+                force = true,
+                isRecording = activeRecording,
+                targetFps = activeTargetFps
+            )
+        }
     }
 
     /**
-     * Applies color profile surface state across all modes and orientations:
-     * - HLG10: DATASPACE_BT2020_HLG + 4.0x ExtendedRangeBrightness + ActivityInfo.COLOR_MODE_HDR
-     * - HDR10+: DATASPACE_BT2020_PQ + 4.0x ExtendedRangeBrightness + ActivityInfo.COLOR_MODE_HDR
-     * - REC.709 & PIXEL-LOG: DATASPACE_SRGB + 1.0x ExtendedRangeBrightness + ActivityInfo.COLOR_MODE_DEFAULT
+     * Applies color profile surface state and recording thermal pacing across all modes:
+     * - HLG10: DATASPACE_BT2020_HLG + ExtendedRangeBrightness (4.0x idle, 2.0x recording)
+     * - HDR10+: DATASPACE_BT2020_PQ + ExtendedRangeBrightness (4.0x idle, 2.0x recording)
+     * - REC.709 & PIXEL-LOG: DATASPACE_SRGB + 1.0x ExtendedRangeBrightness + COLOR_MODE_DEFAULT
+     * - Recording active: locks Surface.setFrameRate(targetFps, FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
      */
-    fun applyColorProfileSurfaceState(profile: ColorProfile, force: Boolean = false) {
-        if (!force && activeProfile == profile && appliedProfile == profile) return
+    fun applyColorProfileSurfaceState(
+        profile: ColorProfile,
+        force: Boolean = false,
+        isRecording: Boolean = activeRecording,
+        targetFps: Int = activeTargetFps
+    ) {
+        val targetFrameRate = if (isRecording) targetFps.toFloat() else 0f
+        if (!force &&
+            activeProfile == profile &&
+            appliedProfile == profile &&
+            activeRecording == isRecording &&
+            appliedRecording == isRecording &&
+            activeTargetFps == targetFps &&
+            appliedFrameRate == targetFrameRate
+        ) {
+            return
+        }
+
         activeProfile = profile
+        activeRecording = isRecording
+        activeTargetFps = targetFps
         isHdrEnabled = profile == ColorProfile.HLG_10BIT || profile == ColorProfile.HDR10_PLUS
 
         // Ensure Activity window colorMode matches active profile immediately
@@ -118,7 +165,12 @@ class AutoFitSurfaceView @JvmOverloads constructor(
             }
         }
 
-        applyHdrBoostInternal(profile)
+        if (force || appliedProfile != profile || appliedRecording != isRecording) {
+            applyHdrBoostInternal(profile, isRecording)
+        }
+        if (force || appliedFrameRate != targetFrameRate) {
+            applyFrameRateLockInternal(isRecording, targetFps)
+        }
     }
 
     fun setHdrBoost(enabled: Boolean) {
@@ -130,22 +182,43 @@ class AutoFitSurfaceView @JvmOverloads constructor(
         applyColorProfileSurfaceState(profile, force)
     }
 
-    private fun applyHdrBoostInternal(profile: ColorProfile) {
+    private fun applyFrameRateLockInternal(isRecording: Boolean, targetFps: Int) {
+        try {
+            val surf = holder.surface
+            if (surf != null && surf.isValid) {
+                if (isRecording) {
+                    val fpsFloat = targetFps.toFloat()
+                    surf.setFrameRate(fpsFloat, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                    appliedFrameRate = fpsFloat
+                    Log.i(TAG, "Locked OLED display pacing to ${targetFps}Hz (FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)")
+                } else {
+                    surf.setFrameRate(0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+                    appliedFrameRate = 0f
+                    Log.i(TAG, "Restored adaptive OLED display pacing (0Hz DEFAULT)")
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to update Surface frame rate", e)
+        }
+    }
+
+    private fun applyHdrBoostInternal(profile: ColorProfile, isRecording: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             try {
                 val sc = surfaceControl
                 if (sc != null && sc.isValid) {
+                    val hdrRatio = if (isRecording) 2.0f else 4.0f
                     val transaction = SurfaceControl.Transaction()
                     when (profile) {
                         ColorProfile.HLG_10BIT -> {
                             transaction.setDataSpace(sc, DataSpace.DATASPACE_BT2020_HLG)
-                            transaction.setExtendedRangeBrightness(sc, 4.0f, 4.0f)
-                            Log.i(TAG, "Applied HDR boost on SurfaceControl: HLG10, dataspace=BT2020_HLG (4.0x)")
+                            transaction.setExtendedRangeBrightness(sc, hdrRatio, hdrRatio)
+                            Log.i(TAG, "Applied HDR boost on SurfaceControl: HLG10, dataspace=BT2020_HLG (${hdrRatio}x)")
                         }
                         ColorProfile.HDR10_PLUS -> {
                             transaction.setDataSpace(sc, DataSpace.DATASPACE_BT2020_PQ)
-                            transaction.setExtendedRangeBrightness(sc, 4.0f, 4.0f)
-                            Log.i(TAG, "Applied HDR boost on SurfaceControl: HDR10+, dataspace=BT2020_PQ (4.0x)")
+                            transaction.setExtendedRangeBrightness(sc, hdrRatio, hdrRatio)
+                            Log.i(TAG, "Applied HDR boost on SurfaceControl: HDR10+, dataspace=BT2020_PQ (${hdrRatio}x)")
                         }
                         else -> {
                             transaction.setDataSpace(sc, DataSpace.DATASPACE_SRGB)
@@ -155,6 +228,7 @@ class AutoFitSurfaceView @JvmOverloads constructor(
                     }
                     transaction.apply()
                     appliedProfile = profile
+                    appliedRecording = isRecording
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "Failed to set HDR boost on SurfaceControl", e)
