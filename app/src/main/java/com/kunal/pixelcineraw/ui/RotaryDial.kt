@@ -1,5 +1,6 @@
 package com.kunal.pixelcineraw.ui
 
+import android.util.Range
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.exponentialDecay
@@ -19,25 +20,30 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kunal.pixelcineraw.ui.theme.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import android.util.Range
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
+
+private val TabularDialStyle = TextStyle(fontFeatureSettings = TABULAR_NUMS)
 
 enum class ActiveDial {
     NONE,
@@ -47,12 +53,16 @@ enum class ActiveDial {
     FOCUS,
     WHITE_BALANCE,
     EV,
-    BITRATE
+    BITRATE,
+    LUT,
+    TOOLS
 }
 
 /**
- * Cinema Rotary Dial / Horizontal Scrubber with tactile tick marks, haptic clicks,
- * monospaced tabular figures, quick-selection presets, and smooth inertial fling.
+ * v1.5.0 Cinema Rotary Dial / Horizontal Scrubber.
+ *
+ * Matte Obsidian (#EB0B0C0E), 0.75dp hairline borders, Warm Tungsten Amber (#F5A623)
+ * active accents, tabular monospace figures (tnum), and inertial fling decay.
  */
 @Composable
 fun <T> RotaryWheelScrubber(
@@ -77,12 +87,12 @@ fun <T> RotaryWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF2101317), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .border(0.6.dp, Color(0x33FFFFFF), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
+            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Header Bar: Title, Sub-actions, Close
+        // 1. Header Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -91,40 +101,41 @@ fun <T> RotaryWheelScrubber(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = title.uppercase(),
-                    color = Color(0xFFFFCC00),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    color = CinemaAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 headerActions()
             }
 
             IconButton(
                 onClick = onClose,
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(24.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Close Dial",
-                    tint = Color.White
+                    tint = CinemaWhite
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        // 2. Large Central Readout with Tabular Figures
+        // 2. Central Readout with Tabular Figures
         val currentItem = items.getOrNull(selectedIndex)
         Text(
             text = if (currentItem != null) formatItem(currentItem) else "--",
-            color = Color.White,
-            fontSize = 28.sp,
+            color = CinemaWhite,
+            fontSize = 26.sp,
             fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Monospace,
+            style = TabularDialStyle
         )
 
-        // 3. Quick-Jump Preset Buttons (if available)
+        // 3. Quick-Jump Preset Buttons
         if (presets.isNotEmpty()) {
             Spacer(modifier = Modifier.height(6.dp))
             Row(
@@ -135,11 +146,15 @@ fun <T> RotaryWheelScrubber(
                     val isSelected = selectedIndex == targetIdx
                     Box(
                         modifier = Modifier
-                            .background(
-                                if (isSelected) Color(0xFFFFCC00) else Color(0xFF1E2126),
-                                RoundedCornerShape(4.dp)
-                            )
-                            .border(0.5.dp, if (isSelected) Color(0xFFFFCC00) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
+                            .drawBehind {
+                                val r = CornerRadius(5.dp.toPx())
+                                drawRoundRect(color = if (isSelected) CinemaAmber else CinemaElevated, cornerRadius = r)
+                                drawRoundRect(
+                                    color = if (isSelected) CinemaAmber else CinemaBorderInactive,
+                                    cornerRadius = r,
+                                    style = Stroke(0.75.dp.toPx())
+                                )
+                            }
                             .clickable {
                                 flingJob?.cancel()
                                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
@@ -149,10 +164,11 @@ fun <T> RotaryWheelScrubber(
                     ) {
                         Text(
                             text = label,
-                            color = if (isSelected) Color.Black else Color.White,
+                            color = if (isSelected) CinemaObsidian else CinemaWhite,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            style = TabularDialStyle
                         )
                     }
                 }
@@ -161,13 +177,13 @@ fun <T> RotaryWheelScrubber(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Horizontal Tactile Tick Wheel with Inertial Fling
+        // 4. Horizontal Tactile Tick Wheel
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(58.dp)
-                .background(Color(0xFF08090B), RoundedCornerShape(8.dp))
-                .border(0.5.dp, Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                .height(54.dp)
+                .background(CinemaObsidian, RoundedCornerShape(8.dp))
+                .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(8.dp))
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
@@ -216,7 +232,6 @@ fun <T> RotaryWheelScrubber(
                 val cx = size.width / 2f
                 val h = size.height
 
-                // Render neighboring tick marks
                 val visibleCount = 18
                 for (offset in -visibleCount..visibleCount) {
                     val idx = selectedIndex + offset
@@ -234,10 +249,10 @@ fun <T> RotaryWheelScrubber(
                         }
 
                         val tickColor = when {
-                            isCenter -> Color(0xFFFFCC00)
-                            isMajor -> Color(0xCCFFFFFF)
-                            isMedium -> Color(0x77FFFFFF)
-                            else -> Color(0x33FFFFFF)
+                            isCenter -> CinemaAmber
+                            isMajor -> CinemaWhite.copy(alpha = 0.8f)
+                            isMedium -> CinemaWhite.copy(alpha = 0.45f)
+                            else -> CinemaWhite.copy(alpha = 0.20f)
                         }
 
                         drawLine(
@@ -249,22 +264,20 @@ fun <T> RotaryWheelScrubber(
                     }
                 }
 
-                // Center indicator needle (Cinema Gold with top indicator notch)
                 drawLine(
-                    color = Color(0xFFFFCC00),
+                    color = CinemaAmber,
                     start = Offset(cx, 0f),
                     end = Offset(cx, h),
-                    strokeWidth = 2.5.dp.toPx()
+                    strokeWidth = 2.dp.toPx()
                 )
 
-                // Top notch triangle
                 val trianglePath = Path().apply {
-                    moveTo(cx - 5.dp.toPx(), 0f)
-                    lineTo(cx + 5.dp.toPx(), 0f)
-                    lineTo(cx, 6.dp.toPx())
+                    moveTo(cx - 4.5.dp.toPx(), 0f)
+                    lineTo(cx + 4.5.dp.toPx(), 0f)
+                    lineTo(cx, 5.5.dp.toPx())
                     close()
                 }
-                drawPath(trianglePath, Color(0xFFFFCC00))
+                drawPath(trianglePath, CinemaAmber)
             }
         }
     }
@@ -272,14 +285,10 @@ fun <T> RotaryWheelScrubber(
 
 /**
  * Cinema Non-Linear Follow-Focus Wheel Scrubber.
- *
- * Maps rotary focus throw using a power follow-focus curve (diopters = maxDiopters * progress^2.4),
- * dedicating ~65% of wheel travel to precision infinity-to-1m focus pulls, with smooth macro acceleration,
- * inertial fling decay on release, calibrated real-world distance marks, and haptic detents.
  */
 @Composable
 fun CinemaFocusWheelScrubber(
-    currentFocusDistance: Float, // In diopters (0.0 = infinity, max = macro)
+    currentFocusDistance: Float,
     maxDiopters: Float = 10.0f,
     onFocusDistanceChanged: (Float) -> Unit,
     onClose: () -> Unit,
@@ -289,8 +298,6 @@ fun CinemaFocusWheelScrubber(
     val view = LocalView.current
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
-
-    // Virtual travel span of the focus barrel in pixels
     val barrelWidthPx = with(density) { 1400.dp.toPx() }
 
     val safeMaxD = max(0.1f, maxDiopters)
@@ -298,7 +305,6 @@ fun CinemaFocusWheelScrubber(
     var dragProgress by remember(currentFocusDistance) { mutableFloatStateOf(currentProgress) }
     var flingJob by remember { mutableStateOf<Job?>(null) }
 
-    // Preset distances (distance in meters, diopters = 1/m)
     val presetMarks = remember(safeMaxD) {
         listOf(
             "∞ INF" to 0.0f,
@@ -312,7 +318,6 @@ fun CinemaFocusWheelScrubber(
         )
     }
 
-    // Distance graduation marks along the barrel: (diopters, label, progress)
     val barrelMarks = remember(safeMaxD) {
         listOf(
             0.0f to "∞",
@@ -334,12 +339,11 @@ fun CinemaFocusWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF2101317), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .border(0.6.dp, Color(0x33FFFFFF), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
+            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Header Bar: Title, AF/MF action, Close
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -348,50 +352,46 @@ fun CinemaFocusWheelScrubber(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "MANUAL FOLLOW FOCUS",
-                    color = Color(0xFFFFCC00),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    color = CinemaAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 headerActions()
             }
 
             IconButton(
                 onClick = onClose,
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(24.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Close Dial",
-                    tint = Color.White
+                    tint = CinemaWhite
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        // 2. Large Central Readout with Tabular Figures
         val readoutText = when {
             currentFocusDistance <= 0.05f -> "∞ INFINITY"
             currentFocusDistance >= safeMaxD - 0.1f -> "0.10m MACRO"
-            else -> {
-                val meters = 1.0f / currentFocusDistance
-                String.format(Locale.US, "%.2fm", meters)
-            }
+            else -> String.format(Locale.US, "%.2fm", 1.0f / currentFocusDistance)
         }
         Text(
             text = readoutText,
-            color = Color.White,
-            fontSize = 28.sp,
+            color = CinemaWhite,
+            fontSize = 26.sp,
             fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Monospace,
+            style = TabularDialStyle
         )
 
-        // 3. Quick-Jump Preset Buttons
         Spacer(modifier = Modifier.height(6.dp))
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             presetMarks.forEach { (label, targetDiopters) ->
@@ -400,26 +400,30 @@ fun CinemaFocusWheelScrubber(
                         (targetDiopters == safeMaxD && currentFocusDistance >= safeMaxD - 0.2f)
                 Box(
                     modifier = Modifier
-                        .background(
-                            if (isSelected) Color(0xFFFFCC00) else Color(0xFF1E2126),
-                            RoundedCornerShape(4.dp)
-                        )
-                        .border(0.5.dp, if (isSelected) Color(0xFFFFCC00) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
+                        .drawBehind {
+                            val r = CornerRadius(5.dp.toPx())
+                            drawRoundRect(color = if (isSelected) CinemaAmber else CinemaElevated, cornerRadius = r)
+                            drawRoundRect(
+                                color = if (isSelected) CinemaAmber else CinemaBorderInactive,
+                                cornerRadius = r,
+                                style = Stroke(0.75.dp.toPx())
+                            )
+                        }
                         .clickable {
                             flingJob?.cancel()
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            val targetProgress = (targetDiopters / safeMaxD).coerceIn(0f, 1f).pow(1f / 2.4f)
-                            dragProgress = targetProgress
+                            dragProgress = (targetDiopters / safeMaxD).coerceIn(0f, 1f).pow(1f / 2.4f)
                             onFocusDistanceChanged(targetDiopters)
                         }
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
                 ) {
                     Text(
                         text = label,
-                        color = if (isSelected) Color.Black else Color.White,
-                        fontSize = 10.sp,
+                        color = if (isSelected) CinemaObsidian else CinemaWhite,
+                        fontSize = 9.5.sp,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        style = TabularDialStyle
                     )
                 }
             }
@@ -427,15 +431,14 @@ fun CinemaFocusWheelScrubber(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Horizontal Follow-Focus Barrel Wheel
         var lastHapticMarkIdx by remember { mutableIntStateOf(-1) }
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp)
-                .background(Color(0xFF08090B), RoundedCornerShape(8.dp))
-                .border(0.5.dp, Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                .height(60.dp)
+                .background(CinemaObsidian, RoundedCornerShape(8.dp))
+                .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(8.dp))
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
@@ -445,7 +448,6 @@ fun CinemaFocusWheelScrubber(
                         val newDiopters = safeMaxD * dragProgress.pow(2.4f)
                         onFocusDistanceChanged(newDiopters)
 
-                        // Check haptic detents
                         val nearestMark = barrelMarks.indexOfFirst { abs(it.third - dragProgress) < 0.015f }
                         if (nearestMark != -1 && nearestMark != lastHapticMarkIdx) {
                             lastHapticMarkIdx = nearestMark
@@ -478,12 +480,11 @@ fun CinemaFocusWheelScrubber(
                 val cx = size.width / 2f
                 val h = size.height
 
-                // Draw barrel graduation marks and distance labels
                 barrelMarks.forEach { (_, label, p) ->
                     val markX = cx + (p - dragProgress) * barrelWidthPx
                     if (markX in -40f..(size.width + 40f)) {
                         val isCenter = abs(markX - cx) < 6f
-                        val tickColor = if (isCenter) Color(0xFFFFCC00) else Color(0xCCFFFFFF)
+                        val tickColor = if (isCenter) CinemaAmber else CinemaWhite.copy(alpha = 0.8f)
 
                         drawLine(
                             color = tickColor,
@@ -492,13 +493,12 @@ fun CinemaFocusWheelScrubber(
                             strokeWidth = 1.5.dp.toPx()
                         )
 
-                        // Text distance label
                         drawContext.canvas.nativeCanvas.drawText(
                             label,
                             markX,
                             h * 0.90f,
                             android.graphics.Paint().apply {
-                                color = if (isCenter) android.graphics.Color.YELLOW else android.graphics.Color.WHITE
+                                color = if (isCenter) android.graphics.Color.rgb(245, 166, 35) else android.graphics.Color.WHITE
                                 textSize = 9.dp.toPx()
                                 textAlign = android.graphics.Paint.Align.CENTER
                                 typeface = android.graphics.Typeface.MONOSPACE
@@ -508,7 +508,6 @@ fun CinemaFocusWheelScrubber(
                     }
                 }
 
-                // Intermediate ticks
                 val subTicks = 100
                 for (i in 0..subTicks) {
                     val p = i / subTicks.toFloat()
@@ -517,7 +516,7 @@ fun CinemaFocusWheelScrubber(
                         val isMajor = barrelMarks.any { abs(it.third - p) < 0.008f }
                         if (!isMajor) {
                             drawLine(
-                                color = Color(0x33FFFFFF),
+                                color = CinemaWhite.copy(alpha = 0.2f),
                                 start = Offset(markX, h * 0.35f),
                                 end = Offset(markX, h * 0.55f),
                                 strokeWidth = 1.dp.toPx()
@@ -526,22 +525,20 @@ fun CinemaFocusWheelScrubber(
                     }
                 }
 
-                // Center indicator needle (Cinema Gold with top indicator notch)
                 drawLine(
-                    color = Color(0xFFFFCC00),
+                    color = CinemaAmber,
                     start = Offset(cx, 0f),
                     end = Offset(cx, h),
-                    strokeWidth = 2.5.dp.toPx()
+                    strokeWidth = 2.dp.toPx()
                 )
 
-                // Top notch triangle
                 val trianglePath = Path().apply {
-                    moveTo(cx - 5.dp.toPx(), 0f)
-                    lineTo(cx + 5.dp.toPx(), 0f)
-                    lineTo(cx, 6.dp.toPx())
+                    moveTo(cx - 4.5.dp.toPx(), 0f)
+                    lineTo(cx + 4.5.dp.toPx(), 0f)
+                    lineTo(cx, 5.5.dp.toPx())
                     close()
                 }
-                drawPath(trianglePath, Color(0xFFFFCC00))
+                drawPath(trianglePath, CinemaAmber)
             }
         }
     }
@@ -549,10 +546,6 @@ fun CinemaFocusWheelScrubber(
 
 /**
  * Cinema Logarithmic Sub-Stop ISO Sensitivity Wheel Scrubber.
- *
- * Implements iPhone-smooth continuous sub-stop ISO control with locked 130dp/stop relative dragging
- * (130dp thumb travel = 1 full 2x exposure stop), zero-flash auto-to-manual handoff, standard full-stop
- * presets (100..3200), HI-ISO toggle for 6400+, 120Hz inertial fling decay, and tactile haptic detents.
  */
 @Composable
 fun CinemaIsoWheelScrubber(
@@ -574,11 +567,9 @@ fun CinemaIsoWheelScrubber(
     val minIso = activeIsoRange.lower
 
     val stopWidthPx = with(density) { 160.dp.toPx() }
-
     val currentIsoState = rememberUpdatedState(currentIso)
     var lastHapticIso by remember { mutableIntStateOf(currentIso) }
 
-    // Standard Cinema Full-Stop Presets
     val standardPresets = if (!isHiIsoMode) {
         listOf(100, 200, 400, 800, 1600, 3200)
     } else {
@@ -589,12 +580,11 @@ fun CinemaIsoWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF2101317), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .border(0.6.dp, Color(0x33FFFFFF), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
+            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Header Bar: Title, HI-ISO, Auto/Manual, Close
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -603,50 +593,52 @@ fun CinemaIsoWheelScrubber(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "ISO SENSITIVITY",
-                    color = Color(0xFFFFCC00),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    color = CinemaAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.width(10.dp))
-                // HI-ISO Toggle Pill
+                Spacer(modifier = Modifier.width(8.dp))
                 Box(
                     modifier = Modifier
-                        .background(
-                            if (isHiIsoMode) Color(0xFFFF2222) else Color(0xFF1E2126),
-                            RoundedCornerShape(4.dp)
-                        )
-                        .border(0.5.dp, if (isHiIsoMode) Color(0xFFFF5555) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
+                        .drawBehind {
+                            val r = CornerRadius(4.dp.toPx())
+                            drawRoundRect(color = if (isHiIsoMode) CinemaCrimson else CinemaElevated, cornerRadius = r)
+                            drawRoundRect(
+                                color = if (isHiIsoMode) CinemaCrimson else CinemaBorderInactive,
+                                cornerRadius = r,
+                                style = Stroke(0.75.dp.toPx())
+                            )
+                        }
                         .clickable {
                             isHiIsoMode = !isHiIsoMode
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         }
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
                 ) {
                     Text(
-                        text = if (isHiIsoMode) "HI-ISO ON" else "HI-ISO OFF",
-                        color = Color.White,
-                        fontSize = 10.sp,
+                        text = if (isHiIsoMode) "HI-ISO ON" else "HI-ISO",
+                        color = CinemaWhite,
+                        fontSize = 9.5.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace
                     )
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                TextButton(onClick = onToggleExposureMode) {
+                Spacer(modifier = Modifier.width(6.dp))
+                TextButton(onClick = onToggleExposureMode, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
                     Text(
                         if (isManualExposure) "SET AUTO" else "SET MANUAL",
-                        color = Color(0xFF00E5FF),
-                        fontSize = 11.sp,
+                        color = CinemaCyan,
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
-                Spacer(modifier = Modifier.width(4.dp))
                 if (isManualExposure) {
-                    TextButton(onClick = onToggleAutoIso) {
+                    TextButton(onClick = onToggleAutoIso, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
                         Text(
-                            if (isAutoIso) "AUTO ISO ON" else "SHUTTER-PRI AUTO",
-                            color = if (isAutoIso) Color(0xFF00FF66) else Color(0xAAFFFFFF),
-                            fontSize = 10.sp,
+                            if (isAutoIso) "AUTO ISO" else "SHUTTER-PRI",
+                            color = if (isAutoIso) CinemaAutoGreen else CinemaGray,
+                            fontSize = 9.5.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -655,29 +647,28 @@ fun CinemaIsoWheelScrubber(
 
             IconButton(
                 onClick = onClose,
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(24.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Close Dial",
-                    tint = Color.White
+                    tint = CinemaWhite
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        // 2. Large Central Readout with Sub-Stop ISO Indication
         val readoutText = if (isAutoIso) "AUTO ISO $currentIso" else "ISO $currentIso"
         Text(
             text = readoutText,
-            color = if (isAutoIso) Color(0xFF00FF66) else Color.White,
-            fontSize = 28.sp,
+            color = if (isAutoIso) CinemaAutoGreen else CinemaWhite,
+            fontSize = 26.sp,
             fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Monospace,
+            style = TabularDialStyle
         )
 
-        // 3. Quick-Jump Full-Stop Presets
         if (activePresets.isNotEmpty()) {
             Spacer(modifier = Modifier.height(6.dp))
             Row(
@@ -688,11 +679,15 @@ fun CinemaIsoWheelScrubber(
                     val isSelected = abs(currentIso - presetIso) <= 5
                     Box(
                         modifier = Modifier
-                            .background(
-                                if (isSelected) Color(0xFFFFCC00) else Color(0xFF1E2126),
-                                RoundedCornerShape(4.dp)
-                            )
-                            .border(0.5.dp, if (isSelected) Color(0xFFFFCC00) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
+                            .drawBehind {
+                                val r = CornerRadius(5.dp.toPx())
+                                drawRoundRect(color = if (isSelected) CinemaAmber else CinemaElevated, cornerRadius = r)
+                                drawRoundRect(
+                                    color = if (isSelected) CinemaAmber else CinemaBorderInactive,
+                                    cornerRadius = r,
+                                    style = Stroke(0.75.dp.toPx())
+                                )
+                            }
                             .clickable {
                                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 onIsoChanged(presetIso)
@@ -701,10 +696,11 @@ fun CinemaIsoWheelScrubber(
                     ) {
                         Text(
                             text = "$presetIso",
-                            color = if (isSelected) Color.Black else Color.White,
+                            color = if (isSelected) CinemaObsidian else CinemaWhite,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            style = TabularDialStyle
                         )
                     }
                 }
@@ -713,13 +709,12 @@ fun CinemaIsoWheelScrubber(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Horizontal ISO Scrubber Wheel with 160dp/Stop Relative Drag & No Recomposition Compounding
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(58.dp)
-                .background(Color(0xFF08090B), RoundedCornerShape(8.dp))
-                .border(0.5.dp, Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                .height(54.dp)
+                .background(CinemaObsidian, RoundedCornerShape(8.dp))
+                .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(8.dp))
                 .pointerInput(isHiIsoMode) {
                     var anchorIso = currentIsoState.value.toDouble()
                     var cumulativeDxDp = 0.0
@@ -731,7 +726,6 @@ fun CinemaIsoWheelScrubber(
                         },
                         onHorizontalDrag = { change, dragAmount ->
                             change.consume()
-                            // Negative dragAmount (swiping left) increases ISO
                             val deltaDp = (-dragAmount / density.density).toDouble()
                             cumulativeDxDp += deltaDp
 
@@ -753,11 +747,9 @@ fun CinemaIsoWheelScrubber(
                 val cx = size.width / 2f
                 val h = size.height
 
-                // Draw full stops and 1/3-stop graduation marks along the continuous log2 scale
                 val baseStops = listOf(25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800)
                 val safeCurrentIso = maxOf(1f, currentIso.toFloat())
 
-                // Draw full stops
                 baseStops.forEach { stopVal ->
                     if (stopVal in (minIso / 2)..(maxAccessibleIso * 2)) {
                         val stopOffsetStops = kotlin.math.ln(stopVal.toDouble() / safeCurrentIso.toDouble()) / kotlin.math.ln(2.0)
@@ -765,22 +757,21 @@ fun CinemaIsoWheelScrubber(
 
                         if (markX in -40f..(size.width + 40f)) {
                             val isCenter = abs(markX - cx) < 6f
-                            val tickColor = if (isCenter) Color(0xFFFFCC00) else Color(0xEEFFFFFF)
+                            val tickColor = if (isCenter) CinemaAmber else CinemaWhite.copy(alpha = 0.9f)
 
                             drawLine(
                                 color = tickColor,
                                 start = Offset(markX, h * 0.15f),
                                 end = Offset(markX, h * 0.70f),
-                                strokeWidth = 1.8.dp.toPx()
+                                strokeWidth = 1.6.dp.toPx()
                             )
 
-                            // Full-stop text label (e.g. "100", "200")
                             drawContext.canvas.nativeCanvas.drawText(
                                 "$stopVal",
                                 markX,
                                 h * 0.90f,
                                 android.graphics.Paint().apply {
-                                    color = if (isCenter) android.graphics.Color.YELLOW else android.graphics.Color.WHITE
+                                    color = if (isCenter) android.graphics.Color.rgb(245, 166, 35) else android.graphics.Color.WHITE
                                     textSize = 9.dp.toPx()
                                     textAlign = android.graphics.Paint.Align.CENTER
                                     typeface = android.graphics.Typeface.MONOSPACE
@@ -789,7 +780,6 @@ fun CinemaIsoWheelScrubber(
                             )
                         }
 
-                        // Draw 1/3-stop intermediate ticks (+1/3 stop and +2/3 stop)
                         for (third in 1..2) {
                             val thirdVal = stopVal * 2.0.pow(third / 3.0)
                             if (thirdVal <= maxAccessibleIso * 1.5) {
@@ -797,16 +787,15 @@ fun CinemaIsoWheelScrubber(
                                 val thirdX = cx + (thirdOffsetStops * stopWidthPx).toFloat()
                                 if (thirdX in -10f..(size.width + 10f)) {
                                     drawLine(
-                                        color = Color(0x77FFFFFF),
+                                        color = CinemaWhite.copy(alpha = 0.45f),
                                         start = Offset(thirdX, h * 0.28f),
                                         end = Offset(thirdX, h * 0.58f),
-                                        strokeWidth = 1.2.dp.toPx()
+                                        strokeWidth = 1.1.dp.toPx()
                                     )
                                 }
                             }
                         }
 
-                        // Draw fine 1/6-stop micro-ticks
                         for (sixth in listOf(1, 3, 5)) {
                             val sixthVal = stopVal * 2.0.pow(sixth / 6.0)
                             if (sixthVal <= maxAccessibleIso * 1.5) {
@@ -814,7 +803,7 @@ fun CinemaIsoWheelScrubber(
                                 val sixthX = cx + (sixthOffsetStops * stopWidthPx).toFloat()
                                 if (sixthX in -10f..(size.width + 10f)) {
                                     drawLine(
-                                        color = Color(0x2AFFFFFF),
+                                        color = CinemaWhite.copy(alpha = 0.16f),
                                         start = Offset(sixthX, h * 0.38f),
                                         end = Offset(sixthX, h * 0.52f),
                                         strokeWidth = 0.8.dp.toPx()
@@ -825,21 +814,20 @@ fun CinemaIsoWheelScrubber(
                     }
                 }
 
-                // Center indicator needle (Cinema Gold with top notch)
                 drawLine(
-                    color = Color(0xFFFFCC00),
+                    color = CinemaAmber,
                     start = Offset(cx, 0f),
                     end = Offset(cx, h),
-                    strokeWidth = 2.5.dp.toPx()
+                    strokeWidth = 2.dp.toPx()
                 )
 
                 val trianglePath = Path().apply {
-                    moveTo(cx - 5.dp.toPx(), 0f)
-                    lineTo(cx + 5.dp.toPx(), 0f)
-                    lineTo(cx, 6.dp.toPx())
+                    moveTo(cx - 4.5.dp.toPx(), 0f)
+                    lineTo(cx + 4.5.dp.toPx(), 0f)
+                    lineTo(cx, 5.5.dp.toPx())
                     close()
                 }
-                drawPath(trianglePath, Color(0xFFFFCC00))
+                drawPath(trianglePath, CinemaAmber)
             }
         }
     }
@@ -847,10 +835,6 @@ fun CinemaIsoWheelScrubber(
 
 /**
  * Cinema Perceptual Mired / Kelvin White Balance Wheel Scrubber.
- *
- * Maps color temperature along a perceptually uniform Mired scale (10^6 / K) from 2300K to 8000K,
- * with heavy damped 3.5x precision gear ratio (~1400dp travel span), standard color temperature presets,
- * inertial fling decay on release, and tactile haptic detents.
  */
 @Composable
 fun CinemaWhiteBalanceWheelScrubber(
@@ -864,14 +848,10 @@ fun CinemaWhiteBalanceWheelScrubber(
     val view = LocalView.current
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
-
-    // Virtual travel span of the white balance barrel in pixels (3.5x precision throw)
     val barrelWidthPx = with(density) { 1400.dp.toPx() }
 
-    // Human perceptual color temperature (Mireds = 10^6 / K):
-    // 2300K (434.78 Mireds) to 8000K (125.0 Mireds)
-    val minMired = 1_000_000f / 8000f // 125.0f
-    val maxMired = 1_000_000f / 2300f // 434.78f
+    val minMired = 1_000_000f / 8000f
+    val maxMired = 1_000_000f / 2300f
     val miredSpan = maxMired - minMired
 
     fun kelvinToProgress(k: Int): Float {
@@ -882,7 +862,6 @@ fun CinemaWhiteBalanceWheelScrubber(
     fun progressToKelvin(p: Float): Int {
         val m = minMired + p.coerceIn(0f, 1f) * miredSpan
         val k = (1_000_000f / m).roundToInt()
-        // Round to nearest 50K for clean tabular figures
         return ((k + 25) / 50 * 50).coerceIn(2300, 8000)
     }
 
@@ -892,12 +871,12 @@ fun CinemaWhiteBalanceWheelScrubber(
 
     val presetMarks = remember {
         listOf(
-            "2800K INC" to 2800,
-            "3200K TUNG" to 3200,
-            "4000K FLOR" to 4000,
-            "5600K DAY" to 5600,
-            "6500K CLD" to 6500,
-            "7500K SHD" to 7500
+            "2800K" to 2800,
+            "3200K" to 3200,
+            "4000K" to 4000,
+            "5600K" to 5600,
+            "6500K" to 6500,
+            "7500K" to 7500
         )
     }
 
@@ -920,12 +899,11 @@ fun CinemaWhiteBalanceWheelScrubber(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF2101317), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .border(0.6.dp, Color(0x33FFFFFF), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
+            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Header Bar: Title, AWB/Manual, Close
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -933,18 +911,18 @@ fun CinemaWhiteBalanceWheelScrubber(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "WHITE BALANCE KELVIN",
-                    color = Color(0xFFFFCC00),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    text = "WHITE BALANCE",
+                    color = CinemaAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.width(10.dp))
-                TextButton(onClick = onToggleAutoWb) {
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(onClick = onToggleAutoWb, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
                     Text(
                         if (isManualWb) "ENABLE AWB" else "ENABLE MANUAL",
-                        color = Color(0xFF00E5FF),
-                        fontSize = 11.sp,
+                        color = CinemaCyan,
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -952,42 +930,45 @@ fun CinemaWhiteBalanceWheelScrubber(
 
             IconButton(
                 onClick = onClose,
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(24.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Close Dial",
-                    tint = Color.White
+                    tint = CinemaWhite
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        // 2. Large Central Readout
         Text(
             text = "${currentKelvin}K",
-            color = Color.White,
-            fontSize = 28.sp,
+            color = CinemaWhite,
+            fontSize = 26.sp,
             fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Monospace,
+            style = TabularDialStyle
         )
 
-        // 3. Quick-Jump Presets
         Spacer(modifier = Modifier.height(6.dp))
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             presetMarks.forEach { (label, targetKelvin) ->
                 val isSelected = abs(currentKelvin - targetKelvin) < 100
                 Box(
                     modifier = Modifier
-                        .background(
-                            if (isSelected) Color(0xFFFFCC00) else Color(0xFF1E2126),
-                            RoundedCornerShape(4.dp)
-                        )
-                        .border(0.5.dp, if (isSelected) Color(0xFFFFCC00) else Color(0x2AFFFFFF), RoundedCornerShape(4.dp))
+                        .drawBehind {
+                            val r = CornerRadius(5.dp.toPx())
+                            drawRoundRect(color = if (isSelected) CinemaAmber else CinemaElevated, cornerRadius = r)
+                            drawRoundRect(
+                                color = if (isSelected) CinemaAmber else CinemaBorderInactive,
+                                cornerRadius = r,
+                                style = Stroke(0.75.dp.toPx())
+                            )
+                        }
                         .clickable {
                             flingJob?.cancel()
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
@@ -998,10 +979,11 @@ fun CinemaWhiteBalanceWheelScrubber(
                 ) {
                     Text(
                         text = label,
-                        color = if (isSelected) Color.Black else Color.White,
+                        color = if (isSelected) CinemaObsidian else CinemaWhite,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        style = TabularDialStyle
                     )
                 }
             }
@@ -1009,15 +991,14 @@ fun CinemaWhiteBalanceWheelScrubber(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Horizontal White Balance Scrubber Wheel
         var lastHapticKelvinMark by remember { mutableIntStateOf(-1) }
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp)
-                .background(Color(0xFF08090B), RoundedCornerShape(8.dp))
-                .border(0.5.dp, Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                .height(60.dp)
+                .background(CinemaObsidian, RoundedCornerShape(8.dp))
+                .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(8.dp))
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
@@ -1063,7 +1044,7 @@ fun CinemaWhiteBalanceWheelScrubber(
                     val markX = cx + (p - dragProgress) * barrelWidthPx
                     if (markX in -40f..(size.width + 40f)) {
                         val isCenter = abs(markX - cx) < 6f
-                        val tickColor = if (isCenter) Color(0xFFFFCC00) else Color(0xCCFFFFFF)
+                        val tickColor = if (isCenter) CinemaAmber else CinemaWhite.copy(alpha = 0.8f)
 
                         drawLine(
                             color = tickColor,
@@ -1077,7 +1058,7 @@ fun CinemaWhiteBalanceWheelScrubber(
                             markX,
                             h * 0.90f,
                             android.graphics.Paint().apply {
-                                color = if (isCenter) android.graphics.Color.YELLOW else android.graphics.Color.WHITE
+                                color = if (isCenter) android.graphics.Color.rgb(245, 166, 35) else android.graphics.Color.WHITE
                                 textSize = 9.dp.toPx()
                                 textAlign = android.graphics.Paint.Align.CENTER
                                 typeface = android.graphics.Typeface.MONOSPACE
@@ -1095,7 +1076,7 @@ fun CinemaWhiteBalanceWheelScrubber(
                         val isMajor = barrelMarks.any { abs(it.third - p) < 0.008f }
                         if (!isMajor) {
                             drawLine(
-                                color = Color(0x33FFFFFF),
+                                color = CinemaWhite.copy(alpha = 0.2f),
                                 start = Offset(markX, h * 0.35f),
                                 end = Offset(markX, h * 0.55f),
                                 strokeWidth = 1.dp.toPx()
@@ -1104,23 +1085,21 @@ fun CinemaWhiteBalanceWheelScrubber(
                     }
                 }
 
-                // Center indicator needle (Cinema Gold with top notch)
                 drawLine(
-                    color = Color(0xFFFFCC00),
+                    color = CinemaAmber,
                     start = Offset(cx, 0f),
                     end = Offset(cx, h),
-                    strokeWidth = 2.5.dp.toPx()
+                    strokeWidth = 2.dp.toPx()
                 )
 
                 val trianglePath = Path().apply {
-                    moveTo(cx - 5.dp.toPx(), 0f)
-                    lineTo(cx + 5.dp.toPx(), 0f)
-                    lineTo(cx, 6.dp.toPx())
+                    moveTo(cx - 4.5.dp.toPx(), 0f)
+                    lineTo(cx + 4.5.dp.toPx(), 0f)
+                    lineTo(cx, 5.5.dp.toPx())
                     close()
                 }
-                drawPath(trianglePath, Color(0xFFFFCC00))
+                drawPath(trianglePath, CinemaAmber)
             }
         }
     }
 }
-

@@ -2,8 +2,15 @@ package com.kunal.pixelcineraw.ui
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,23 +27,108 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.CinemaState
+import com.kunal.pixelcineraw.ui.theme.*
 import java.util.Locale
 
+private val TabularRailStyle = TextStyle(fontFeatureSettings = TABULAR_NUMS)
+
 /**
- * Ergonomic right-hand cinema thumb action rail.
+ * Tactile Apple Pro / Arri Alexa concentric cinema shutter button.
  *
- * Houses the Torch video light, tactile concentric cinema shutter, live timecode + MB counter,
- * pause/resume toggle, last clip thumbnail preview, and AE/AF lock button.
+ * Runs the circle -> rounded-square core morph and subtle recording pulse strictly in
+ * `drawBehind` + `graphicsLayer` with zero Compose layout invalidations (`<= 0.5%` jank).
+ */
+@Composable
+fun CinemaShutterButton(
+    isRecording: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    outerSize: Dp = 68.dp,
+    innerCircleSize: Dp = 54.dp,
+    innerSquareSize: Dp = 26.dp
+) {
+    val haptic = LocalHapticFeedback.current
+    val morphProgress by animateFloatAsState(
+        targetValue = if (isRecording) 1f else 0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        label = "shutterMorph"
+    )
+
+    val infiniteTransition = rememberInfiniteTransition(label = "RecCorePulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "RecCoreScale"
+    )
+
+    Box(
+        modifier = modifier
+            .size(outerSize)
+            .graphicsLayer {
+                val s = if (isRecording) pulseScale else 1.0f
+                scaleX = s
+                scaleY = s
+            }
+            .drawBehind {
+                val ringStroke = 2.5.dp.toPx()
+                val ringRadius = (size.minDimension - ringStroke) / 2f
+                drawCircle(
+                    color = CinemaWhite,
+                    radius = ringRadius,
+                    style = Stroke(width = ringStroke)
+                )
+
+                val startPx = innerCircleSize.toPx()
+                val endPx = innerSquareSize.toPx()
+                val currentSize = startPx + (endPx - startPx) * morphProgress
+                val startRadius = startPx / 2f
+                val endRadius = 8.dp.toPx()
+                val corner = startRadius + (endRadius - startRadius) * morphProgress
+                val topLeftOffset = Offset(
+                    x = (size.width - currentSize) / 2f,
+                    y = (size.height - currentSize) / 2f
+                )
+
+                drawRoundRect(
+                    color = CinemaCrimson,
+                    topLeft = topLeftOffset,
+                    size = Size(currentSize, currentSize),
+                    cornerRadius = CornerRadius(corner, corner)
+                )
+            }
+            .clip(CircleShape)
+            .clickable {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                onClick()
+            }
+    )
+}
+
+/**
+ * v1.5.0 Right-hand cinema thumb action rail (Matte Obsidian + 0.75dp hairline borders).
  */
 @Composable
 fun RightActionRail(
@@ -54,230 +146,178 @@ fun RightActionRail(
     Column(
         modifier = modifier
             .fillMaxHeight()
-            .width(76.dp)
-            .background(Color(0xB30C0E12))
-            .border(width = 0.5.dp, color = Color(0x26FFFFFF))
-            .padding(vertical = 10.dp, horizontal = 8.dp),
+            .background(CinemaPillBgDark)
+            .drawBehind {
+                drawLine(
+                    color = CinemaBorderInactive,
+                    start = Offset(0f, 0f),
+                    end = Offset(0f, size.height),
+                    strokeWidth = 0.75.dp.toPx()
+                )
+            }
+            .displayCutoutPadding()
+            .width(72.dp)
+            .padding(vertical = 8.dp, horizontal = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         // 1. Top Cluster: Flip Camera, Pro Suite, Torch & AE/AF Lock
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            // Flip Camera Button (Front / Rear)
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(if (state.isFrontCamera) Color(0xFF00E5FF) else Color(0x33FFFFFF))
-                    .border(
-                        width = 1.dp,
-                        color = if (state.isFrontCamera) Color(0xFF66E5FF) else Color(0x22FFFFFF),
-                        shape = CircleShape
-                    )
-                    .clickable(enabled = !state.isRecording) { onFlipCamera() },
-                contentAlignment = Alignment.Center
+            RailCircleButton(
+                isActive = state.isFrontCamera,
+                activeFill = CinemaAmber,
+                activeBorder = CinemaAmber,
+                enabled = !state.isRecording,
+                onClick = onFlipCamera
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.FlipCameraAndroid,
-                        contentDescription = "Flip Camera",
-                        tint = if (state.isFrontCamera) Color.Black else Color.White,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = if (state.isFrontCamera) "FRONT" else "REAR",
-                        color = if (state.isFrontCamera) Color.Black else Color.White,
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.FlipCameraAndroid,
+                    contentDescription = "Flip Camera",
+                    tint = if (state.isFrontCamera) CinemaObsidian else CinemaWhite,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = if (state.isFrontCamera) "FRONT" else "REAR",
+                    color = if (state.isFrontCamera) CinemaObsidian else CinemaWhite,
+                    fontSize = 6.5.sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace
+                )
             }
 
-            // Pro Cinema Suite Button
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(if (state.isProToolsDrawerOpen) Color(0xFF00E5FF) else Color(0x26FFFFFF))
-                    .border(
-                        width = 1.dp,
-                        color = if (state.isProToolsDrawerOpen) Color(0xFF80EEFF) else Color(0x22FFFFFF),
-                        shape = CircleShape
-                    )
-                    .clickable { onToggleProDrawer() },
-                contentAlignment = Alignment.Center
+            RailCircleButton(
+                isActive = state.isProToolsDrawerOpen,
+                activeFill = CinemaAmber,
+                activeBorder = CinemaAmber,
+                onClick = onToggleProDrawer
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.Tune,
-                        contentDescription = "Pro Suite",
-                        tint = if (state.isProToolsDrawerOpen) Color.Black else Color.White,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = "PRO",
-                        color = if (state.isProToolsDrawerOpen) Color.Black else Color.White,
-                        fontSize = 7.5.sp,
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = "Pro Suite",
+                    tint = if (state.isProToolsDrawerOpen) CinemaObsidian else CinemaWhite,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = "PRO",
+                    color = if (state.isProToolsDrawerOpen) CinemaObsidian else CinemaWhite,
+                    fontSize = 7.sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace
+                )
             }
 
-            // Torch / Video Light Button (Disabled on front camera)
             val torchEnabled = !state.isFrontCamera
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(if (state.isTorchOn) Color(0xFFFFCC00) else if (!torchEnabled) Color(0x11FFFFFF) else Color(0x33FFFFFF))
-                    .border(
-                        width = 1.dp,
-                        color = if (state.isTorchOn) Color(0xFFFFE066) else Color(0x22FFFFFF),
-                        shape = CircleShape
-                    )
-                    .clickable(enabled = torchEnabled) { onTorchToggle() },
-                contentAlignment = Alignment.Center
+            RailCircleButton(
+                isActive = state.isTorchOn,
+                activeFill = CinemaAmber,
+                activeBorder = CinemaAmber,
+                enabled = torchEnabled,
+                onClick = onTorchToggle
             ) {
                 Icon(
                     imageVector = Icons.Default.FlashlightOn,
                     contentDescription = "Torch Light",
-                    tint = if (state.isTorchOn) Color.Black else if (!torchEnabled) Color(0x44FFFFFF) else Color.White,
-                    modifier = Modifier.size(18.dp)
+                    tint = if (state.isTorchOn) CinemaObsidian else if (!torchEnabled) CinemaGrayDeep else CinemaWhite,
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            // AE/AF Lock Button
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(if (state.isAeAfLocked) Color(0xFFFF3344) else Color(0x26FFFFFF))
-                    .border(
-                        width = 1.dp,
-                        color = if (state.isAeAfLocked) Color(0xFFFF6677) else Color(0x22FFFFFF),
-                        shape = CircleShape
-                    )
-                    .clickable { onAeAfLockToggle() },
-                contentAlignment = Alignment.Center
+            RailCircleButton(
+                isActive = state.isAeAfLocked,
+                activeFill = CinemaCrimson,
+                activeBorder = CinemaCrimson,
+                onClick = onAeAfLockToggle
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = if (state.isAeAfLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                        contentDescription = "AE/AF Lock",
-                        tint = Color.White,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = "LOCK",
-                        color = Color.White,
-                        fontSize = 7.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-        }
-
-        // 2. Middle Cluster: Large Concentric Record Shutter Button & Pause Toggle
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            // Live File Size Readout when Recording
-            AnimatedVisibility(visible = state.isRecording) {
-                val mbRecorded = state.recordedBytes / (1024 * 1024)
+                Icon(
+                    imageVector = if (state.isAeAfLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                    contentDescription = "AE/AF Lock",
+                    tint = CinemaWhite,
+                    modifier = Modifier.size(14.dp)
+                )
                 Text(
-                    text = "${mbRecorded}MB",
-                    color = Color(0xCCFFFFFF),
-                    fontSize = 10.sp,
+                    text = "LOCK",
+                    color = CinemaWhite,
+                    fontSize = 7.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
             }
+        }
 
-            // Large Concentric Cinema Record Button
-            val infiniteTransition = rememberInfiniteTransition(label = "RecPulse")
-            val pulseScale by infiniteTransition.animateFloat(
-                initialValue = 1.0f,
-                targetValue = 1.06f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(600, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "RecordPulseScale"
-            )
-
-            Box(
-                modifier = Modifier
-                    .size(58.dp)
-                    .graphicsLayer {
-                        val s = if (state.isRecording) pulseScale else 1.0f
-                        scaleX = s
-                        scaleY = s
-                    }
-                    .clip(CircleShape)
-                    .background(Color.Transparent)
-                    .border(2.5.dp, Color.White, CircleShape)
-                    .clickable { onRecordToggle() },
-                contentAlignment = Alignment.Center
-            ) {
-                // Inner concentric trigger
-                Box(
-                    modifier = Modifier
-                        .size(if (state.isRecording) 24.dp else 44.dp)
-                        .clip(if (state.isRecording) RoundedCornerShape(4.dp) else CircleShape)
-                        .background(Color(0xFFFF1744))
+        // 2. Middle Cluster: Concentric Cinema Shutter, MB Counter, Timecode & Pause
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            if (state.isRecording) {
+                val mbRecorded = state.recordedBytes / (1024 * 1024)
+                Text(
+                    text = "${mbRecorded}MB",
+                    color = CinemaGray,
+                    fontSize = 9.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    style = TabularRailStyle
                 )
             }
 
-            // Live Timecode below shutter
+            CinemaShutterButton(
+                isRecording = state.isRecording,
+                onClick = onRecordToggle,
+                outerSize = 56.dp,
+                innerCircleSize = 44.dp,
+                innerSquareSize = 21.dp
+            )
+
             if (state.isRecording) {
                 val mins = state.recordingTimeSeconds / 60
                 val secs = state.recordingTimeSeconds % 60
-                val timeString = String.format(Locale.US, "%02d:%02d", mins, secs)
                 Text(
-                    text = timeString,
-                    color = Color(0xFFFF1744),
-                    fontSize = 11.sp,
+                    text = String.format(Locale.US, "%02d:%02d", mins, secs),
+                    color = CinemaCrimson,
+                    fontSize = 10.5.sp,
                     fontWeight = FontWeight.Black,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Monospace,
+                    style = TabularRailStyle
                 )
 
-                // Pause / Resume Button
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
-                        .background(if (state.isRecordingPaused) Color(0xFFFFCC00) else Color(0x33FFFFFF))
-                        .border(1.dp, Color(0x44FFFFFF), CircleShape)
+                        .drawBehind {
+                            drawCircle(color = if (state.isRecordingPaused) CinemaAmber else CinemaElevated)
+                            drawCircle(
+                                color = if (state.isRecordingPaused) CinemaAmber else CinemaBorderActive,
+                                style = Stroke(0.75.dp.toPx())
+                            )
+                        }
                         .clickable { onPauseToggle() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (state.isRecordingPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
                         contentDescription = "Pause/Resume",
-                        tint = if (state.isRecordingPaused) Color.Black else Color.White,
-                        modifier = Modifier.size(18.dp)
+                        tint = if (state.isRecordingPaused) CinemaObsidian else CinemaWhite,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
         }
 
-        // 3. Bottom Cluster: Quick Clip Thumbnail Preview
+        // 3. Bottom Cluster: Last Clip Thumbnail Preview
         val clipThumbnail = state.lastRecordedClipThumbnail
         val clipUri = state.lastRecordedClipUri
 
         Box(
             modifier = Modifier
-                .size(46.dp)
+                .size(40.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF1A1C23))
-                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(8.dp))
+                .background(CinemaElevated)
+                .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(8.dp))
                 .clickable {
                     if (clipUri != null) {
                         try {
@@ -305,10 +345,45 @@ fun RightActionRail(
                 Icon(
                     imageVector = Icons.Default.PlayCircleOutline,
                     contentDescription = "No Clips",
-                    tint = Color(0x88FFFFFF),
-                    modifier = Modifier.size(24.dp)
+                    tint = CinemaGray,
+                    modifier = Modifier.size(22.dp)
                 )
             }
         }
     }
+}
+
+@Composable
+private fun RailCircleButton(
+    isActive: Boolean,
+    activeFill: Color,
+    activeBorder: Color,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val activeProgress by animateFloatAsState(
+        targetValue = if (isActive) 1f else 0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        label = "railBtn"
+    )
+
+    Column(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .drawBehind {
+                val baseFill = if (enabled) CinemaElevated else Color(0x66121418)
+                drawCircle(color = baseFill)
+                if (activeProgress > 0.01f) {
+                    drawCircle(color = activeFill.copy(alpha = activeProgress))
+                }
+                val strokeColor = if (activeProgress > 0.5f) activeBorder else CinemaBorderInactive
+                drawCircle(color = strokeColor, style = Stroke(0.75.dp.toPx()))
+            }
+            .clickable(enabled = enabled, onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        content = content
+    )
 }

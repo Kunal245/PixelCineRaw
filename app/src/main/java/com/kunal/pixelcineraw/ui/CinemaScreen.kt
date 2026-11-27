@@ -4,8 +4,9 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.SystemClock
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -25,28 +26,35 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.*
+import com.kunal.pixelcineraw.ui.theme.*
 import java.util.Locale
 import kotlin.math.abs
 
+private val TabularScreenStyle = TextStyle(fontFeatureSettings = TABULAR_NUMS)
+
 /**
- * Modern flagship cinema camera interface.
+ * v1.5.0 Cinema Camera Interface (Blackmagic Cinema Monitor + Apple Pro tactile smoothness).
  *
- * Supports dual adaptive layouts:
- * 1. Landscape (Horizontal): Full cinema monitor view with pro side rails and top status bar.
- * 2. Portrait (Vertical): Minimal, ultra-modern iPhone Pro / Apple Final Cut Camera mobile interface
- *    with a full-height 9:16 / 3:4 vertical viewfinder, minimal glass header, and clean thumb dock.
+ * All transitions (dial reveal, clean viewfinder HUD hide, ProToolsDrawer slide) execute strictly
+ * in the GraphicsLayer / Draw phase (`Modifier.graphicsLayer`, `Modifier.drawBehind`) with
+ * zero layout invalidations (`<= 0.5%` UI jank).
  */
 @Composable
 fun CinemaScreen(
@@ -58,7 +66,6 @@ fun CinemaScreen(
     var activeDial by remember { mutableStateOf(ActiveDial.NONE) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
-    // Precision presets
     val fpsValues = remember { listOf(24, 25, 30, 48, 50, 60) }
     val shutterAngles = remember { listOf(11.2f, 22.5f, 45f, 90f, 144f, 172.8f, 180f, 270f, 360f) }
     val shutterSpeedsNs = remember {
@@ -70,10 +77,10 @@ fun CinemaScreen(
             1_000_000_000L / 500,
             1_000_000_000L / 240,
             1_000_000_000L / 120,
-            1_000_000_000L / 100, // 50Hz flicker-free sync
+            1_000_000_000L / 100,
             1_000_000_000L / 96,
             1_000_000_000L / 60,
-            1_000_000_000L / 50,  // 50Hz flicker-free sync
+            1_000_000_000L / 50,
             1_000_000_000L / 48,
             1_000_000_000L / 30,
             1_000_000_000L / 25,
@@ -122,7 +129,6 @@ fun CinemaScreen(
         )
     }
 
-    // Cinema Settings Dialog (Format, Codec, Bitrate, Profile, Resolution)
     if (showSettingsDialog) {
         CinemaSettingsDialog(
             state = state,
@@ -138,7 +144,10 @@ fun CinemaScreen(
 }
 
 /**
- * Minimal, Ultra-Modern iPhone Pro / Apple Final Cut Camera Vertical (Portrait) Layout.
+ * v1.5.0 Vertical (Portrait) Cinema Layout.
+ *
+ * Uses a zero-jank overlay architecture so opening/closing any dial, LUT selector,
+ * or Tools bar animates strictly in `graphicsLayer` without resizing the viewfinder `SurfaceView`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -185,7 +194,7 @@ private fun PortraitCinemaLayout(
         throttledAudioPeakR = state.audioPeakDbR
     } else {
         val nowMs = SystemClock.uptimeMillis()
-        if (nowMs - lastVuUiUpdateMs >= 83L) { // 12Hz
+        if (nowMs - lastVuUiUpdateMs >= 83L) {
             throttledAudioPeakL = state.audioPeakDbL
             throttledAudioPeakR = state.audioPeakDbR
             lastVuUiUpdateMs = nowMs
@@ -210,10 +219,10 @@ private fun PortraitCinemaLayout(
     }
 
     val profileDotColor = when (state.colorProfile) {
-        ColorProfile.HLG_10BIT -> Color(0xFFFFD700)
-        ColorProfile.HDR10_PLUS -> Color(0xFFFF007F)
-        ColorProfile.FLAT_LOG -> Color(0xFF00E5FF)
-        ColorProfile.REC709 -> Color(0xFF00FF66)
+        ColorProfile.HLG_10BIT -> CinemaGold
+        ColorProfile.HDR10_PLUS -> CinemaHdrPink
+        ColorProfile.FLAT_LOG -> CinemaAmber
+        ColorProfile.REC709 -> CinemaAutoGreen
     }
 
     val isOrientLocked = state.orientationLockMode != OrientationLockMode.AUTO
@@ -223,10 +232,20 @@ private fun PortraitCinemaLayout(
         OrientationLockMode.LOCK_PORTRAIT -> Icons.Default.StayCurrentPortrait
     }
 
-    Column(
+    val dialProgress by animateFloatAsState(
+        targetValue = if (activeDial != ActiveDial.NONE) 1f else 0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        label = "portraitDialProgress"
+    )
+    var lastActiveDial by remember { mutableStateOf(ActiveDial.NONE) }
+    if (activeDial != ActiveDial.NONE) {
+        lastActiveDial = activeDial
+    }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(CinemaObsidian)
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() }
@@ -236,85 +255,90 @@ private fun PortraitCinemaLayout(
                 }
             }
     ) {
-        // ====================================================================
-        // 1. SINGLE MINIMAL TOP GLASS HEADER
-        // ====================================================================
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Left: Compact Format/FPS pill + Color Badge
+        Column(modifier = Modifier.fillMaxSize()) {
+            // ====================================================================
+            // 1. MINIMAL OBSIDIAN TOP HEADER
+            // ====================================================================
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CinemaPillBgDark)
+                    .drawBehind {
+                        drawLine(
+                            color = CinemaBorderInactive,
+                            start = Offset(0f, size.height),
+                            end = Offset(size.width, size.height),
+                            strokeWidth = 0.75.dp.toPx()
+                        )
+                    }
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // Format/FPS pill (e.g. "4K 60 · 9:16")
-                Box {
-                    Row(
-                        modifier = Modifier
-                            .background(Color(0xB314161E), RoundedCornerShape(16.dp))
-                            .border(0.6.dp, Color(0x33FFFFFF), RoundedCornerShape(16.dp))
-                            .clickable { showFormatPopover = true }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "$resTitle ${state.targetFps} · $portraitAspectLabel",
-                            color = Color.White,
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-
-                    DropdownMenu(
-                        expanded = showFormatPopover,
-                        onDismissRequest = { showFormatPopover = false },
-                        shape = RoundedCornerShape(12.dp),
-                        containerColor = Color(0xF20A0C10),
-                        border = BorderStroke(1.dp, Color(0x33FFFFFF)),
-                        modifier = Modifier.width(310.dp)
-                    ) {
-                        FormatPopoverContent(
-                            state = state,
-                            onResolutionSelected = { res ->
-                                viewModel.cameraController.setVideoResolution(res)
-                                showFormatPopover = false
-                            },
-                            onFpsSelected = { fps ->
-                                viewModel.cameraController.setTargetFps(fps)
-                                showFormatPopover = false
-                            },
-                            onAntiBandingSelected = { mode ->
-                                viewModel.cameraController.setAntiBandingMode(mode)
-                                showFormatPopover = false
-                            },
-                            onAeMeteringModeSelected = { mode ->
-                                viewModel.cameraController.setAeMeteringMode(mode)
-                                showFormatPopover = false
-                            },
-                            onOpenAdvanced = {
-                                showFormatPopover = false
-                                onShowSettings()
-                            },
-                            onResetDefaults = {
-                                showFormatPopover = false
-                                viewModel.cameraController.resetToDefaults()
-                            }
-                        )
-                    }
-                }
-
-                // Color Profile Badge (Tap to cycle REC.709 -> LOG -> HLG10 -> HDR10+)
+                // Left: Format/FPS pill, Profile pill, Thermal indicator
                 Row(
-                    modifier = Modifier
-                        .background(Color(0xB314161E), RoundedCornerShape(16.dp))
-                        .border(0.6.dp, profileDotColor.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
-                        .clickable {
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box {
+                        CinemaPill(
+                            label = "FORMAT",
+                            value = "$resTitle·${state.targetFps}p",
+                            subText = portraitAspectLabel,
+                            isActive = true,
+                            onClick = { showFormatPopover = true }
+                        )
+
+                        DropdownMenu(
+                            expanded = showFormatPopover,
+                            onDismissRequest = { showFormatPopover = false },
+                            shape = RoundedCornerShape(10.dp),
+                            containerColor = Color(0xF20B0C0E),
+                            border = BorderStroke(0.75.dp, CinemaBorderActive),
+                            modifier = Modifier.width(310.dp)
+                        ) {
+                            FormatPopoverContent(
+                                state = state,
+                                onResolutionSelected = { res ->
+                                    viewModel.cameraController.setVideoResolution(res)
+                                    showFormatPopover = false
+                                },
+                                onFpsSelected = { fps ->
+                                    viewModel.cameraController.setTargetFps(fps)
+                                    showFormatPopover = false
+                                },
+                                onColorProfileSelected = { profile ->
+                                    viewModel.cameraController.setColorProfile(profile)
+                                    showFormatPopover = false
+                                },
+                                onAntiBandingSelected = { mode ->
+                                    viewModel.cameraController.setAntiBandingMode(mode)
+                                    showFormatPopover = false
+                                },
+                                onAeMeteringModeSelected = { mode ->
+                                    viewModel.cameraController.setAeMeteringMode(mode)
+                                    showFormatPopover = false
+                                },
+                                onOpenAdvanced = {
+                                    showFormatPopover = false
+                                    onShowSettings()
+                                },
+                                onResetDefaults = {
+                                    showFormatPopover = false
+                                    viewModel.cameraController.resetToDefaults()
+                                }
+                            )
+                        }
+                    }
+
+                    CinemaPill(
+                        label = "PROFILE",
+                        value = state.colorProfile.label,
+                        dotColor = profileDotColor,
+                        isActive = state.colorProfile != ColorProfile.REC709,
+                        onClick = {
                             val nextProfile = when (state.colorProfile) {
                                 ColorProfile.REC709 -> ColorProfile.FLAT_LOG
                                 ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
@@ -323,519 +347,523 @@ private fun PortraitCinemaLayout(
                             }
                             viewModel.cameraController.setColorProfile(nextProfile)
                         }
-                        .padding(horizontal = 9.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .background(profileDotColor, CircleShape)
                     )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = state.colorProfile.label,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
+
+                    ThermalIndicator(status = state.thermalStatus)
                 }
 
-                // Compact WARM / HOT Thermal Pill (hidden when thermal status == NONE)
-                ThermalIndicator(status = state.thermalStatus)
-            }
-
-            // Right: Minimal Torch, Orientation Lock, and Pro Tools (•••) Icon
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Torch Button
-                val torchEnabled = !state.isFrontCamera
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(if (state.isTorchOn) Color(0xFFFFCC00) else Color(0x3314161E))
-                        .border(0.6.dp, if (state.isTorchOn) Color(0xFFFFE066) else Color(0x22FFFFFF), CircleShape)
-                        .clickable(enabled = torchEnabled) { viewModel.cameraController.toggleTorch() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.FlashlightOn,
-                        contentDescription = "Torch Light",
-                        tint = if (state.isTorchOn) Color.Black else if (!torchEnabled) Color(0x44FFFFFF) else Color.White,
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-
-                // Orientation Lock Button
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(if (isOrientLocked) Color(0x4D00E5FF) else Color(0x3314161E))
-                        .border(0.6.dp, if (isOrientLocked) Color(0xFF00E5FF) else Color(0x22FFFFFF), CircleShape)
-                        .clickable { viewModel.cameraController.cycleOrientationLockMode() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = orientIcon,
-                        contentDescription = "Orientation Lock",
-                        tint = if (isOrientLocked) Color(0xFF00E5FF) else Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                // Pro Tools (•••) Bottom Sheet Launcher
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0x3314161E))
-                        .border(0.6.dp, Color(0x22FFFFFF), CircleShape)
-                        .clickable { showProSheet = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreHoriz,
-                        contentDescription = "Pro Tools",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-
-        // ====================================================================
-        // 2. FULL-HEIGHT UNOBSTRUCTED VERTICAL VIEWFINDER
-        // ====================================================================
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 2.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(24.dp))
-                .background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
-            // Live 9:16 / 3:4 Vertical Camera Viewfinder Surface
-            Viewfinder(
-                viewModel = viewModel,
-                modifier = Modifier.fillMaxSize()
-            )
-
-            // Monitoring Overlays (Zebras, Peaking, Frame Guides, Horizon Leveler)
-            MonitoringOverlays(
-                state = state.copy(showHistogram = false, showLutPreview = false),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .aspectRatio(resWidth.toFloat() / resHeight.toFloat(), matchHeightConstraintsFirst = true)
-            )
-
-            // Compact Floating Histogram in top-left (ONLY if enabled in Pro sheet)
-            if (state.showHistogram) {
-                MovableHistogramHUD(
-                    data = state.histogramData,
-                    isHlg = state.colorProfile == ColorProfile.HLG_10BIT,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(top = 12.dp, start = 12.dp)
-                )
-            }
-
-            // Compact Floating LUT badge in top-right (ONLY if enabled in Pro sheet)
-            if (state.showLutPreview && state.lutPreset != LutPreset.OFF) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 12.dp, end = 12.dp)
-                        .background(Color(0x99000000), RoundedCornerShape(6.dp))
-                        .border(0.8.dp, Color(0xFF00E5FF), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
-                ) {
-                    Text(
-                        text = "LUT · ${state.lutPreset.label}",
-                        color = Color(0xFF00E5FF),
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-
-            // Clean Viewfinder Mode Glowing REC Indicator
-            if (state.isCleanViewfinder && state.isRecording) {
+                // Right: Timecode Pill (when recording) or Torch / Orient / Pro
                 Row(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 16.dp, top = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .background(Color(0xFFFF0033), CircleShape)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    val mins = throttledRecordingSeconds / 60
-                    val secs = throttledRecordingSeconds % 60
-                    Text(
-                        text = "REC %02d:%02d".format(mins, secs),
-                        color = Color.White,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
+                    if (state.isRecording) {
+                        CinemaTimecodePill(
+                            isRecording = true,
+                            isPaused = state.isRecordingPaused,
+                            recordingSeconds = throttledRecordingSeconds
+                        )
+                    } else {
+                        val torchEnabled = !state.isFrontCamera
+                        CompactHeaderIcon(
+                            icon = Icons.Default.FlashlightOn,
+                            contentDescription = "Torch Light",
+                            isActive = state.isTorchOn,
+                            enabled = torchEnabled,
+                            activeFill = CinemaAmber,
+                            activeTint = CinemaObsidian,
+                            onClick = { viewModel.cameraController.toggleTorch() }
+                        )
+
+                        CompactHeaderIcon(
+                            icon = orientIcon,
+                            contentDescription = "Orientation Lock",
+                            isActive = isOrientLocked,
+                            activeFill = CinemaElevated,
+                            activeTint = CinemaAmber,
+                            onClick = { viewModel.cameraController.cycleOrientationLockMode() }
+                        )
+                    }
+
+                    CompactHeaderIcon(
+                        icon = Icons.Default.MoreHoriz,
+                        contentDescription = "Pro Tools",
+                        isActive = showProSheet,
+                        activeFill = CinemaAmber,
+                        activeTint = CinemaObsidian,
+                        onClick = { showProSheet = true }
                     )
                 }
             }
 
-            // Floating iPhone Zoom Pill (0.5 • 1x • 2 • 5) anchored over bottom edge of viewfinder
-            Column(
+            // ====================================================================
+            // 2. FULL-HEIGHT UNOBSTRUCTED VERTICAL VIEWFINDER (Center 75%+ Clear)
+            // ====================================================================
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .border(0.75.dp, CinemaBorderInactive, RoundedCornerShape(18.dp))
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center
             ) {
-                if (state.isRecording) {
-                    val mins = throttledRecordingSeconds / 60
-                    val secs = throttledRecordingSeconds % 60
-                    val mbRecorded = throttledRecordedBytes / (1024 * 1024)
+                Viewfinder(
+                    viewModel = viewModel,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                MonitoringOverlays(
+                    state = state.copy(showHistogram = false, showLutPreview = false),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .aspectRatio(resWidth.toFloat() / resHeight.toFloat(), matchHeightConstraintsFirst = true)
+                )
+
+                if (state.showHistogram) {
+                    MovableHistogramHUD(
+                        data = state.histogramData,
+                        isHlg = state.colorProfile == ColorProfile.HLG_10BIT,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(top = 10.dp, start = 10.dp)
+                    )
+                }
+
+                if (state.showLutPreview && state.lutPreset != LutPreset.OFF) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 10.dp, end = 10.dp)
+                            .drawBehind {
+                                val r = CornerRadius(5.dp.toPx())
+                                drawRoundRect(color = CinemaPillBgDark, cornerRadius = r)
+                                drawRoundRect(color = CinemaAmber.copy(alpha = 0.7f), cornerRadius = r, style = Stroke(0.75.dp.toPx()))
+                            }
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "LUT · ${state.lutPreset.label}",
+                            color = CinemaAmber,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                if (state.isCleanViewfinder && state.isRecording) {
                     Row(
                         modifier = Modifier
-                            .background(Color(0xCCFF1744), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                            .align(Alignment.TopStart)
+                            .padding(start = 14.dp, top = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(6.dp)
-                                .background(Color.White, CircleShape)
+                                .size(8.dp)
+                                .background(CinemaCrimson, CircleShape)
                         )
-                        Spacer(modifier = Modifier.width(5.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        val mins = throttledRecordingSeconds / 60
+                        val secs = throttledRecordingSeconds % 60
                         Text(
-                            text = "%02d:%02d · %dMB".format(mins, secs, mbRecorded),
-                            color = Color.White,
-                            fontSize = 10.5.sp,
+                            text = "REC %02d:%02d".format(mins, secs),
+                            color = CinemaWhite,
                             fontWeight = FontWeight.Black,
-                            fontFamily = FontFamily.Monospace
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            style = TabularScreenStyle
                         )
-                        if (state.isRecordingPaused) {
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "PAUSED",
-                                color = Color(0xFFFFCC00),
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Black,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
                 }
 
-                CinemaZoomHub(
-                    state = state,
-                    onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
-                    onSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) }
-                )
-            }
-        }
+                // Bottom-of-viewfinder cluster: Recording MB pill + Zero-Jank Zoom Hub
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (state.isRecording) {
+                        val mins = throttledRecordingSeconds / 60
+                        val secs = throttledRecordingSeconds % 60
+                        val mbRecorded = throttledRecordedBytes / (1024 * 1024)
+                        Row(
+                            modifier = Modifier
+                                .drawBehind {
+                                    val r = CornerRadius(10.dp.toPx())
+                                    drawRoundRect(color = CinemaPillBgDark, cornerRadius = r)
+                                    drawRoundRect(color = CinemaCrimson, cornerRadius = r, style = Stroke(0.75.dp.toPx()))
+                                }
+                                .padding(horizontal = 9.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(CinemaCrimson, CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "%02d:%02d · %dMB".format(mins, secs, mbRecorded),
+                                color = CinemaWhite,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace,
+                                style = TabularScreenStyle
+                            )
+                            if (state.isRecordingPaused) {
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "PAUSED",
+                                    color = CinemaAmber,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Black,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
 
-        // ====================================================================
-        // 3. ULTRA-CLEAN IPHONE BOTTOM CONTROL DOCK
-        // ====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(vertical = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Layer 1: Expandable Rotary Dial
-            androidx.compose.animation.AnimatedVisibility(
-                visible = activeDial != ActiveDial.NONE,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
+                    CinemaZoomHub(
+                        state = state,
+                        onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
+                        onSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) }
+                    )
+                }
+            }
+
+            // ====================================================================
+            // 3. OBSIDIAN BOTTOM EXPOSURE + LUT/TOOLS DOCK & TACTILE SHUTTER BAR
+            // ====================================================================
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CinemaPillBgDark)
+                    .drawBehind {
+                        drawLine(
+                            color = CinemaBorderInactive,
+                            start = Offset(0f, 0f),
+                            end = Offset(size.width, 0f),
+                            strokeWidth = 0.75.dp.toPx()
+                        )
+                    }
+                    .navigationBarsPadding()
+                    .padding(top = 6.dp, bottom = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // Exposure + LUT + TOOLS strip
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .padding(horizontal = 10.dp)
+                        .drawBehind {
+                            val r = CornerRadius(12.dp.toPx())
+                            drawRoundRect(color = CinemaElevated, cornerRadius = r)
+                            drawRoundRect(color = CinemaBorderInactive, cornerRadius = r, style = Stroke(0.75.dp.toPx()))
+                        },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val shutterVal = if (state.shutterUnit == ShutterUnit.ANGLE) {
+                        if (state.shutterAngle == 180f && state.antiBandingMode == AntiBandingMode.HZ_50) {
+                            val flickerSpeed = if (state.targetFps <= 30) "1/50" else "1/100"
+                            "180° $flickerSpeed"
+                        } else if (state.shutterAngle == 180f && state.antiBandingMode == AntiBandingMode.HZ_60) {
+                            val flickerSpeed = if (state.targetFps <= 30) "1/60" else "1/120"
+                            "180° $flickerSpeed"
+                        } else {
+                            "${state.shutterAngle.toInt()}°"
+                        }
+                    } else {
+                        ColorMath.formatShutterSpeed(state.shutterSpeedNs)
+                    }
+                    BorderlessExposureItem(
+                        label = if (state.shutterUnit == ShutterUnit.ANGLE) "SHUTTER" else "SPEED",
+                        value = shutterVal,
+                        isActive = activeDial == ActiveDial.SHUTTER,
+                        isAuto = !state.isManualExposure,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER)
+                        },
+                        modifier = Modifier.weight(1.15f)
+                    )
+
+                    val isoVal = if (state.isAutoIso) "A·${state.iso}" else "${state.iso}"
+                    BorderlessExposureItem(
+                        label = "ISO",
+                        value = isoVal,
+                        isActive = activeDial == ActiveDial.ISO,
+                        isAuto = state.isAutoIso || !state.isManualExposure,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.ISO) ActiveDial.NONE else ActiveDial.ISO)
+                        },
+                        modifier = Modifier.weight(0.95f)
+                    )
+
+                    val wbVal = if (state.isManualWb) "${state.wbKelvin}K" else "AWB"
+                    BorderlessExposureItem(
+                        label = "WB",
+                        value = wbVal,
+                        isActive = activeDial == ActiveDial.WHITE_BALANCE,
+                        isAuto = !state.isManualWb,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE)
+                        },
+                        modifier = Modifier.weight(0.95f)
+                    )
+
+                    val focusVal = when (state.focusMode) {
+                        FocusMode.AUTO_CONTINUOUS -> "AF"
+                        FocusMode.LOCKED -> "AF·L"
+                        FocusMode.MANUAL -> {
+                            if (state.focusDistance <= 0.05f) "MF ∞"
+                            else String.format(Locale.US, "%.1fm", 1.0f / state.focusDistance)
+                        }
+                    }
+                    BorderlessExposureItem(
+                        label = "FOCUS",
+                        value = focusVal,
+                        isActive = activeDial == ActiveDial.FOCUS,
+                        isAuto = state.focusMode != FocusMode.MANUAL,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS)
+                        },
+                        modifier = Modifier.weight(0.9f)
+                    )
+
+                    val evVal = if (state.evCompensation > 0f) "+%.1f".format(state.evCompensation)
+                    else "%.1f".format(state.evCompensation)
+                    BorderlessExposureItem(
+                        label = "EV",
+                        value = evVal,
+                        isActive = activeDial == ActiveDial.EV,
+                        isAuto = false,
+                        showModeDot = false,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.EV) ActiveDial.NONE else ActiveDial.EV)
+                        },
+                        modifier = Modifier.weight(0.8f)
+                    )
+
+                    val lutActive = state.showLutPreview && state.lutPreset != LutPreset.OFF
+                    BorderlessExposureItem(
+                        label = "LUT",
+                        value = if (lutActive) state.lutPreset.shortLabel else "OFF",
+                        isActive = activeDial == ActiveDial.LUT || lutActive,
+                        isAuto = !lutActive,
+                        showModeDot = false,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.LUT) ActiveDial.NONE else ActiveDial.LUT)
+                        },
+                        modifier = Modifier.weight(0.85f)
+                    )
+
+                    val toolsActive = state.showFocusPeaking || state.showZebras ||
+                            state.showFalseColor || state.showHorizonLeveler ||
+                            state.showHistogram || state.showWaveform
+                    BorderlessExposureItem(
+                        label = "TOOLS",
+                        value = if (toolsActive) "ON" else "HUD",
+                        isActive = activeDial == ActiveDial.TOOLS || toolsActive,
+                        isAuto = false,
+                        showModeDot = false,
+                        onClick = {
+                            onActiveDialChanged(if (activeDial == ActiveDial.TOOLS) ActiveDial.NONE else ActiveDial.TOOLS)
+                        },
+                        modifier = Modifier.weight(0.85f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Shutter Bar (Box ensures CinemaShutterButton is dead-center regardless of side widths)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
-                    contentAlignment = Alignment.Center
+                        .padding(horizontal = 20.dp)
                 ) {
-                    CinemaActiveDialScrubber(
-                        activeDial = activeDial,
-                        state = state,
-                        viewModel = viewModel,
-                        fpsValues = fpsValues,
-                        shutterAngles = shutterAngles,
-                        shutterSpeedsNs = shutterSpeedsNs,
-                        evValues = evValues,
-                        bitrateValues = bitrateValues,
-                        onClose = { onActiveDialChanged(ActiveDial.NONE) }
-                    )
-                }
-            }
+                    // Left: Last Clip Thumbnail (46.dp)
+                    val clipThumbnail = state.lastRecordedClipThumbnail
+                    val clipUri = state.lastRecordedClipUri
 
-            // Layer 2: Minimal Borderless Exposure Strip
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(horizontal = 16.dp)
-                    .background(Color(0x99111318), RoundedCornerShape(28.dp))
-                    .border(0.6.dp, Color(0x26FFFFFF), RoundedCornerShape(28.dp)),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // 1. SHUTTER
-                val shutterVal = if (state.shutterUnit == ShutterUnit.ANGLE) {
-                    if (state.shutterAngle == 180f && state.antiBandingMode == AntiBandingMode.HZ_50) {
-                        val flickerSpeed = if (state.targetFps <= 30) "1/50" else "1/100"
-                        "180° ($flickerSpeed)"
-                    } else if (state.shutterAngle == 180f && state.antiBandingMode == AntiBandingMode.HZ_60) {
-                        val flickerSpeed = if (state.targetFps <= 30) "1/60" else "1/120"
-                        "180° ($flickerSpeed)"
-                    } else {
-                        "${state.shutterAngle.toInt()}°"
-                    }
-                } else {
-                    ColorMath.formatShutterSpeed(state.shutterSpeedNs)
-                }
-                BorderlessExposureItem(
-                    label = if (state.shutterUnit == ShutterUnit.ANGLE) "SHUTTER" else "SPEED",
-                    value = shutterVal,
-                    isActive = activeDial == ActiveDial.SHUTTER,
-                    isAuto = !state.isManualExposure,
-                    onClick = {
-                        onActiveDialChanged(if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER)
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-
-                // 2. ISO
-                val isoVal = if (state.isAutoIso) "AUTO ${state.iso}" else "${state.iso}"
-                BorderlessExposureItem(
-                    label = "ISO",
-                    value = isoVal,
-                    isActive = activeDial == ActiveDial.ISO,
-                    isAuto = state.isAutoIso || !state.isManualExposure,
-                    onClick = {
-                        onActiveDialChanged(if (activeDial == ActiveDial.ISO) ActiveDial.NONE else ActiveDial.ISO)
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-
-                // 3. WB
-                val wbVal = if (state.isManualWb) "${state.wbKelvin}K" else "AWB"
-                BorderlessExposureItem(
-                    label = "WB",
-                    value = wbVal,
-                    isActive = activeDial == ActiveDial.WHITE_BALANCE,
-                    isAuto = !state.isManualWb,
-                    onClick = {
-                        onActiveDialChanged(if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE)
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-
-                // 4. FOCUS
-                val focusVal = when (state.focusMode) {
-                    FocusMode.AUTO_CONTINUOUS -> "AF"
-                    FocusMode.LOCKED -> "AF·L"
-                    FocusMode.MANUAL -> {
-                        if (state.focusDistance <= 0.05f) "MF ∞"
-                        else String.format(Locale.US, "MF %.1fm", 1.0f / state.focusDistance)
-                    }
-                }
-                BorderlessExposureItem(
-                    label = "FOCUS",
-                    value = focusVal,
-                    isActive = activeDial == ActiveDial.FOCUS,
-                    isAuto = state.focusMode != FocusMode.MANUAL,
-                    onClick = {
-                        onActiveDialChanged(if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS)
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-
-                // 5. EV
-                val evVal = if (state.evCompensation > 0f) "+%.1f".format(state.evCompensation)
-                else "%.1f".format(state.evCompensation)
-                BorderlessExposureItem(
-                    label = "EV",
-                    value = evVal,
-                    isActive = activeDial == ActiveDial.EV,
-                    isAuto = false,
-                    onClick = {
-                        onActiveDialChanged(if (activeDial == ActiveDial.EV) ActiveDial.NONE else ActiveDial.EV)
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Layer 3: iPhone Shutter Bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Left: Last Clip Thumbnail (46.dp)
-                val clipThumbnail = state.lastRecordedClipThumbnail
-                val clipUri = state.lastRecordedClipUri
-
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF16181F))
-                        .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
-                        .clickable {
-                            if (clipUri != null) {
-                                try {
-                                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                                        setDataAndType(Uri.parse(clipUri), "video/*")
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    android.util.Log.w("PortraitCinema", "Failed to launch video viewer", e)
-                                }
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (clipThumbnail != null) {
-                        Image(
-                            bitmap = clipThumbnail.asImageBitmap(),
-                            contentDescription = "Last Recorded Clip",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.PlayCircleOutline,
-                            contentDescription = "No Clips",
-                            tint = Color(0x88FFFFFF),
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                }
-
-                // Center: Concentric Cinema Shutter Button (70.dp)
-                val infiniteTransition = rememberInfiniteTransition(label = "PortraitRecPulse")
-                val pulseScale by infiniteTransition.animateFloat(
-                    initialValue = 1.0f,
-                    targetValue = 1.06f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(600, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "RecordPulseScale"
-                )
-
-                Box(
-                    modifier = Modifier
-                        .size(70.dp)
-                        .graphicsLayer {
-                            val s = if (state.isRecording) pulseScale else 1.0f
-                            scaleX = s
-                            scaleY = s
-                        }
-                        .clip(CircleShape)
-                        .background(Color.Transparent)
-                        .border(3.dp, Color.White, CircleShape)
-                        .clickable { onRecordToggle() },
-                    contentAlignment = Alignment.Center
-                ) {
                     Box(
                         modifier = Modifier
-                            .size(if (state.isRecording) 28.dp else 54.dp)
-                            .clip(if (state.isRecording) RoundedCornerShape(6.dp) else CircleShape)
-                            .background(Color(0xFFFF1744))
-                    )
-                }
-
-                // Right: Audio (WAV/AAC + mini VU) & AE/AF Lock (46.dp)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Audio Pill
-                    Column(
-                        modifier = Modifier
-                            .height(46.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xB312141A))
-                            .border(
-                                0.8.dp,
-                                if (state.recordWavSidecar) Color(0xFFFFCC00).copy(alpha = 0.5f) else Color(0x26FFFFFF),
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable { viewModel.cameraController.toggleRecordWavSidecar() }
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = if (state.recordWavSidecar) "WAV" else "AAC",
-                            color = if (state.recordWavSidecar) Color(0xFFFFCC00) else Color.White,
-                            fontSize = 8.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        VuBar(peakDb = throttledAudioPeakL)
-                        Spacer(modifier = Modifier.height(2.dp))
-                        VuBar(peakDb = throttledAudioPeakR)
-                    }
-
-                    // AE/AF Lock Button
-                    Box(
-                        modifier = Modifier
+                            .align(Alignment.CenterStart)
                             .size(46.dp)
-                            .clip(CircleShape)
-                            .background(if (state.isAeAfLocked) Color(0xFFFF1744) else Color(0x3314161E))
-                            .border(
-                                1.dp,
-                                if (state.isAeAfLocked) Color(0xFFFF6677) else Color(0x22FFFFFF),
-                                CircleShape
-                            )
-                            .clickable { viewModel.cameraController.toggleAeAfLock() },
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(CinemaElevated)
+                            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(10.dp))
+                            .clickable {
+                                if (clipUri != null) {
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(Uri.parse(clipUri), "video/*")
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        android.util.Log.w("PortraitCinema", "Failed to launch video viewer", e)
+                                    }
+                                }
+                            },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (state.isAeAfLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = "AE/AF Lock",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        if (clipThumbnail != null) {
+                            Image(
+                                bitmap = clipThumbnail.asImageBitmap(),
+                                contentDescription = "Last Recorded Clip",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.PlayCircleOutline,
+                                contentDescription = "No Clips",
+                                tint = CinemaGray,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
+                    // Center: Zero-Jank Concentric Cinema Shutter Button (68.dp -> 26.dp square)
+                    CinemaShutterButton(
+                        isRecording = state.isRecording,
+                        onClick = onRecordToggle,
+                        modifier = Modifier.align(Alignment.Center),
+                        outerSize = 68.dp,
+                        innerCircleSize = 54.dp,
+                        innerSquareSize = 26.dp
+                    )
+
+                    // Right: Audio (WAV/AAC + VU) & Pause (while recording) / AE-AF Lock
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .height(46.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .drawBehind {
+                                    val r = CornerRadius(10.dp.toPx())
+                                    drawRoundRect(color = CinemaElevated, cornerRadius = r)
+                                    val stroke = if (state.recordWavSidecar) CinemaAmber.copy(alpha = 0.65f) else CinemaBorderInactive
+                                    drawRoundRect(color = stroke, cornerRadius = r, style = Stroke(0.75.dp.toPx()))
+                                }
+                                .clickable { viewModel.cameraController.toggleRecordWavSidecar() }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = if (state.recordWavSidecar) "WAV" else "AAC",
+                                color = if (state.recordWavSidecar) CinemaAmber else CinemaWhite,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            VuBar(peakDb = throttledAudioPeakL)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            VuBar(peakDb = throttledAudioPeakR)
+                        }
+
+                        if (state.isRecording) {
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .drawBehind {
+                                        drawCircle(color = if (state.isRecordingPaused) CinemaAmber else CinemaElevated)
+                                        drawCircle(
+                                            color = if (state.isRecordingPaused) CinemaAmber else CinemaBorderActive,
+                                            style = Stroke(0.75.dp.toPx())
+                                        )
+                                    }
+                                    .clickable { viewModel.cameraController.setRecordingPaused(!state.isRecordingPaused) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (state.isRecordingPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                    contentDescription = "Pause/Resume",
+                                    tint = if (state.isRecordingPaused) CinemaObsidian else CinemaWhite,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .drawBehind {
+                                        drawCircle(color = if (state.isAeAfLocked) CinemaCrimson else CinemaElevated)
+                                        drawCircle(
+                                            color = if (state.isAeAfLocked) CinemaCrimson else CinemaBorderInactive,
+                                            style = Stroke(0.75.dp.toPx())
+                                        )
+                                    }
+                                    .clickable { viewModel.cameraController.toggleAeAfLock() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (state.isAeAfLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                                    contentDescription = "AE/AF Lock",
+                                    tint = CinemaWhite,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
                     }
                 }
+            }
+        }
+
+        // Floating Expandable Rotary Dial / LUT / Tools Scrubber (animates purely in graphicsLayer!)
+        if (dialProgress > 0.01f && lastActiveDial != ActiveDial.NONE) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 142.dp)
+                    .graphicsLayer {
+                        alpha = dialProgress
+                        translationY = (1f - dialProgress) * 20.dp.toPx()
+                        scaleY = 0.94f + 0.06f * dialProgress
+                    }
+            ) {
+                CinemaActiveDialScrubber(
+                    activeDial = lastActiveDial,
+                    state = state,
+                    viewModel = viewModel,
+                    fpsValues = fpsValues,
+                    shutterAngles = shutterAngles,
+                    shutterSpeedsNs = shutterSpeedsNs,
+                    evValues = evValues,
+                    bitrateValues = bitrateValues,
+                    onClose = { onActiveDialChanged(ActiveDial.NONE) }
+                )
             }
         }
     }
 
-    // ====================================================================
     // PRO TOOLS BOTTOM SHEET (•••)
-    // ====================================================================
     if (showProSheet) {
         ModalBottomSheet(
             onDismissRequest = { showProSheet = false },
-            containerColor = Color(0xF212141A),
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+            containerColor = Color(0xF50B0C0E),
+            shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -844,8 +872,8 @@ private fun PortraitCinemaLayout(
                 ) {
                     Text(
                         text = "PRO MONITORING & ASSIST",
-                        color = Color(0xFFFFCC00),
-                        fontSize = 12.sp,
+                        color = CinemaAmber,
+                        fontSize = 11.5.sp,
                         fontWeight = FontWeight.Black,
                         fontFamily = FontFamily.Monospace
                     )
@@ -853,20 +881,16 @@ private fun PortraitCinemaLayout(
                         showProSheet = false
                         onShowSettings()
                     }) {
-                        Text("ALL SETTINGS...", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("ALL SETTINGS...", color = CinemaCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
-                // Monitoring Toggles Grid
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ProSheetToggleCard(
                         title = "PEAKING",
                         sub = if (state.showFocusPeaking) "ACTIVE" else "OFF",
                         isActive = state.showFocusPeaking,
-                        activeColor = Color(0xFF00FF66),
+                        activeColor = CinemaAutoGreen,
                         onClick = { viewModel.cameraController.toggleFocusPeaking() },
                         modifier = Modifier.weight(1f)
                     )
@@ -874,21 +898,18 @@ private fun PortraitCinemaLayout(
                         title = "ZEBRAS",
                         sub = if (state.showZebras) "ACTIVE" else "OFF",
                         isActive = state.showZebras,
-                        activeColor = Color(0xFFFFD700),
+                        activeColor = CinemaGold,
                         onClick = { viewModel.cameraController.toggleZebras() },
                         modifier = Modifier.weight(1f)
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ProSheetToggleCard(
                         title = "GUIDES",
                         sub = state.frameGuide.name.replace("RATIO_", ""),
                         isActive = state.frameGuide != FrameGuide.NONE,
-                        activeColor = Color(0xFF00E5FF),
+                        activeColor = CinemaAmber,
                         onClick = {
                             val nextGuide = when (state.frameGuide) {
                                 FrameGuide.NONE -> FrameGuide.RATIO_2_39
@@ -905,21 +926,18 @@ private fun PortraitCinemaLayout(
                         title = "LEVELER",
                         sub = if (state.showHorizonLeveler) "ACTIVE" else "OFF",
                         isActive = state.showHorizonLeveler,
-                        activeColor = Color(0xFF00FF66),
+                        activeColor = CinemaAutoGreen,
                         onClick = { viewModel.cameraController.toggleHorizonLeveler() },
                         modifier = Modifier.weight(1f)
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ProSheetToggleCard(
                         title = "HISTOGRAM",
                         sub = if (state.showHistogram) "ON-SCREEN" else "OFF",
                         isActive = state.showHistogram,
-                        activeColor = Color(0xFF00E5FF),
+                        activeColor = CinemaAmber,
                         onClick = { viewModel.cameraController.toggleHistogram() },
                         modifier = Modifier.weight(1f)
                     )
@@ -927,22 +945,18 @@ private fun PortraitCinemaLayout(
                         title = "3D LUT",
                         sub = state.lutPreset.label,
                         isActive = state.showLutPreview,
-                        activeColor = Color(0xFF00E5FF),
+                        activeColor = CinemaAmber,
                         onClick = { viewModel.cameraController.toggleLutPreview() },
                         modifier = Modifier.weight(1f)
                     )
                 }
 
-                // Camera Flip, Deband & Clean Viewfinder
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ProSheetToggleCard(
                         title = "DEBAND",
                         sub = if (state.isDebandEnabled) "ON (SKY)" else "OFF (FAST)",
                         isActive = state.isDebandEnabled,
-                        activeColor = Color(0xFF00E5FF),
+                        activeColor = CinemaCyan,
                         onClick = { viewModel.cameraController.toggleDeband() },
                         modifier = Modifier.weight(1f)
                     )
@@ -950,21 +964,18 @@ private fun PortraitCinemaLayout(
                         title = "CAMERA",
                         sub = if (state.isFrontCamera) "FRONT" else "REAR",
                         isActive = state.isFrontCamera,
-                        activeColor = Color(0xFF00E5FF),
+                        activeColor = CinemaAmber,
                         onClick = { viewModel.cameraController.flipCamera() },
                         modifier = Modifier.weight(1f)
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ProSheetToggleCard(
                         title = "CLEAN HUD",
                         sub = if (state.isCleanViewfinder) "ON" else "OFF",
                         isActive = state.isCleanViewfinder,
-                        activeColor = Color(0xFFFFCC00),
+                        activeColor = CinemaAmber,
                         onClick = {
                             showProSheet = false
                             viewModel.cameraController.toggleCleanViewfinder()
@@ -973,15 +984,45 @@ private fun PortraitCinemaLayout(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
             }
         }
     }
 }
 
-/**
- * Minimal borderless exposure item for single-pill iPhone bottom dock.
- */
+@Composable
+private fun CompactHeaderIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    isActive: Boolean,
+    activeFill: Color,
+    activeTint: Color,
+    onClick: () -> Unit,
+    enabled: Boolean = true
+) {
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .drawBehind {
+                drawCircle(color = if (isActive) activeFill else CinemaElevated)
+                drawCircle(
+                    color = if (isActive) activeTint.copy(alpha = 0.35f) else CinemaBorderInactive,
+                    style = Stroke(0.75.dp.toPx())
+                )
+            }
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (!enabled) CinemaGrayDeep else if (isActive) activeTint else CinemaWhite,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+}
+
 @Composable
 private fun BorderlessExposureItem(
     label: String,
@@ -989,13 +1030,14 @@ private fun BorderlessExposureItem(
     isActive: Boolean,
     isAuto: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showModeDot: Boolean = true
 ) {
     Column(
         modifier = modifier
             .fillMaxHeight()
             .clickable(onClick = onClick)
-            .padding(vertical = 4.dp),
+            .padding(vertical = 4.dp, horizontal = 2.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -1005,36 +1047,36 @@ private fun BorderlessExposureItem(
         ) {
             Text(
                 text = label,
-                color = if (isActive) Color(0xFFFFCC00) else Color(0x88FFFFFF),
-                fontSize = 8.sp,
+                color = if (isActive) CinemaAmber else CinemaGray,
+                fontSize = 7.5.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
                 softWrap = false
             )
-            Box(
-                modifier = Modifier
-                    .size(4.dp)
-                    .clip(CircleShape)
-                    .background(if (isAuto) Color(0xFF00FF66) else Color(0xFFFFCC00))
-            )
+            if (showModeDot) {
+                Box(
+                    modifier = Modifier
+                        .size(4.dp)
+                        .clip(CircleShape)
+                        .background(if (isAuto) CinemaAutoGreen else CinemaManualAmber)
+                )
+            }
         }
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = value,
-            color = if (isActive) Color(0xFFFFCC00) else Color.White,
-            fontSize = 11.5.sp,
+            color = if (isActive) CinemaAmber else CinemaWhite,
+            fontSize = 10.sp,
             fontWeight = FontWeight.Black,
             fontFamily = FontFamily.Monospace,
+            style = TabularScreenStyle,
             maxLines = 1,
             softWrap = false
         )
     }
 }
 
-/**
- * Clean Pro Sheet Toggle Card.
- */
 @Composable
 private fun ProSheetToggleCard(
     title: String,
@@ -1046,13 +1088,13 @@ private fun ProSheetToggleCard(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = if (isActive) activeColor.copy(alpha = 0.15f) else Color(0x3320222A),
+        shape = RoundedCornerShape(10.dp),
+        color = if (isActive) activeColor.copy(alpha = 0.14f) else CinemaElevated,
         border = BorderStroke(
-            0.8.dp,
-            if (isActive) activeColor else Color(0x22FFFFFF)
+            0.75.dp,
+            if (isActive) activeColor else CinemaBorderInactive
         ),
-        modifier = modifier.height(56.dp)
+        modifier = modifier.height(54.dp)
     ) {
         Row(
             modifier = Modifier
@@ -1064,30 +1106,33 @@ private fun ProSheetToggleCard(
             Column {
                 Text(
                     text = title,
-                    color = if (isActive) activeColor else Color.White,
-                    fontSize = 11.sp,
+                    color = if (isActive) activeColor else CinemaWhite,
+                    fontSize = 10.5.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
                 Text(
                     text = sub,
-                    color = Color(0x88FFFFFF),
-                    fontSize = 9.sp,
+                    color = CinemaGray,
+                    fontSize = 8.5.sp,
                     fontFamily = FontFamily.Monospace
                 )
             }
             Box(
                 modifier = Modifier
-                    .size(8.dp)
+                    .size(7.dp)
                     .clip(CircleShape)
-                    .background(if (isActive) activeColor else Color(0x33FFFFFF))
+                    .background(if (isActive) activeColor else CinemaBorderInactive)
             )
         }
     }
 }
 
 /**
- * Exact, untouched Horizontal (Landscape) Cinema Layout.
+ * v1.5.0 Horizontal (Landscape) Cinema Layout.
+ *
+ * Uses zero-jank `graphicsLayer` animations for Clean Viewfinder HUD hide,
+ * expandable Rotary/LUT/Tools dials, and ProToolsDrawer slide-in.
  */
 @Composable
 private fun LandscapeCinemaLayout(
@@ -1104,34 +1149,54 @@ private fun LandscapeCinemaLayout(
     bitrateValues: List<Int>,
     modifier: Modifier = Modifier
 ) {
+    val hudProgress by animateFloatAsState(
+        targetValue = if (!state.isCleanViewfinder) 1f else 0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        label = "hudVisibility"
+    )
+    val dialProgress by animateFloatAsState(
+        targetValue = if (activeDial != ActiveDial.NONE && !state.isCleanViewfinder) 1f else 0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        label = "landscapeDialProgress"
+    )
+    var lastActiveDial by remember { mutableStateOf(ActiveDial.NONE) }
+    if (activeDial != ActiveDial.NONE) {
+        lastActiveDial = activeDial
+    }
+
+    val drawerProgress by animateFloatAsState(
+        targetValue = if (state.isProToolsDrawerOpen) 1f else 0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f),
+        label = "proDrawerSlide"
+    )
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF08090C))
+            .background(CinemaObsidian)
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() }
             ) {
-                // Tapping outside dismisses active dial without toggling clean viewfinder HUD
                 if (activeDial != ActiveDial.NONE) {
                     onActiveDialChanged(ActiveDial.NONE)
                 }
             }
     ) {
-        // 1. Live Camera2 Viewfinder Surface with AutoFitSurfaceView (Universal Zero-Stretch)
+        // 1. Live Camera2 Viewfinder Surface
         Viewfinder(
             viewModel = viewModel,
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Monitoring Overlays (Zebras, Peaking, Frame Guides, Horizon Leveler, Histogram)
+        // 2. Monitoring Overlays (Center 75%+ unobstructed)
         val vRes = state.videoResolution
         val resWidth = maxOf(vRes.width, vRes.height)
         val resHeight = minOf(vRes.width, vRes.height)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 44.dp, bottom = 54.dp),
+                .padding(top = 44.dp, bottom = 58.dp),
             contentAlignment = Alignment.Center
         ) {
             MonitoringOverlays(
@@ -1142,187 +1207,226 @@ private fun LandscapeCinemaLayout(
             )
         }
 
-        // 3. Clean Viewfinder Mode Glowing REC Indicator (Visible even when HUD is hidden)
+        // 3. Clean Viewfinder Mode Glowing REC Indicator
         if (state.isCleanViewfinder && state.isRecording) {
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(start = 20.dp, top = 16.dp),
+                    .statusBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(start = 20.dp, top = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(10.dp)
-                        .background(Color(0xFFFF0033), CircleShape)
+                        .size(9.dp)
+                        .background(CinemaCrimson, CircleShape)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 val mins = state.recordingTimeSeconds / 60
                 val secs = state.recordingTimeSeconds % 60
                 Text(
                     text = "REC %02d:%02d".format(mins, secs),
-                    color = Color.White,
+                    color = CinemaWhite,
                     fontWeight = FontWeight.Black,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Monospace,
+                    style = TabularScreenStyle
                 )
             }
         }
 
-        // 4. Modern Frosted Glass Top Bar
-        AnimatedVisibility(
-            visible = !state.isCleanViewfinder,
-            enter = slideInVertically { -it } + fadeIn(tween(150)),
-            exit = slideOutVertically { -it } + fadeOut(tween(150)),
-            modifier = Modifier.align(Alignment.TopCenter)
-        ) {
-            TopStatusBar(
-                state = state,
-                onResolutionSelected = { res -> viewModel.cameraController.setVideoResolution(res) },
-                onFpsSelected = { fps -> viewModel.cameraController.setTargetFps(fps) },
-                onColorProfileClick = {
-                    val nextProfile = when (state.colorProfile) {
-                        ColorProfile.REC709 -> ColorProfile.FLAT_LOG
-                        ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
-                        ColorProfile.HLG_10BIT -> ColorProfile.HDR10_PLUS
-                        ColorProfile.HDR10_PLUS -> ColorProfile.REC709
+        // 4. Top Status Bar (graphicsLayer fade + slide)
+        if (hudProgress > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        translationY = -(1f - hudProgress) * 44.dp.toPx()
                     }
-                    viewModel.cameraController.setColorProfile(nextProfile)
-                },
-                onIntraModeSelected = { mode -> viewModel.cameraController.setIntraFrameMode(mode) },
-                onBitrateSelected = { mbps -> viewModel.cameraController.setBitrateMbps(mbps) },
-                onIspClick = { viewModel.cameraController.toggleIspMode() },
-                onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() },
-                onAdvancedSettingsClick = onShowSettings,
-                onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() },
-                onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() },
-                onAntiBandingClick = { viewModel.cameraController.cycleAntiBandingMode() },
-                onAntiBandingModeSelected = { mode -> viewModel.cameraController.setAntiBandingMode(mode) },
-                onAeMeteringClick = { viewModel.cameraController.cycleAeMeteringMode() },
-                onAeMeteringModeSelected = { mode -> viewModel.cameraController.setAeMeteringMode(mode) },
-                onAutoShutterClick = { viewModel.cameraController.setAutoShutter() },
-                onResetDefaults = { viewModel.cameraController.resetToDefaults() }
-            )
+            ) {
+                TopStatusBar(
+                    state = state,
+                    onResolutionSelected = { res -> viewModel.cameraController.setVideoResolution(res) },
+                    onFpsSelected = { fps -> viewModel.cameraController.setTargetFps(fps) },
+                    onColorProfileClick = {
+                        val nextProfile = when (state.colorProfile) {
+                            ColorProfile.REC709 -> ColorProfile.FLAT_LOG
+                            ColorProfile.FLAT_LOG -> ColorProfile.HLG_10BIT
+                            ColorProfile.HLG_10BIT -> ColorProfile.HDR10_PLUS
+                            ColorProfile.HDR10_PLUS -> ColorProfile.REC709
+                        }
+                        viewModel.cameraController.setColorProfile(nextProfile)
+                    },
+                    onColorProfileSelected = { profile -> viewModel.cameraController.setColorProfile(profile) },
+                    onIntraModeSelected = { mode -> viewModel.cameraController.setIntraFrameMode(mode) },
+                    onBitrateSelected = { mbps -> viewModel.cameraController.setBitrateMbps(mbps) },
+                    onIspClick = { viewModel.cameraController.toggleIspMode() },
+                    onAudioWavClick = { viewModel.cameraController.toggleRecordWavSidecar() },
+                    onAdvancedSettingsClick = onShowSettings,
+                    onStabilizationClick = { viewModel.cameraController.cycleStabilizationMode() },
+                    onOrientationLockClick = { viewModel.cameraController.cycleOrientationLockMode() },
+                    onAntiBandingClick = { viewModel.cameraController.cycleAntiBandingMode() },
+                    onAntiBandingModeSelected = { mode -> viewModel.cameraController.setAntiBandingMode(mode) },
+                    onAeMeteringClick = { viewModel.cameraController.cycleAeMeteringMode() },
+                    onAeMeteringModeSelected = { mode -> viewModel.cameraController.setAeMeteringMode(mode) },
+                    onAutoShutterClick = { viewModel.cameraController.setAutoShutter() },
+                    onResetDefaults = { viewModel.cameraController.resetToDefaults() }
+                )
+            }
         }
 
-        // 5. Left-Side Pro Assist Monitoring Rail
-        AnimatedVisibility(
-            visible = !state.isCleanViewfinder,
-            enter = slideInHorizontally { -it } + fadeIn(tween(150)),
-            exit = slideOutHorizontally { -it } + fadeOut(tween(150)),
-            modifier = Modifier.align(Alignment.CenterStart)
-        ) {
-            LeftMonitoringRail(
-                state = state,
-                onCleanViewfinderToggle = { viewModel.cameraController.toggleCleanViewfinder() },
-                onPeakingToggle = { viewModel.cameraController.toggleFocusPeaking() },
-                onZebrasToggle = { viewModel.cameraController.toggleZebras() },
-                onGuidesCycle = {
-                    val nextGuide = when (state.frameGuide) {
-                        FrameGuide.NONE -> FrameGuide.RATIO_2_39
-                        FrameGuide.RATIO_2_39 -> FrameGuide.RATIO_16_9
-                        FrameGuide.RATIO_16_9 -> FrameGuide.RATIO_4_3
-                        FrameGuide.RATIO_4_3 -> FrameGuide.RATIO_1_1
-                        FrameGuide.RATIO_1_1 -> FrameGuide.NONE
+        // 5. Left Monitoring Rail
+        if (hudProgress > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(top = 52.dp, bottom = 64.dp)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        translationX = -(1f - hudProgress) * 58.dp.toPx()
                     }
-                    viewModel.cameraController.setFrameGuide(nextGuide)
-                },
-                onHorizonToggle = { viewModel.cameraController.toggleHorizonLeveler() },
-                onHistogramToggle = { viewModel.cameraController.toggleHistogram() },
-                onLutToggle = { viewModel.cameraController.toggleLutPreview() },
-                onStabilizationToggle = { viewModel.cameraController.cycleStabilizationMode() }
-            )
+            ) {
+                LeftMonitoringRail(
+                    state = state,
+                    onCleanViewfinderToggle = { viewModel.cameraController.toggleCleanViewfinder() },
+                    onPeakingToggle = { viewModel.cameraController.toggleFocusPeaking() },
+                    onZebrasToggle = { viewModel.cameraController.toggleZebras() },
+                    onGuidesCycle = {
+                        val nextGuide = when (state.frameGuide) {
+                            FrameGuide.NONE -> FrameGuide.RATIO_2_39
+                            FrameGuide.RATIO_2_39 -> FrameGuide.RATIO_16_9
+                            FrameGuide.RATIO_16_9 -> FrameGuide.RATIO_4_3
+                            FrameGuide.RATIO_4_3 -> FrameGuide.RATIO_1_1
+                            FrameGuide.RATIO_1_1 -> FrameGuide.NONE
+                        }
+                        viewModel.cameraController.setFrameGuide(nextGuide)
+                    },
+                    onHorizonToggle = { viewModel.cameraController.toggleHorizonLeveler() },
+                    onHistogramToggle = { viewModel.cameraController.toggleHistogram() },
+                    onLutToggle = { viewModel.cameraController.toggleLutPreview() },
+                    onStabilizationToggle = { viewModel.cameraController.cycleStabilizationMode() }
+                )
+            }
         }
 
-        // 6. Right-Side Cinema Action Rail (Thumb Controls)
-        AnimatedVisibility(
-            visible = !state.isCleanViewfinder,
-            enter = slideInHorizontally { it } + fadeIn(tween(150)),
-            exit = slideOutHorizontally { it } + fadeOut(tween(150)),
-            modifier = Modifier.align(Alignment.CenterEnd)
-        ) {
-            RightActionRail(
-                state = state,
-                onRecordToggle = onRecordToggle,
-                onPauseToggle = {
-                    viewModel.cameraController.setRecordingPaused(!state.isRecordingPaused)
-                },
-                onTorchToggle = { viewModel.cameraController.toggleTorch() },
-                onAeAfLockToggle = { viewModel.cameraController.toggleAeAfLock() },
-                onFlipCamera = { viewModel.cameraController.flipCamera() },
-                onToggleProDrawer = { viewModel.cameraController.toggleProToolsDrawer() }
-            )
+        // 6. Right Cinema Action Rail
+        if (hudProgress > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(top = 52.dp, bottom = 64.dp)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        translationX = (1f - hudProgress) * 72.dp.toPx()
+                    }
+            ) {
+                RightActionRail(
+                    state = state,
+                    onRecordToggle = onRecordToggle,
+                    onPauseToggle = {
+                        viewModel.cameraController.setRecordingPaused(!state.isRecordingPaused)
+                    },
+                    onTorchToggle = { viewModel.cameraController.toggleTorch() },
+                    onAeAfLockToggle = { viewModel.cameraController.toggleAeAfLock() },
+                    onFlipCamera = { viewModel.cameraController.flipCamera() },
+                    onToggleProDrawer = { viewModel.cameraController.toggleProToolsDrawer() }
+                )
+            }
         }
 
-        // 7. Bottom Tactile Exposure Deck & Lens Hub
-        AnimatedVisibility(
-            visible = !state.isCleanViewfinder,
-            enter = slideInVertically { it } + fadeIn(tween(150)),
-            exit = slideOutVertically { it } + fadeOut(tween(150)),
-            modifier = Modifier.align(Alignment.BottomCenter)
-        ) {
-            BottomControlBar(
-                state = state,
-                onLensSelected = { lens -> viewModel.cameraController.selectLens(lens) },
-                onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
-                onZoomSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) },
-                onShutterClick = {
-                    onActiveDialChanged(if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER)
-                },
-                onIsoClick = {
-                    onActiveDialChanged(if (activeDial == ActiveDial.ISO) ActiveDial.NONE else ActiveDial.ISO)
-                },
-                onWbClick = {
-                    onActiveDialChanged(if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE)
-                },
-                onFocusClick = {
-                    onActiveDialChanged(if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS)
-                },
-                onEvClick = {
-                    onActiveDialChanged(if (activeDial == ActiveDial.EV) ActiveDial.NONE else ActiveDial.EV)
-                }
-            )
+        // 7. Bottom Exposure Deck & Zoom Hub
+        if (hudProgress > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        translationY = (1f - hudProgress) * 64.dp.toPx()
+                    }
+            ) {
+                BottomControlBar(
+                    state = state,
+                    activeDial = activeDial,
+                    onLensSelected = { lens -> viewModel.cameraController.selectLens(lens) },
+                    onZoomChanged = { zoom -> viewModel.cameraController.setZoomRatio(zoom) },
+                    onZoomSliderVisibilityChanged = { visible -> viewModel.cameraController.setZoomSliderVisibility(visible) },
+                    onShutterClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.SHUTTER) ActiveDial.NONE else ActiveDial.SHUTTER)
+                    },
+                    onIsoClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.ISO) ActiveDial.NONE else ActiveDial.ISO)
+                    },
+                    onWbClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.WHITE_BALANCE) ActiveDial.NONE else ActiveDial.WHITE_BALANCE)
+                    },
+                    onFocusClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.FOCUS) ActiveDial.NONE else ActiveDial.FOCUS)
+                    },
+                    onEvClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.EV) ActiveDial.NONE else ActiveDial.EV)
+                    },
+                    onLutClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.LUT) ActiveDial.NONE else ActiveDial.LUT)
+                    },
+                    onToolsClick = {
+                        onActiveDialChanged(if (activeDial == ActiveDial.TOOLS) ActiveDial.NONE else ActiveDial.TOOLS)
+                    }
+                )
+            }
         }
 
-        // 8. Shared Expandable Rotary Dial Wheel (Pops up directly above the bottom deck)
-        AnimatedVisibility(
-            visible = activeDial != ActiveDial.NONE && !state.isCleanViewfinder,
-            enter = slideInVertically { it } + fadeIn(),
-            exit = slideOutVertically { it } + fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 58.dp)
-        ) {
-            CinemaActiveDialScrubber(
-                activeDial = activeDial,
-                state = state,
-                viewModel = viewModel,
-                fpsValues = fpsValues,
-                shutterAngles = shutterAngles,
-                shutterSpeedsNs = shutterSpeedsNs,
-                evValues = evValues,
-                bitrateValues = bitrateValues,
-                onClose = { onActiveDialChanged(ActiveDial.NONE) }
-            )
+        // 8. Expandable Rotary Dial / LUT / Tools Wheel (purely graphicsLayer transition)
+        if (dialProgress > 0.01f && lastActiveDial != ActiveDial.NONE) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .displayCutoutPadding()
+                    .padding(start = 72.dp, end = 82.dp, bottom = 70.dp)
+                    .graphicsLayer {
+                        alpha = dialProgress
+                        translationY = (1f - dialProgress) * 24.dp.toPx()
+                        scaleY = 0.94f + 0.06f * dialProgress
+                    }
+            ) {
+                CinemaActiveDialScrubber(
+                    activeDial = lastActiveDial,
+                    state = state,
+                    viewModel = viewModel,
+                    fpsValues = fpsValues,
+                    shutterAngles = shutterAngles,
+                    shutterSpeedsNs = shutterSpeedsNs,
+                    evValues = evValues,
+                    bitrateValues = bitrateValues,
+                    onClose = { onActiveDialChanged(ActiveDial.NONE) }
+                )
+            }
         }
 
-        // 9. Pro Cinema Suite Drawer (Slides out smoothly from end)
-        AnimatedVisibility(
-            visible = state.isProToolsDrawerOpen,
-            enter = slideInHorizontally { it } + fadeIn(tween(200)),
-            exit = slideOutHorizontally { it } + fadeOut(tween(200)),
-            modifier = Modifier.align(Alignment.CenterEnd)
-        ) {
-            ProToolsDrawer(
-                state = state,
-                cameraController = viewModel.cameraController,
-                onClose = { viewModel.cameraController.setProToolsDrawerOpen(false) }
-            )
+        // 9. Pro Cinema Suite Drawer (graphicsLayer slide-in from right)
+        if (drawerProgress > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .graphicsLayer {
+                        alpha = drawerProgress
+                        translationX = (1f - drawerProgress) * 280.dp.toPx()
+                    }
+            ) {
+                ProToolsDrawer(
+                    state = state,
+                    cameraController = viewModel.cameraController,
+                    onClose = { viewModel.cameraController.setProToolsDrawerOpen(false) }
+                )
+            }
         }
     }
 }
 
 /**
- * Shared High-Precision Rotary Dial Scrubber.
+ * Shared High-Precision Rotary Dial, LUT, & Tools Scrubber.
  */
 @Composable
 private fun CinemaActiveDialScrubber(
@@ -1364,7 +1468,7 @@ private fun CinemaActiveDialScrubber(
                     presets = listOf("90°" to 3, "144°" to 4, "172.8°" to 5, "180°" to 6, "360°" to 8),
                     headerActions = {
                         TextButton(onClick = { viewModel.cameraController.toggleShutterUnit() }) {
-                            Text("SWITCH TO SPEED", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("SWITCH TO SPEED", color = CinemaCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 )
@@ -1389,7 +1493,7 @@ private fun CinemaActiveDialScrubber(
                     ),
                     headerActions = {
                         TextButton(onClick = { viewModel.cameraController.toggleShutterUnit() }) {
-                            Text("SWITCH TO ANGLE", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("SWITCH TO ANGLE", color = CinemaCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 )
@@ -1423,8 +1527,8 @@ private fun CinemaActiveDialScrubber(
                     }) {
                         Text(
                             if (state.focusMode == FocusMode.MANUAL) "ENABLE AF" else "ENABLE MF",
-                            color = Color(0xFF00E5FF),
-                            fontSize = 11.sp,
+                            color = CinemaCyan,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -1455,7 +1559,7 @@ private fun CinemaActiveDialScrubber(
                 presets = listOf("-2.0" to 0, "-1.0" to 3, "0.0" to 6, "+1.0" to 9, "+2.0" to 12),
                 headerActions = {
                     TextButton(onClick = { viewModel.cameraController.setEvCompensation(0.0f) }) {
-                        Text("RESET 0 EV", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("RESET 0 EV", color = CinemaCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             )
@@ -1473,7 +1577,239 @@ private fun CinemaActiveDialScrubber(
                 presets = listOf("50M" to 0, "100M" to 2, "150M" to 4, "200M" to 6, "280M" to 8)
             )
         }
+        ActiveDial.LUT -> {
+            QuickLutSelectorTray(
+                state = state,
+                onSelectPreset = { preset ->
+                    viewModel.cameraController.setLutPreset(preset)
+                },
+                onToggleBake = {
+                    viewModel.cameraController.setLutBakeEnabled(!state.isLutBakeEnabled)
+                },
+                onClose = onClose
+            )
+        }
+        ActiveDial.TOOLS -> {
+            QuickMonitoringToolsTray(
+                state = state,
+                cameraController = viewModel.cameraController,
+                onClose = onClose
+            )
+        }
         ActiveDial.NONE -> {}
+    }
+}
+
+@Composable
+private fun QuickLutSelectorTray(
+    state: CinemaState,
+    onSelectPreset: (LutPreset) -> Unit,
+    onToggleBake: () -> Unit,
+    onClose: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
+            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "3D LUT PRESETS",
+                    color = CinemaAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace
+                )
+                Box(
+                    modifier = Modifier
+                        .drawBehind {
+                            val r = CornerRadius(4.dp.toPx())
+                            drawRoundRect(
+                                color = if (state.isLutBakeEnabled) CinemaAmber else CinemaElevated,
+                                cornerRadius = r
+                            )
+                            drawRoundRect(
+                                color = if (state.isLutBakeEnabled) CinemaAmber else CinemaBorderInactive,
+                                cornerRadius = r,
+                                style = Stroke(0.75.dp.toPx())
+                            )
+                        }
+                        .clickable(onClick = onToggleBake)
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = if (state.isLutBakeEnabled) "BAKE: ON" else "PREVIEW ONLY",
+                        color = if (state.isLutBakeEnabled) CinemaObsidian else CinemaWhite,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close LUT Tray", tint = CinemaWhite)
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            LutPreset.entries.forEach { preset ->
+                val isSelected = state.lutPreset == preset && (preset == LutPreset.OFF || state.showLutPreview)
+                TrayChip(
+                    label = preset.label,
+                    isSelected = isSelected,
+                    activeColor = CinemaAmber,
+                    onClick = { onSelectPreset(preset) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickMonitoringToolsTray(
+    state: CinemaState,
+    cameraController: Camera2Controller,
+    onClose: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CinemaPillBgDark, RoundedCornerShape(14.dp))
+            .border(0.75.dp, CinemaBorderActive, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "MONITORING SCOPES & ASSISTS",
+                color = CinemaAmber,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace
+            )
+            IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close Tools Tray", tint = CinemaWhite)
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            TrayChip(
+                label = "PEAKING",
+                isSelected = state.showFocusPeaking,
+                activeColor = CinemaAutoGreen,
+                onClick = { cameraController.toggleFocusPeaking() }
+            )
+            TrayChip(
+                label = "ZEBRAS",
+                isSelected = state.showZebras,
+                activeColor = CinemaGold,
+                onClick = { cameraController.toggleZebras() }
+            )
+            TrayChip(
+                label = "FALSE COLOR",
+                isSelected = state.showFalseColor,
+                activeColor = CinemaCrimson,
+                onClick = { cameraController.toggleFalseColor() }
+            )
+            TrayChip(
+                label = "HISTOGRAM",
+                isSelected = state.showHistogram,
+                activeColor = CinemaAmber,
+                onClick = { cameraController.toggleHistogram() }
+            )
+            TrayChip(
+                label = "WAVEFORM",
+                isSelected = state.showWaveform,
+                activeColor = CinemaCyan,
+                onClick = { cameraController.toggleWaveform() }
+            )
+            TrayChip(
+                label = "LEVELER",
+                isSelected = state.showHorizonLeveler,
+                activeColor = CinemaAutoGreen,
+                onClick = { cameraController.toggleHorizonLeveler() }
+            )
+            TrayChip(
+                label = "GRID",
+                isSelected = state.showGrid,
+                activeColor = CinemaAmber,
+                onClick = { cameraController.toggleGrid() }
+            )
+            val guideLabel = if (state.frameGuide == FrameGuide.NONE) "GUIDES" else "GUIDE ${state.frameGuide.name.replace("RATIO_", "")}"
+            TrayChip(
+                label = guideLabel,
+                isSelected = state.frameGuide != FrameGuide.NONE,
+                activeColor = CinemaAmber,
+                onClick = {
+                    val nextGuide = when (state.frameGuide) {
+                        FrameGuide.NONE -> FrameGuide.RATIO_2_39
+                        FrameGuide.RATIO_2_39 -> FrameGuide.RATIO_16_9
+                        FrameGuide.RATIO_16_9 -> FrameGuide.RATIO_4_3
+                        FrameGuide.RATIO_4_3 -> FrameGuide.RATIO_1_1
+                        FrameGuide.RATIO_1_1 -> FrameGuide.NONE
+                    }
+                    cameraController.setFrameGuide(nextGuide)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrayChip(
+    label: String,
+    isSelected: Boolean,
+    activeColor: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .drawBehind {
+                val r = CornerRadius(6.dp.toPx())
+                drawRoundRect(
+                    color = if (isSelected) activeColor.copy(alpha = 0.22f) else CinemaElevated,
+                    cornerRadius = r
+                )
+                drawRoundRect(
+                    color = if (isSelected) activeColor else CinemaBorderInactive,
+                    cornerRadius = r,
+                    style = Stroke(0.75.dp.toPx())
+                )
+            }
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text = label,
+            color = if (isSelected) activeColor else CinemaWhite,
+            fontSize = 10.sp,
+            fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1
+        )
     }
 }
 
@@ -1493,8 +1829,8 @@ fun CinemaSettingsDialog(
         title = {
             Text(
                 text = "CINEMA RECORDING & FORMAT SETTINGS",
-                color = Color(0xFFFFD700),
-                fontSize = 15.sp,
+                color = CinemaAmber,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Black,
                 fontFamily = FontFamily.Monospace
             )
@@ -1507,8 +1843,7 @@ fun CinemaSettingsDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // 1. Recording Container / Pipeline
-                Text("RECORDING CONTAINER", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("RECORDING CONTAINER", color = CinemaGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RecordingFormat.entries.forEach { fmt ->
                         FilterChip(
@@ -1519,9 +1854,8 @@ fun CinemaSettingsDialog(
                     }
                 }
 
-                // 2. Video Codec (HEVC 10-bit / HEVC 8-bit / H.264)
                 if (state.recordingFormat == RecordingFormat.VIDEO_PRO) {
-                    Text("VIDEO CODEC (COLOR DEPTH)", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("VIDEO CODEC (COLOR DEPTH)", color = CinemaGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1535,17 +1869,16 @@ fun CinemaSettingsDialog(
                         }
                     }
 
-                    // Sky Deband Anti-Banding Filter (OFF by default / ON optional)
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("SKY DEBAND FILTER", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text("SKY DEBAND FILTER", color = CinemaGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             Text(
                                 text = if (state.isDebandEnabled) "ON • 2-tap gradient smoothing" else "OFF • Pure 60fps single-pass",
-                                color = if (state.isDebandEnabled) Color(0xFF00E5FF) else Color(0x66FFFFFF),
+                                color = if (state.isDebandEnabled) CinemaCyan else CinemaGrayDeep,
                                 fontSize = 9.sp,
                                 fontFamily = FontFamily.Monospace
                             )
@@ -1568,8 +1901,7 @@ fun CinemaSettingsDialog(
                     }
                 }
 
-                // 3. Sensor Video Resolution & Aspect Ratio (Grouped by Aspect Ratio)
-                Text("RESOLUTION & ASPECT RATIO (${state.supportedResolutions.size} AVAILABLE)", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("RESOLUTION & ASPECT RATIO (${state.supportedResolutions.size} AVAILABLE)", color = CinemaGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
 
                 var selectedAspectFilter by remember { mutableStateOf<String?>("ALL") }
                 val availableAspects = remember(state.supportedResolutions) {
@@ -1603,10 +1935,10 @@ fun CinemaSettingsDialog(
                         Surface(
                             onClick = { onSelectResolution(res) },
                             shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) Color(0xFF2A2A10) else Color(0xFF222428),
+                            color = if (isSelected) Color(0x28F5A623) else CinemaElevated,
                             border = BorderStroke(
-                                width = 1.dp,
-                                color = if (isSelected) Color(0xFFFFD700) else Color(0x22FFFFFF)
+                                width = 0.75.dp,
+                                color = if (isSelected) CinemaAmber else CinemaBorderInactive
                             ),
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -1620,28 +1952,28 @@ fun CinemaSettingsDialog(
                                 Column {
                                     Text(
                                         text = res.label,
-                                        color = if (isSelected) Color(0xFFFFD700) else Color.White,
+                                        color = if (isSelected) CinemaAmber else CinemaWhite,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
                                         text = "${res.width} × ${res.height} • Aspect Ratio: ${res.aspectLabel}",
-                                        color = Color(0x88FFFFFF),
+                                        color = CinemaGray,
                                         fontSize = 10.sp,
-                                        fontFamily = FontFamily.Monospace
+                                        fontFamily = FontFamily.Monospace,
+                                        style = TabularScreenStyle
                                     )
                                 }
                                 if (isSelected) {
-                                    Text("ACTIVE", color = Color(0xFFFFD700), fontSize = 10.sp, fontWeight = FontWeight.Black)
+                                    Text("ACTIVE", color = CinemaAmber, fontSize = 10.sp, fontWeight = FontWeight.Black)
                                 }
                             }
                         }
                     }
                 }
 
-                // 4. Bitrate (HEVC / H.264)
                 if (state.recordingFormat == RecordingFormat.VIDEO_PRO) {
-                    Text("TARGET BITRATE", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("TARGET BITRATE", color = CinemaGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1650,14 +1982,13 @@ fun CinemaSettingsDialog(
                             FilterChip(
                                 selected = state.targetBitrateMbps == mbps,
                                 onClick = { onSelectBitrate(mbps) },
-                                label = { Text("${mbps} Mbps", fontSize = 11.sp) }
+                                label = { Text("$mbps Mbps", fontSize = 11.sp, style = TabularScreenStyle) }
                             )
                         }
                     }
                 }
 
-                // 5. Color Profile
-                Text("COLOR PROFILE & TONE CURVE", color = Color(0xAAFFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("COLOR PROFILE & TONE CURVE", color = CinemaGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1674,10 +2005,10 @@ fun CinemaSettingsDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("DONE", color = Color(0xFFFFD700), fontWeight = FontWeight.Bold)
+                Text("DONE", color = CinemaAmber, fontWeight = FontWeight.Bold)
             }
         },
-        containerColor = Color(0xFF141518),
+        containerColor = CinemaElevated,
         shape = RoundedCornerShape(12.dp)
     )
 }

@@ -8,14 +8,15 @@ import android.view.SurfaceHolder
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -29,14 +30,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -45,20 +51,20 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kunal.pixelcineraw.camera.CinemaViewModel
+import com.kunal.pixelcineraw.ui.theme.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+private val TabularViewfinderStyle = TextStyle(fontFeatureSettings = TABULAR_NUMS)
+
 /**
- * Cinema Viewfinder powered by Google's official AutoFitSurfaceView pattern.
+ * Cinema Viewfinder powered by AutoFitSurfaceView.
  *
- * Guarantees zero distortion across all video resolutions and aspect ratios (16:9, 4:3 Open Gate,
- * 1.90:1 DCI, etc.) because Android's SurfaceView hardware layer natively handles sensor orientation
- * and onMeasure enforces exact aspect-ratio proportions without any artificial matrix stretching.
- *
- * Both the gesture listener and the animated focus reticle live in the exact same AutoFitSurfaceView
- * overlay container, ensuring perfect 1:1 reticle alignment dead-center on the touched pixel.
+ * v1.5.0: Focus reticle runs its spring snap (`1.25f -> 1.0f`) strictly in `graphicsLayer`
+ * centered at the touched coordinate, paired with a compact matte-obsidian micro-EV slider
+ * and AE/AF lock badge using 0.75dp hairline borders and tabular numbers.
  */
 @Composable
 fun Viewfinder(
@@ -68,7 +74,7 @@ fun Viewfinder(
     val coroutineScope = rememberCoroutineScope()
     val state by viewModel.state.collectAsStateWithLifecycle()
     var tapOffset by remember { mutableStateOf<Offset?>(null) }
-    val reticleScale = remember { Animatable(1.4f) }
+    val reticleScale = remember { Animatable(1.25f) }
     val reticleAlpha = remember { Animatable(1.0f) }
     var reticleAutoHideJob by remember { mutableStateOf<Job?>(null) }
 
@@ -77,7 +83,6 @@ fun Viewfinder(
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
 
-    // Dynamically update AutoFitSurfaceView aspect ratio whenever sensor spec, resolution, or orientation changes
     LaunchedEffect(state.currentSensorSpec, state.videoResolution, isPortrait) {
         val vRes = state.videoResolution
         val w = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
@@ -85,7 +90,6 @@ fun Viewfinder(
         surfaceViewRef?.setAspectRatio(w, h)
     }
 
-    // Apply native HDR extended range brightness, BT.2020 HLG/PQ data space, and recording frame-rate lock
     LaunchedEffect(state.colorProfile, state.isRecording, state.targetFps) {
         surfaceViewRef?.applyColorProfileSurfaceState(
             profile = state.colorProfile,
@@ -124,7 +128,6 @@ fun Viewfinder(
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        // Viewport container matching exact aspect ratio of the camera stream (9:16 / 3:4 in portrait, 16:9 / 4:3 in landscape)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -200,7 +203,7 @@ fun Viewfinder(
                 }
             )
 
-            // Seamless Lens Transition Crossfade and Scale-Match Mask (eliminates black flash/freeze)
+            // Seamless Lens Transition Crossfade
             val transitionScaleAnim by animateFloatAsState(
                 targetValue = if (state.isTransitioningLens) state.transitionScale else 1.0f,
                 animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
@@ -237,7 +240,7 @@ fun Viewfinder(
                 }
             }
 
-            // Unified Touch & Reticle Overlay Box (Exactly matching AutoFitSurfaceView bounds)
+            // Unified Touch & Reticle Overlay Box
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
@@ -251,7 +254,7 @@ fun Viewfinder(
                                 viewModel.cameraController.setZoomSliderVisibility(true)
                                 pinchAutoHideJob?.cancel()
                                 pinchAutoHideJob = coroutineScope.launch {
-                                    delay(1200L)
+                                    delay(1500L)
                                     viewModel.cameraController.setZoomSliderVisibility(false)
                                 }
 
@@ -268,37 +271,52 @@ fun Viewfinder(
                             tapOffset = offset
                             reticleAutoHideJob?.cancel()
                             reticleAutoHideJob = coroutineScope.launch {
-                                reticleScale.snapTo(1.3f)
+                                reticleScale.snapTo(1.25f)
                                 reticleAlpha.snapTo(1.0f)
-                                reticleScale.animateTo(1.0f, tween(200))
+                                reticleScale.animateTo(
+                                    targetValue = 1.0f,
+                                    animationSpec = spring(
+                                        stiffness = Spring.StiffnessMediumLow,
+                                        dampingRatio = 0.85f
+                                    )
+                                )
                                 delay(3500L)
-                                reticleAlpha.animateTo(0.0f, tween(400))
+                                reticleAlpha.animateTo(0.0f, tween(350))
                                 tapOffset = null
                             }
                         }
                     }
             ) {
-                val maxWidthPx = constraints.maxWidth.toFloat()
-                val maxHeightPx = constraints.maxHeight.toFloat()
+                val maxWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                val maxHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
 
-                // Animated Tap-to-Focus Cinema Reticle with Vertical EV Slider & AE/AF Lock
                 tapOffset?.let { offset ->
-                    val scale = reticleScale.value
-                    val alpha = reticleAlpha.value
                     val density = LocalDensity.current
+                    val bracketColor = if (state.isAeAfLocked) CinemaCrimson else CinemaAmber
 
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .graphicsLayer { this.alpha = alpha }
+                            .graphicsLayer { alpha = reticleAlpha.value }
                     ) {
-                        // 1. Center Cinema Corner Bracket Reticle [ + ]
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val boxSize = 64.dp.toPx() * scale
+                        // 1. Center Cinema Corner Bracket Reticle [ + ] with GPU graphicsLayer spring snap
+                        Canvas(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    val s = reticleScale.value
+                                    scaleX = s
+                                    scaleY = s
+                                    transformOrigin = TransformOrigin(
+                                        pivotFractionX = (offset.x / maxWidthPx).coerceIn(0f, 1f),
+                                        pivotFractionY = (offset.y / maxHeightPx).coerceIn(0f, 1f)
+                                    )
+                                }
+                        ) {
+                            val boxSize = 62.dp.toPx()
                             val half = boxSize / 2f
                             val bracketLen = 14.dp.toPx()
-                            val strokeW = 2.dp.toPx()
-                            val bracketColor = if (state.isAeAfLocked) Color(0xFFFF3344) else Color(0xFFFFCC00)
+                            val strokeW = 1.75.dp.toPx()
 
                             // Top-Left
                             drawLine(bracketColor, Offset(offset.x - half, offset.y - half), Offset(offset.x - half + bracketLen, offset.y - half), strokeW)
@@ -317,24 +335,36 @@ fun Viewfinder(
                             drawLine(bracketColor, Offset(offset.x + half, offset.y + half), Offset(offset.x + half, offset.y + half - bracketLen), strokeW)
 
                             // Center crosshair
-                            val cross = 6.dp.toPx()
-                            drawLine(bracketColor, Offset(offset.x - cross, offset.y), Offset(offset.x + cross, offset.y), 1.5.dp.toPx())
-                            drawLine(bracketColor, Offset(offset.x, offset.y - cross), Offset(offset.x, offset.y + cross), 1.5.dp.toPx())
+                            val cross = 5.dp.toPx()
+                            drawLine(bracketColor, Offset(offset.x - cross, offset.y), Offset(offset.x + cross, offset.y), 1.25.dp.toPx())
+                            drawLine(bracketColor, Offset(offset.x, offset.y - cross), Offset(offset.x, offset.y + cross), 1.25.dp.toPx())
                         }
 
-                        // 2. Vertical EV Drag Slider beside Reticle
-                        val offset44 = with(density) { 44.dp.toPx() }
+                        // 2. Vertical Micro-EV Drag Slider beside Reticle
+                        val offset44 = with(density) { 42.dp.toPx() }
                         val offset45 = with(density) { 45.dp.toPx() }
-                        val sliderX = (offset.x + offset44).coerceAtMost(maxWidthPx - with(density) { 44.dp.toPx() })
+                        val sliderX = (offset.x + offset44).coerceAtMost(maxWidthPx - with(density) { 40.dp.toPx() })
                         val sliderY = (offset.y - offset45).coerceIn(10f, maxHeightPx - with(density) { 95.dp.toPx() })
 
                         Column(
                             modifier = Modifier
                                 .offset { IntOffset(sliderX.roundToInt(), sliderY.roundToInt()) }
-                                .width(36.dp)
-                                .height(90.dp)
-                                .background(Color(0xD9101216), RoundedCornerShape(18.dp))
-                                .border(0.8.dp, Color(0x33FFFFFF), RoundedCornerShape(18.dp))
+                                .width(34.dp)
+                                .height(88.dp)
+                                .drawBehind {
+                                    val r = CornerRadius(17.dp.toPx())
+                                    drawRoundRect(color = CinemaPillBgDark, cornerRadius = r)
+                                    drawRoundRect(color = CinemaBorderActive, cornerRadius = r, style = Stroke(0.75.dp.toPx()))
+
+                                    // Vertical EV track line + thumb indicator inside track
+                                    val trackX = size.width / 2f
+                                    val topY = 24.dp.toPx()
+                                    val botY = size.height - 22.dp.toPx()
+                                    drawLine(CinemaBorderInactive, Offset(trackX, topY), Offset(trackX, botY), 1.5.dp.toPx())
+                                    val normEv = ((state.evCompensation + 2.0f) / 4.0f).coerceIn(0f, 1f)
+                                    val thumbY = botY - normEv * (botY - topY)
+                                    drawCircle(CinemaAmber, radius = 3.dp.toPx(), center = Offset(trackX, thumbY))
+                                }
                                 .pointerInput(Unit) {
                                     detectVerticalDragGestures { _, dragAmount ->
                                         val evDelta = -dragAmount / 40f
@@ -349,34 +379,45 @@ fun Viewfinder(
                             Icon(
                                 imageVector = Icons.Default.WbSunny,
                                 contentDescription = "Exposure",
-                                tint = Color(0xFFFFD700),
-                                modifier = Modifier.size(14.dp)
+                                tint = CinemaAmber,
+                                modifier = Modifier.size(13.dp)
                             )
                             Text(
                                 text = if (state.evCompensation > 0f) "+%.1f".format(state.evCompensation) else "%.1f".format(state.evCompensation),
-                                color = Color.White,
-                                fontSize = 8.5.sp,
+                                color = CinemaWhite,
+                                fontSize = 8.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                style = TabularViewfinderStyle
                             )
                         }
 
-                        // 3. Quick AE/AF LOCK Pill directly above the bracket
+                        // 3. Quick AE/AF LOCK Pill above bracket
                         val offset30 = with(density) { 30.dp.toPx() }
-                        val offset54 = with(density) { 54.dp.toPx() }
+                        val offset54 = with(density) { 52.dp.toPx() }
                         val lockX = (offset.x - offset30).coerceIn(10f, maxWidthPx - with(density) { 80.dp.toPx() })
                         val lockY = (offset.y - offset54).coerceAtLeast(10f)
                         Box(
                             modifier = Modifier
                                 .offset { IntOffset(lockX.roundToInt(), lockY.roundToInt()) }
-                                .background(if (state.isAeAfLocked) Color(0xFFFF3344) else Color(0xB3101216), RoundedCornerShape(4.dp))
-                                .border(0.6.dp, if (state.isAeAfLocked) Color(0xFFFF6677) else Color(0x33FFFFFF), RoundedCornerShape(4.dp))
+                                .drawBehind {
+                                    val r = CornerRadius(4.dp.toPx())
+                                    drawRoundRect(
+                                        color = if (state.isAeAfLocked) CinemaCrimson else CinemaPillBgDark,
+                                        cornerRadius = r
+                                    )
+                                    drawRoundRect(
+                                        color = if (state.isAeAfLocked) CinemaCrimson else CinemaBorderActive,
+                                        cornerRadius = r,
+                                        style = Stroke(0.75.dp.toPx())
+                                    )
+                                }
                                 .clickable { viewModel.cameraController.toggleAeAfLock() }
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
                         ) {
                             Text(
                                 text = if (state.isAeAfLocked) "AE/AF LOCKED" else "LOCK AE/AF",
-                                color = Color.White,
+                                color = CinemaWhite,
                                 fontSize = 8.sp,
                                 fontWeight = FontWeight.Black,
                                 fontFamily = FontFamily.Monospace

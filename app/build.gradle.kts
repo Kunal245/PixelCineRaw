@@ -13,8 +13,8 @@ android {
         applicationId = "com.kunal.pixelcineraw"
         minSdk = 35
         targetSdk = 37
-        versionCode = 22
-        versionName = "1.4.3"
+        versionCode = 23
+        versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
