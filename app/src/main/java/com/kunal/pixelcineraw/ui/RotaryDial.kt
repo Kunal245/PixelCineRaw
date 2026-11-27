@@ -20,19 +20,26 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.ui.theme.*
@@ -1097,6 +1104,315 @@ fun CinemaWhiteBalanceWheelScrubber(
                     moveTo(cx - 4.5.dp.toPx(), 0f)
                     lineTo(cx + 4.5.dp.toPx(), 0f)
                     lineTo(cx, 5.5.dp.toPx())
+                    close()
+                }
+                drawPath(trianglePath, CinemaAmber)
+            }
+        }
+    }
+}
+
+/**
+ * v2.0.2 Butter-Smooth Vernier Exposure Compensation (EV) Wheel Scrubber (-2.0 to +2.0 EV).
+ *
+ * Glides smoothly at 60-120fps with crisp TextHandleMove detents per 0.1 EV step,
+ * pre-measured tabular labels, 12dp clipped edge fades, and inertial fling decay.
+ */
+@Composable
+fun CinemaEvWheelScrubber(
+    currentEv: Float,
+    onEvChanged: (Float) -> Unit,
+    onEvCommit: (Float) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val haptic = LocalHapticFeedback.current
+    val coroutineScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+
+    val stepWidthPx = with(density) { 84.dp.toPx() } // 84dp per 1.0 EV (8.4dp per 0.1 EV)
+    var glideEv by remember { mutableFloatStateOf(currentEv.coerceIn(-2.0f, 2.0f)) }
+    var isDragging by remember { mutableStateOf(false) }
+    var flingJob by remember { mutableStateOf<Job?>(null) }
+
+    LaunchedEffect(currentEv) {
+        if (!isDragging && flingJob?.isActive != true) {
+            glideEv = currentEv.coerceIn(-2.0f, 2.0f)
+        }
+    }
+
+    var lastHapticDeciEv by remember { mutableIntStateOf((currentEv * 10f).roundToInt()) }
+
+    val presets = remember {
+        listOf("-2.0" to -2.0f, "-1.0" to -1.0f, "0.0" to 0.0f, "+1.0" to 1.0f, "+2.0" to 2.0f)
+    }
+
+    val majorStops = remember {
+        listOf(-2.0f to "-2", -1.0f to "-1", 0.0f to "0", 1.0f to "+1", 2.0f to "+2")
+    }
+
+    val measuredLabels = remember(textMeasurer) {
+        majorStops.map { (ev, label) ->
+            val layout = textMeasurer.measure(
+                text = label,
+                style = TextStyle(
+                    color = CinemaWhite,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    fontFeatureSettings = TABULAR_NUMS
+                )
+            )
+            Triple(ev, label, layout)
+        }
+    }
+
+    val readoutValue = ((glideEv * 10f).roundToInt() / 10f).coerceIn(-2.0f, 2.0f)
+    val readoutText = if (readoutValue >= -0.05f) {
+        String.format(Locale.US, "+%.1f EV", abs(readoutValue))
+    } else {
+        String.format(Locale.US, "%.1f EV", readoutValue)
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(CinemaGlassSheetBg, RoundedCornerShape(22.dp))
+            .border(0.5.dp, CinemaSpecularTop, RoundedCornerShape(22.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "EXPOSURE BIAS (EV)",
+                    color = CinemaAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(
+                    onClick = {
+                        flingJob?.cancel()
+                        isDragging = false
+                        glideEv = 0.0f
+                        lastHapticDeciEv = 0
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onEvCommit(0.0f)
+                    },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                ) {
+                    Text(
+                        text = "RESET 0 EV",
+                        color = CinemaCyan,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.size(24.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close Dial",
+                    tint = CinemaWhite
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(2.dp))
+
+        Text(
+            text = readoutText,
+            color = if (abs(readoutValue) > 0.05f) CinemaAmber else CinemaWhite,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Black,
+            fontFamily = FontFamily.Monospace,
+            style = TabularDialStyle
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            presets.forEach { (label, targetEv) ->
+                val isSelected = abs(readoutValue - targetEv) < 0.05f
+                Box(
+                    modifier = Modifier
+                        .drawBehind {
+                            val r = CornerRadius(5.dp.toPx())
+                            drawRoundRect(color = if (isSelected) CinemaAmber else CinemaElevated, cornerRadius = r)
+                            drawRoundRect(
+                                color = if (isSelected) CinemaAmber else CinemaBorderInactive,
+                                cornerRadius = r,
+                                style = Stroke(0.75.dp.toPx())
+                            )
+                        }
+                        .clickable {
+                            flingJob?.cancel()
+                            isDragging = false
+                            glideEv = targetEv
+                            lastHapticDeciEv = (targetEv * 10f).roundToInt()
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onEvCommit(targetEv)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) CinemaObsidian else CinemaWhite,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        style = TabularDialStyle
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0x66060709), RoundedCornerShape(12.dp))
+                .border(0.5.dp, CinemaSpecularBottom, RoundedCornerShape(12.dp))
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        flingJob?.cancel()
+                        isDragging = true
+                        val evDelta = -delta / stepWidthPx
+                        glideEv = (glideEv + evDelta).coerceIn(-2.0f, 2.0f)
+                        val deci = (glideEv * 10f).roundToInt().coerceIn(-20, 20)
+                        if (deci != lastHapticDeciEv) {
+                            lastHapticDeciEv = deci
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onEvChanged(deci / 10f)
+                        }
+                    },
+                    onDragStopped = { velocity ->
+                        if (abs(velocity) > 120f) {
+                            flingJob = coroutineScope.launch {
+                                val anim = Animatable(glideEv).apply { updateBounds(-2.0f, 2.0f) }
+                                anim.animateDecay(
+                                    initialVelocity = -velocity / stepWidthPx,
+                                    animationSpec = exponentialDecay(frictionMultiplier = 2.4f)
+                                ) {
+                                    glideEv = value
+                                    val deci = (glideEv * 10f).roundToInt().coerceIn(-20, 20)
+                                    if (deci != lastHapticDeciEv) {
+                                        lastHapticDeciEv = deci
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        onEvChanged(deci / 10f)
+                                    }
+                                }
+                                val finalEv = ((glideEv * 10f).roundToInt().coerceIn(-20, 20)) / 10f
+                                glideEv = finalEv
+                                isDragging = false
+                                onEvCommit(finalEv)
+                            }
+                        } else {
+                            val finalEv = ((glideEv * 10f).roundToInt().coerceIn(-20, 20)) / 10f
+                            glideEv = finalEv
+                            isDragging = false
+                            onEvCommit(finalEv)
+                        }
+                    }
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val cx = size.width / 2f
+                val w = size.width
+                val h = size.height
+
+                // Minor 0.1 EV ticks & medium 0.5 EV ticks across [-2.0, +2.0] (41 ticks)
+                for (step in -20..20) {
+                    val ev = step / 10f
+                    val tickX = cx + (ev - glideEv) * stepWidthPx
+                    if (tickX in -8f..(w + 8f)) {
+                        val isMajor = step % 10 == 0
+                        val isHalf = step % 5 == 0
+                        val distNorm = (abs(tickX - cx) / (w * 0.5f)).coerceIn(0f, 1f)
+                        val alphaScale = (1f - distNorm * 0.65f)
+                        val tickH = when {
+                            isMajor -> 17.dp.toPx()
+                            isHalf -> 12.dp.toPx()
+                            else -> 7.dp.toPx()
+                        }
+                        val tickY = 6.dp.toPx()
+                        drawLine(
+                            color = when {
+                                step == 0 -> CinemaAmber.copy(alpha = 0.9f * alphaScale)
+                                isMajor -> CinemaWhite.copy(alpha = 0.88f * alphaScale)
+                                isHalf -> CinemaWhite.copy(alpha = 0.55f * alphaScale)
+                                else -> CinemaWhite.copy(alpha = 0.28f * alphaScale)
+                            },
+                            start = Offset(tickX, tickY),
+                            end = Offset(tickX, tickY + tickH),
+                            strokeWidth = if (isMajor) 1.5.dp.toPx() else 1.dp.toPx()
+                        )
+                    }
+                }
+
+                // Major integer labels (-2, -1, 0, +1, +2)
+                for ((ev, _, layout) in measuredLabels) {
+                    val markX = cx + (ev - glideEv) * stepWidthPx
+                    if (markX in -24f..(w + 24f)) {
+                        val distNorm = (abs(markX - cx) / (w * 0.5f)).coerceIn(0f, 1f)
+                        val textAlpha = (1f - distNorm * 0.7f).coerceIn(0f, 1f)
+                        drawText(
+                            textLayoutResult = layout,
+                            topLeft = Offset(markX - layout.size.width / 2f, 27.dp.toPx()),
+                            alpha = textAlpha
+                        )
+                    }
+                }
+
+                // Soft edge fades inside clipped 12dp container
+                val fadeW = 28.dp.toPx()
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(Color(0xE6060709), Color.Transparent),
+                        startX = 0f,
+                        endX = fadeW
+                    ),
+                    size = Size(fadeW, h)
+                )
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(Color.Transparent, Color(0xE6060709)),
+                        startX = w - fadeW,
+                        endX = w
+                    ),
+                    topLeft = Offset(w - fadeW, 0f),
+                    size = Size(fadeW, h)
+                )
+
+                // Center Amber Index Needle
+                drawLine(
+                    color = CinemaAmber,
+                    start = Offset(cx, 0f),
+                    end = Offset(cx, h),
+                    strokeWidth = 2.dp.toPx()
+                )
+                val trianglePath = Path().apply {
+                    moveTo(cx - 4.dp.toPx(), 0f)
+                    lineTo(cx + 4.dp.toPx(), 0f)
+                    lineTo(cx, 5.dp.toPx())
                     close()
                 }
                 drawPath(trianglePath, CinemaAmber)

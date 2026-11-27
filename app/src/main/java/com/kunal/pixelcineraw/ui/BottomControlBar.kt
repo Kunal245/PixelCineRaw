@@ -53,6 +53,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kunal.pixelcineraw.camera.*
 import com.kunal.pixelcineraw.ui.theme.*
+import java.util.Locale
+import kotlin.math.abs
 
 private val TabularBottomStyle = TextStyle(fontFeatureSettings = TABULAR_NUMS)
 
@@ -175,8 +177,8 @@ fun CinemaShutterButton(
 }
 
 /**
- * v2.0.0 Row 2 — Leica Lux / Kino 5 Crisp Parameter Pills:
- * `ISO`, `SHUTTER`, `WB`, `LUT`, `MONITOR`.
+ * v2.0.2 Row 2 — Leica Lux / Kino 6 Crisp Parameter Pills:
+ * `ISO`, `SHUTTER`, `EV`, `WB`, `LUT`, `MONITOR`.
  */
 @Composable
 fun CinemaParameterPillStrip(
@@ -184,6 +186,7 @@ fun CinemaParameterPillStrip(
     activeDial: ActiveDial,
     onIsoClick: () -> Unit,
     onShutterClick: () -> Unit,
+    onEvClick: () -> Unit,
     onWbClick: () -> Unit,
     onLutClick: () -> Unit,
     onMonitorClick: () -> Unit,
@@ -201,8 +204,8 @@ fun CinemaParameterPillStrip(
                     style = Stroke(width = 0.5.dp.toPx())
                 )
             }
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+            .padding(horizontal = 5.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         val isoVal = if (state.isAutoIso) "A·${state.iso}" else "${state.iso}"
@@ -225,6 +228,23 @@ fun CinemaParameterPillStrip(
             isSelected = activeDial == ActiveDial.SHUTTER,
             isAuto = !state.isManualExposure,
             onClick = onShutterClick
+        )
+
+        val evVal = state.evCompensation
+        val evActive = abs(evVal) > 0.05f
+        val evDisplay = if (evVal >= -0.05f) {
+            String.format(Locale.US, "+%.1f", abs(evVal))
+        } else {
+            String.format(Locale.US, "%.1f", evVal)
+        }
+        DeckParameterPill(
+            label = "EV",
+            value = evDisplay,
+            isSelected = activeDial == ActiveDial.EV,
+            isAuto = false,
+            showModeDot = false,
+            accentColor = if (evActive) CinemaAmber else null,
+            onClick = onEvClick
         )
 
         val wbVal = if (state.isManualWb) "${state.wbKelvin}K" else "AWB"
@@ -302,7 +322,7 @@ private fun DeckParameterPill(
                 }
             }
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(

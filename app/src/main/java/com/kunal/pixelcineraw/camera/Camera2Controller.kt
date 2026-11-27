@@ -146,6 +146,18 @@ class Camera2Controller(
     // Reusable pre-allocated Rect for zero-allocation crop regions
     private val cachedCropRect = Rect()
 
+    // 30ms Coalesced Exposure Compensation (EV) Throttle State
+    private var lastEvRequestTimeMs = 0L
+    private var isEvApplyScheduled = false
+    private val pendingEvApplyRunnable = Runnable {
+        isEvApplyScheduled = false
+        lastEvRequestTimeMs = SystemClock.uptimeMillis()
+        createAndSetRepeatingRequest()
+    }
+    private val persistEvRunnable = Runnable {
+        persistState()
+    }
+
     // Throttled UI Readouts for Auto Exposure & Focus (prevents recomposition flooding)
     private var lastAutoExposureReadoutTime = 0L
     private var lastAutoFocusReadoutTime = 0L
@@ -325,26 +337,10 @@ class Camera2Controller(
 
             // Build list of supported cinema custom resolutions from selected sensor capabilities
             val initialSpec = mainWideSpec ?: _probedSensors.firstOrNull()
-            val probedResolutions = mutableListOf<CustomResolution>()
+            val probedResolutions = buildSupportedResolutions(initialSpec)
 
             if (initialSpec != null) {
-                // Collect all valid hardware output sizes for preview/video
-                val allVideoSizes: List<Size> = (initialSpec.videoSizes + initialSpec.previewSizes)
-                    .filter { it.width >= 640 && it.height >= 480 } // filter out tiny thumbnails
-                    .distinctBy { "${it.width}x${it.height}" }
-                    .sortedWith(compareByDescending<Size> { it.width * it.height }.thenByDescending { it.width })
-
-                for (size in allVideoSizes) {
-                    probedResolutions.add(CustomResolution.fromSize(size.width, size.height))
-                }
-            }
-
-            if (probedResolutions.isEmpty()) {
-                probedResolutions.add(CustomResolution.FHD_1080P)
-                probedResolutions.add(CustomResolution.UHD_4K)
-            }
-
-            if (initialSpec != null) {
+                val (minZ, maxZ) = zoomBoundsForSpec(initialSpec)
                 _state.update { current ->
                     val matchedRes = probedResolutions.find { r ->
                         r.width == current.videoResolution.width && r.height == current.videoResolution.height
@@ -357,13 +353,60 @@ class Camera2Controller(
                         currentSensorSpec = initialSpec,
                         supportedResolutions = probedResolutions,
                         videoResolution = matchedRes,
-                        iso = safeIso
+                        iso = safeIso,
+                        minZoomRatio = minZ,
+                        maxZoomRatio = maxZ,
+                        zoomRatio = current.zoomRatio.coerceIn(minZ, maxZ)
                     )
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to probe camera sensors", e)
         }
+    }
+
+    private fun buildSupportedResolutions(spec: CameraSensorSpec?): List<CustomResolution> {
+        val resolutions = mutableListOf<CustomResolution>()
+        if (spec != null) {
+            val allVideoSizes: List<Size> = (spec.videoSizes + spec.previewSizes)
+                .filter { it.width >= 640 && it.height >= 480 }
+                .distinctBy { "${it.width}x${it.height}" }
+                .sortedWith(compareByDescending<Size> { it.width * it.height }.thenByDescending { it.width })
+            for (size in allVideoSizes) {
+                resolutions.add(CustomResolution.fromSize(size.width, size.height))
+            }
+        }
+        if (resolutions.isEmpty()) {
+            resolutions.add(CustomResolution.FHD_1080P)
+            resolutions.add(CustomResolution.UHD_4K)
+        }
+        return resolutions
+    }
+
+    private fun zoomBoundsForSpec(spec: CameraSensorSpec): Pair<Float, Float> {
+        val minZ = if (spec.zoomRatioRange.lower < 1.0f) 0.5f else spec.zoomRatioRange.lower
+        val maxZ = max(minZ, spec.zoomRatioRange.upper)
+        return minZ to maxZ
+    }
+
+    private fun clampTargetFpsForSpec(spec: CameraSensorSpec, desiredFps: Int): Int {
+        val ranges = try {
+            getCameraCharacteristics(spec.cameraId)
+                .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        } catch (_: Exception) {
+            null
+        } ?: return desiredFps
+
+        if (ranges.any { it.lower == desiredFps && it.upper == desiredFps }) {
+            return desiredFps
+        }
+        val bestFixed = ranges
+            .filter { it.lower == it.upper && it.upper <= desiredFps }
+            .maxByOrNull { it.upper }?.upper
+        if (bestFixed != null) return bestFixed
+
+        val maxUpper = ranges.maxOfOrNull { it.upper } ?: desiredFps
+        return minOf(desiredFps, maxUpper).coerceAtLeast(15)
     }
 
     fun getDisplayRotation(): Int {
@@ -603,6 +646,7 @@ class Camera2Controller(
             val prevW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
             val prevH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
             renderer.setDisplayRotation(getDisplayRotation())
+            renderer.setCameraOrientation(spec.isFrontCamera, spec.sensorOrientation)
             renderer.setPreviewSurface(surface, prevW, prevH, streamSize.width, streamSize.height)
             renderer.setColorMode(_state.value.colorProfile)
 
@@ -617,7 +661,12 @@ class Camera2Controller(
             val outputConfigs = mutableListOf<OutputConfiguration>()
             val glInputSurface = renderer.getCameraInputSurface()
             if (glInputSurface != null && glInputSurface.isValid) {
-                outputConfigs.add(OutputConfiguration(glInputSurface))
+                val glOutputConfig = OutputConfiguration(glInputSurface).apply {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        setMirrorMode(OutputConfiguration.MIRROR_MODE_NONE)
+                    }
+                }
+                outputConfigs.add(glOutputConfig)
             } else {
                 Log.w(TAG, "GL input surface invalid, falling back to direct SurfaceView")
                 outputConfigs.add(OutputConfiguration(surface))
@@ -797,8 +846,9 @@ class Camera2Controller(
         spec: CameraSensorSpec,
         state: CinemaState
     ) {
-        // 1. Locked Constant Target FPS Range [targetFps, targetFps]
-        val fpsRange = Range(state.targetFps, state.targetFps)
+        // 1. Locked Constant Target FPS Range [effectiveFps, effectiveFps]
+        val effectiveFps = clampTargetFpsForSpec(spec, state.targetFps)
+        val fpsRange = Range(effectiveFps, effectiveFps)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
         // 2. Anti-Banding Mode (50Hz / 60Hz / Auto / Off)
@@ -1211,17 +1261,22 @@ class Camera2Controller(
         }
 
         val isSwitchingDevice = targetSpec != null && targetSpec.cameraId != cameraDevice?.id
+        val (minZ, maxZ) = if (targetSpec != null) zoomBoundsForSpec(targetSpec) else (_state.value.minZoomRatio to _state.value.maxZoomRatio)
+        val clampedZoom = targetZoom.coerceIn(minZ, maxZ)
 
         _state.update {
             it.copy(
                 selectedLens = lens,
-                zoomRatio = targetZoom,
+                zoomRatio = clampedZoom,
+                minZoomRatio = minZ,
+                maxZoomRatio = maxZ,
                 currentSensorSpec = targetSpec ?: it.currentSensorSpec,
                 supportedResolutions = if (probedResolutions.isNotEmpty()) probedResolutions else it.supportedResolutions,
                 isTransitioningLens = isSwitchingDevice,
                 transitionScale = if (lens == LensSelection.ULTRAWIDE) 0.95f else 1.05f
             )
         }
+        pendingZoomRatio.set(clampedZoom)
 
         val isoRange = getActiveSensorIsoRange()
         if (_state.value.iso !in isoRange.lower..isoRange.upper) {
@@ -2159,9 +2214,45 @@ class Camera2Controller(
     }
 
     fun setEvCompensation(ev: Float) {
-        _state.update { it.copy(evCompensation = ev.coerceIn(-2.0f, 2.0f)) }
+        val clamped = (Math.round(ev * 10f) / 10f).coerceIn(-2.0f, 2.0f)
+        if (_state.value.evCompensation == clamped) return
+        _state.update { it.copy(evCompensation = clamped) }
+
+        val handler = cameraHandler
+        if (handler != null) {
+            val nowMs = SystemClock.uptimeMillis()
+            val elapsed = nowMs - lastEvRequestTimeMs
+            if (elapsed >= 30L) {
+                handler.removeCallbacks(pendingEvApplyRunnable)
+                isEvApplyScheduled = false
+                lastEvRequestTimeMs = nowMs
+                handler.post { createAndSetRepeatingRequest() }
+            } else if (!isEvApplyScheduled) {
+                isEvApplyScheduled = true
+                handler.postDelayed(pendingEvApplyRunnable, (30L - elapsed).coerceAtLeast(1L))
+            }
+            handler.removeCallbacks(persistEvRunnable)
+            handler.postDelayed(persistEvRunnable, 300L)
+        } else {
+            persistState()
+            createAndSetRepeatingRequest()
+        }
+    }
+
+    fun commitEvCompensation(ev: Float) {
+        val clamped = (Math.round(ev * 10f) / 10f).coerceIn(-2.0f, 2.0f)
+        _state.update { it.copy(evCompensation = clamped) }
+        val handler = cameraHandler
+        if (handler != null) {
+            handler.removeCallbacks(pendingEvApplyRunnable)
+            handler.removeCallbacks(persistEvRunnable)
+            isEvApplyScheduled = false
+            lastEvRequestTimeMs = SystemClock.uptimeMillis()
+            handler.post { createAndSetRepeatingRequest() }
+        } else {
+            createAndSetRepeatingRequest()
+        }
         persistState()
-        createAndSetRepeatingRequest()
     }
 
     fun toggleAeAfLock() {
@@ -2322,40 +2413,56 @@ class Camera2Controller(
         }
 
         val isCurrentlyFront = _state.value.isFrontCamera
-        if (isCurrentlyFront) {
-            // Switch to Back Camera
-            val targetSpec = mainCameraSpec ?: _probedSensors.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK } ?: return
-            _state.update {
-                it.copy(
-                    isFrontCamera = false,
-                    selectedLens = LensSelection.WIDE_1X,
-                    availableLenses = listOf(LensSelection.ULTRAWIDE, LensSelection.WIDE_1X, LensSelection.CROP_2X),
-                    currentSensorSpec = targetSpec,
-                    zoomRatio = 1.0f,
-                    focusMode = FocusMode.AUTO_CONTINUOUS,
-                    isTorchOn = false
-                )
-            }
-            hlgGlRenderer?.setFrontCamera(false)
-            openCamera(targetSpec.cameraId)
+        val targetIsFront = !isCurrentlyFront
+        val targetSpec = if (isCurrentlyFront) {
+            mainCameraSpec ?: _probedSensors.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }
         } else {
-            // Switch to Front Camera
-            val targetSpec = frontCameraSpec ?: _probedSensors.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_FRONT } ?: return
-            _state.update {
-                it.copy(
-                    isFrontCamera = true,
-                    selectedLens = LensSelection.FRONT,
-                    availableLenses = listOf(LensSelection.FRONT),
-                    currentSensorSpec = targetSpec,
-                    zoomRatio = 1.0f,
-                    focusMode = FocusMode.AUTO_CONTINUOUS,
-                    isTorchOn = false,
-                    isAeAfLocked = false
-                )
-            }
-            hlgGlRenderer?.setFrontCamera(true)
-            openCamera(targetSpec.cameraId)
+            frontCameraSpec ?: _probedSensors.firstOrNull { it.lensFacing == CameraCharacteristics.LENS_FACING_FRONT }
+        } ?: return
+
+        val (minZ, maxZ) = zoomBoundsForSpec(targetSpec)
+        val clampedZoom = 1.0f.coerceIn(minZ, maxZ)
+        val probedResolutions = buildSupportedResolutions(targetSpec)
+        val currentRes = _state.value.videoResolution
+        val matchedRes = probedResolutions.find { it.width == currentRes.width && it.height == currentRes.height }
+            ?: probedResolutions.firstOrNull { it.width == 1920 && it.height == 1080 }
+            ?: probedResolutions.firstOrNull()
+            ?: currentRes
+        val safeFps = clampTargetFpsForSpec(targetSpec, _state.value.targetFps)
+        val safeIso = _state.value.iso.coerceIn(targetSpec.isoRange.lower, targetSpec.isoRange.upper)
+
+        _state.update {
+            it.copy(
+                isFrontCamera = targetIsFront,
+                selectedLens = if (targetIsFront) LensSelection.FRONT else LensSelection.WIDE_1X,
+                availableLenses = if (targetIsFront) {
+                    listOf(LensSelection.FRONT)
+                } else {
+                    listOf(LensSelection.ULTRAWIDE, LensSelection.WIDE_1X, LensSelection.CROP_2X)
+                },
+                currentSensorSpec = targetSpec,
+                supportedResolutions = probedResolutions,
+                videoResolution = matchedRes,
+                targetFps = safeFps,
+                iso = safeIso,
+                minZoomRatio = minZ,
+                maxZoomRatio = maxZ,
+                zoomRatio = clampedZoom,
+                focusMode = FocusMode.AUTO_CONTINUOUS,
+                isTorchOn = false,
+                isAeAfLocked = if (targetIsFront) false else it.isAeAfLocked
+            )
         }
+
+        pendingZoomRatio.set(clampedZoom)
+        lastAppliedZoomRatio = clampedZoom
+        smoothedZoomRatio = clampedZoom
+        pendingEffectiveIso.set(safeIso.toFloat())
+        currentEffectiveIso = safeIso.toFloat()
+
+        hlgGlRenderer?.setCameraOrientation(targetIsFront, targetSpec.sensorOrientation)
+        hlgGlRenderer?.setTargetFps(safeFps)
+        openCamera(targetSpec.cameraId)
     }
 
     // --- Pro Cinema Suite Controls ---

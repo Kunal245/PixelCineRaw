@@ -456,6 +456,10 @@ void main() {
         private set
 
     @Volatile
+    var sensorOrientation: Int = 90
+        private set
+
+    @Volatile
     var isFalseColorEnabled: Boolean = false
         private set
 
@@ -477,6 +481,13 @@ void main() {
 
     fun setFrontCamera(isFront: Boolean) {
         isFrontCamera = isFront
+        hasLoggedFirstFrame = false
+    }
+
+    fun setCameraOrientation(isFront: Boolean, sensorOrientation: Int) {
+        this.isFrontCamera = isFront
+        this.sensorOrientation = sensorOrientation
+        this.hasLoggedFirstFrame = false
     }
 
     fun setFalseColor(enabled: Boolean) {
@@ -613,20 +624,14 @@ void main() {
 
     private fun computePreviewMatrix(stMatrix: FloatArray, rotation: Int, isFront: Boolean): FloatArray {
         System.arraycopy(stMatrix, 0, previewMatrix, 0, 16)
-        val rotationDeg = if (isFront) {
-            when (rotation) {
-                Surface.ROTATION_90 -> 90f
-                Surface.ROTATION_270 -> -90f
-                Surface.ROTATION_180 -> 0f
-                else -> 180f // ROTATION_0 (portrait)
-            }
-        } else {
-            when (rotation) {
-                Surface.ROTATION_90 -> -90f
-                Surface.ROTATION_270 -> 90f
-                Surface.ROTATION_180 -> 180f
-                else -> 0f // ROTATION_0 (portrait)
-            }
+        // OutputConfiguration.MIRROR_MODE_NONE ensures SurfaceTexture.getTransformMatrix(stMatrix)
+        // aligns both Rear (90 deg) and Front (270 deg) sensors upright in ROTATION_0 portrait
+        // without baked-in HAL mirroring. Screen-relative rotation is identical for both sensors.
+        val rotationDeg = when (rotation) {
+            Surface.ROTATION_90 -> -90f
+            Surface.ROTATION_270 -> 90f
+            Surface.ROTATION_180 -> 180f
+            else -> 0f // ROTATION_0 (portrait)
         }
         if (rotationDeg != 0f) {
             Matrix.translateM(previewMatrix, 0, 0.5f, 0.5f, 0.0f)
@@ -635,7 +640,7 @@ void main() {
         }
 
         if (isFront) {
-            // Horizontal mirror preview for selfie/front camera viewfinder
+            // Horizontal mirror preview in screen space for natural selfie viewfinder across all rotations
             Matrix.translateM(previewMatrix, 0, 0.5f, 0.5f, 0.0f)
             Matrix.scaleM(previewMatrix, 0, -1.0f, 1.0f, 1.0f)
             Matrix.translateM(previewMatrix, 0, -0.5f, -0.5f, 0.0f)
@@ -644,10 +649,11 @@ void main() {
         return previewMatrix
     }
 
-    private fun computeLandscapeEncoderMatrix(stMatrix: FloatArray, isFront: Boolean): FloatArray {
+    private fun computeLandscapeEncoderMatrix(stMatrix: FloatArray): FloatArray {
         System.arraycopy(stMatrix, 0, encoderMatrix, 0, 16)
-        // Native ROTATION_90 landscape coordinates (un-mirrored) so MediaCodec always encodes hardware-aligned landscape frames
-        val rotationDeg = if (isFront) 90f else -90f
+        // Native ROTATION_90 landscape coordinates (un-mirrored) so MediaCodec always encodes
+        // hardware-aligned upright, true-to-life landscape frames for both Rear and Front cameras.
+        val rotationDeg = -90f
         Matrix.translateM(encoderMatrix, 0, 0.5f, 0.5f, 0.0f)
         Matrix.rotateM(encoderMatrix, 0, rotationDeg, 0.0f, 0.0f, 1.0f)
         Matrix.translateM(encoderMatrix, 0, -0.5f, -0.5f, 0.0f)
@@ -1361,7 +1367,7 @@ void main() {
 
             if (!hasLoggedFirstFrame) {
                 hasLoggedFirstFrame = true
-                Log.d("PixelCineHDR", "GL frame rendered successfully (mode=$currentColorMode)")
+                Log.d("PixelCineHDR", "GL frame rendered (mode=$currentColorMode, front=$isFrontCamera, sensorOri=$sensorOrientation, rot=$displayRotation, stMatrix=${texMatrix.joinToString(",") { "%.2f".format(it) }})")
             }
 
             // 3. Render pipeline: Single-pass 10-bit GL_RGB10_A2 FBO when recording & shaders match,
@@ -1391,7 +1397,7 @@ void main() {
                 if (isGles3) {
                     GLES30.glInvalidateFramebuffer(GLES30.GL_FRAMEBUFFER, 1, invalidateFboAttachments, 0)
                 }
-                val fboMatrix = computeLandscapeEncoderMatrix(texMatrix, isFrontCamera)
+                val fboMatrix = computeLandscapeEncoderMatrix(texMatrix)
                 val fboAspect = computeAspectMatrix(
                     fboAspectMatrix, streamWidth, streamHeight, fboWidth, fboHeight, Surface.ROTATION_90, 1.0f
                 )
@@ -1467,7 +1473,7 @@ void main() {
                         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                        val eMatrix = computeLandscapeEncoderMatrix(texMatrix, isFrontCamera)
+                        val eMatrix = computeLandscapeEncoderMatrix(texMatrix)
                         val eAspect = computeAspectMatrix(
                             encoderAspectMatrix, streamWidth, streamHeight, encW, encH, Surface.ROTATION_90, 1.0f
                         )

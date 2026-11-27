@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -115,8 +116,12 @@ fun CinemaZoomHub(
     val onZoomChangedState = rememberUpdatedState(onZoomChanged)
 
     val presets = remember(minZoom, maxZoom) {
-        val all = listOf(0.5f to "0.5×", 1.0f to "1×", 2.0f to "2×")
-        val filtered = all.filter { (ratio, _) -> ratio >= minZoom - 0.05f && ratio <= maxZoom + 0.05f }
+        val candidates = if (minZoom < 1.0f) {
+            listOf(0.5f to "0.5×", 1.0f to "1×", 2.0f to "2×", 5.0f to "5×")
+        } else {
+            listOf(1.0f to "1×", 1.5f to "1.5×", 2.0f to "2×")
+        }
+        val filtered = candidates.filter { (ratio, _) -> ratio >= minZoom - 0.05f && ratio <= maxZoom + 0.05f }
         if (filtered.isNotEmpty()) filtered else listOf(minZoom to String.format(Locale.US, "%.1f×", minZoom))
     }
     val presetsState = rememberUpdatedState(presets)
@@ -134,10 +139,12 @@ fun CinemaZoomHub(
         val milestone = when {
             abs(zoom - 0.5f) < 0.04f -> 0
             abs(zoom - 1.0f) < 0.04f -> 1
+            abs(zoom - 1.5f) < 0.04f -> 15
             abs(zoom - 2.0f) < 0.04f -> 2
             abs(zoom - 3.0f) < 0.04f -> 3
             abs(zoom - 5.0f) < 0.05f -> 5
             abs(zoom - 8.0f) < 0.06f -> 8
+            abs(zoom - 10.0f) < 0.06f -> 10
             else -> -1
         }
         if (milestone != -1 && milestone != lastHapticMilestone) {
@@ -170,7 +177,7 @@ fun CinemaZoomHub(
     )
     val expandProgressState = rememberUpdatedState(expandProgress)
 
-    val collapsedWidthDp = (presets.size * 44 + 14).coerceAtLeast(106).dp
+    val collapsedWidthDp = (presets.size * 42 + 16).coerceIn(106, 196).dp
     val expandedWidthDp = 284.dp
     val collapsedHeightDp = 36.dp
     val expandedHeightDp = 48.dp
@@ -199,14 +206,28 @@ fun CinemaZoomHub(
     }
 
     val majorStops = remember(minZoom, maxZoom) {
-        listOf(
-            0.5f to "0.5×",
-            1.0f to "1×",
-            2.0f to "2×",
-            3.0f to "3×",
-            5.0f to "5×",
-            8.0f to "8×"
-        ).filter { (z, _) -> z >= minZoom - 0.05f && z <= maxZoom + 0.05f }
+        val stops = if (minZoom < 1.0f) {
+            listOf(
+                0.5f to "0.5×",
+                1.0f to "1×",
+                2.0f to "2×",
+                3.0f to "3×",
+                5.0f to "5×",
+                8.0f to "8×",
+                10.0f to "10×"
+            )
+        } else {
+            listOf(
+                1.0f to "1×",
+                1.5f to "1.5×",
+                2.0f to "2×",
+                3.0f to "3×",
+                5.0f to "5×",
+                8.0f to "8×",
+                10.0f to "10×"
+            )
+        }
+        stops.filter { (z, _) -> z >= minZoom - 0.05f && z <= maxZoom + 0.05f }
     }
 
     val measuredLabels = remember(textMeasurer, majorStops) {
@@ -226,7 +247,12 @@ fun CinemaZoomHub(
     }
 
     val mediumStopZooms = remember(minZoom, maxZoom) {
-        listOf(0.7f, 1.5f, 2.5f, 4.0f, 6.5f).filter { it in minZoom..maxZoom }
+        val candidates = if (minZoom < 1.0f) {
+            listOf(0.7f, 1.5f, 2.5f, 4.0f, 6.5f)
+        } else {
+            listOf(1.2f, 2.5f, 4.0f, 6.5f)
+        }
+        candidates.filter { it in minZoom..maxZoom }
     }
 
     Box(
@@ -280,7 +306,7 @@ fun CinemaZoomHub(
                     val drawH = ch + (eh - ch) * p
                     val left = (size.width - drawW) / 2f
                     val top = (size.height - drawH) / 2f
-                    val cr = (18.dp.toPx() + (16.dp.toPx() - 18.dp.toPx()) * p)
+                    val cr = (18.dp.toPx() + (24.dp.toPx() - 18.dp.toPx()) * p)
                     val corner = CornerRadius(cr, cr)
 
                     drawRoundRect(
@@ -467,10 +493,11 @@ fun CinemaZoomHub(
                 }
             }
 
-            // LAYER 2: Expanded Cylindrical Perspective Tick Wheel
+            // LAYER 2: Expanded Cylindrical Perspective Tick Wheel (clipped cleanly to 24dp pill radius)
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
+                    .clip(RoundedCornerShape(24.dp))
                     .graphicsLayer {
                         alpha = ((expandProgress - 0.15f) / 0.85f).coerceIn(0f, 1f)
                     }

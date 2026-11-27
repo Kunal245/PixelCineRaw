@@ -88,9 +88,6 @@ fun CinemaScreen(
             1_000_000_000L / 24
         )
     }
-    val evValues = remember {
-        listOf(-2.0f, -1.7f, -1.3f, -1.0f, -0.7f, -0.3f, 0.0f, 0.3f, 0.7f, 1.0f, 1.3f, 1.7f, 2.0f)
-    }
     val bitrateValues = remember {
         listOf(50, 80, 100, 120, 150, 180, 200, 240, 280)
     }
@@ -274,12 +271,13 @@ fun CinemaScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Row 2 — 5 Crisp Parameter Pills (ISO, SHUTTER, WB, LUT, MONITOR)
+                    // Row 2 — 6 Crisp Parameter Pills (ISO, SHUTTER, EV, WB, LUT, MONITOR)
                     CinemaParameterPillStrip(
                         state = state,
                         activeDial = activeDial,
                         onIsoClick = { toggleDial(ActiveDial.ISO) },
                         onShutterClick = { toggleDial(ActiveDial.SHUTTER) },
+                        onEvClick = { toggleDial(ActiveDial.EV) },
                         onWbClick = { toggleDial(ActiveDial.WHITE_BALANCE) },
                         onLutClick = { toggleDial(ActiveDial.LUT) },
                         onMonitorClick = { toggleDial(ActiveDial.TOOLS) }
@@ -399,7 +397,6 @@ fun CinemaScreen(
                             fpsValues = fpsValues,
                             shutterAngles = shutterAngles,
                             shutterSpeedsNs = shutterSpeedsNs,
-                            evValues = evValues,
                             bitrateValues = bitrateValues,
                             onSwitchToDial = { activeDial = it },
                             onOpenProSuite = {
@@ -435,6 +432,7 @@ fun CinemaScreen(
                         activeDial = activeDial,
                         onIsoClick = { toggleDial(ActiveDial.ISO) },
                         onShutterClick = { toggleDial(ActiveDial.SHUTTER) },
+                        onEvClick = { toggleDial(ActiveDial.EV) },
                         onWbClick = { toggleDial(ActiveDial.WHITE_BALANCE) },
                         onLutClick = { toggleDial(ActiveDial.LUT) },
                         onMonitorClick = { toggleDial(ActiveDial.TOOLS) }
@@ -562,7 +560,6 @@ fun CinemaScreen(
                             fpsValues = fpsValues,
                             shutterAngles = shutterAngles,
                             shutterSpeedsNs = shutterSpeedsNs,
-                            evValues = evValues,
                             bitrateValues = bitrateValues,
                             onSwitchToDial = { activeDial = it },
                             onOpenProSuite = {
@@ -684,7 +681,6 @@ private fun CinemaActiveDialScrubber(
     fpsValues: List<Int>,
     shutterAngles: List<Float>,
     shutterSpeedsNs: List<Long>,
-    evValues: List<Float>,
     bitrateValues: List<Int>,
     onSwitchToDial: (ActiveDial) -> Unit,
     onOpenProSuite: () -> Unit,
@@ -795,23 +791,11 @@ private fun CinemaActiveDialScrubber(
             )
         }
         ActiveDial.EV -> {
-            val currentEv = state.evCompensation
-            val nearestIdx = evValues.indices.minByOrNull { abs(evValues[it] - currentEv) } ?: 6
-            RotaryWheelScrubber(
-                title = "Exposure Compensation (EV)",
-                items = evValues,
-                selectedIndex = nearestIdx,
-                onItemSelected = { _, ev -> viewModel.cameraController.setEvCompensation(ev) },
-                formatItem = { ev ->
-                    if (ev > 0f) "+%.1f EV".format(ev) else "%.1f EV".format(ev)
-                },
-                onClose = onClose,
-                presets = listOf("-2.0" to 0, "-1.0" to 3, "0.0" to 6, "+1.0" to 9, "+2.0" to 12),
-                headerActions = {
-                    TextButton(onClick = { viewModel.cameraController.setEvCompensation(0.0f) }) {
-                        Text("RESET 0 EV", color = CinemaCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
+            CinemaEvWheelScrubber(
+                currentEv = state.evCompensation,
+                onEvChanged = { ev -> viewModel.cameraController.setEvCompensation(ev) },
+                onEvCommit = { ev -> viewModel.cameraController.commitEvCompensation(ev) },
+                onClose = onClose
             )
         }
         ActiveDial.BITRATE -> {
