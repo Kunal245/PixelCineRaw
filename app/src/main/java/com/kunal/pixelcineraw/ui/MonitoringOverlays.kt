@@ -38,41 +38,53 @@ fun MonitoringOverlays(
     state: CinemaState,
     modifier: Modifier = Modifier
 ) {
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+    val vRes = state.videoResolution
+    val frameW = if (isPortrait) minOf(vRes.width, vRes.height).coerceAtLeast(1) else maxOf(vRes.width, vRes.height).coerceAtLeast(1)
+    val frameH = if (isPortrait) maxOf(vRes.width, vRes.height).coerceAtLeast(1) else minOf(vRes.width, vRes.height).coerceAtLeast(1)
+    val captureAspect = frameW.toFloat() / frameH.toFloat()
+
     Box(modifier = modifier.fillMaxSize()) {
 
-        // 1. Frame Guides (CinemaScope 2.39:1, 16:9, 4:3)
-        if (state.frameGuide != FrameGuide.NONE) {
-            FrameGuideOverlay(guide = state.frameGuide)
-        }
+        // Framing & Exposure Overlays fitted accurately to the active capture aspect ratio
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .aspectRatio(captureAspect)
+        ) {
+            // 1. Frame Guides (CinemaScope 2.39:1, 16:9, 4:3)
+            if (state.frameGuide != FrameGuide.NONE) {
+                FrameGuideOverlay(guide = state.frameGuide)
+            }
 
-        // 2. Rule of Thirds Grid & Center Crosshair
-        if (state.showGrid) {
-            GridOverlay()
-        }
+            // 2. Rule of Thirds Grid & Center Crosshair
+            if (state.showGrid) {
+                GridOverlay()
+            }
 
-        // 2b. Electronic Horizon Leveler
-        if (state.showHorizonLeveler) {
-            HorizonLeveler()
-        }
+            // 2b. Electronic Horizon Leveler
+            if (state.showHorizonLeveler) {
+                HorizonLeveler()
+            }
 
-        // 3. Exposure Zebras (Diagonal striped shader simulation for IRE >= threshold, 75% diffuse white in HLG)
-        if (state.showZebras) {
-            val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
-            val threshold = if (isHlg) 75 else state.zebraIreThreshold
-            ZebraOverlay(ireThreshold = threshold, isHlg = isHlg)
-        }
+            // 3. Exposure Zebras (Diagonal striped shader simulation for IRE >= threshold, 75% diffuse white in HLG)
+            if (state.showZebras) {
+                val isHlg = state.colorProfile == ColorProfile.HLG_10BIT
+                val threshold = if (isHlg) 75 else state.zebraIreThreshold
+                ZebraOverlay(ireThreshold = threshold, isHlg = isHlg)
+            }
 
-        // 4. Focus Peaking Overlay
-        if (state.showFocusPeaking) {
-            FocusPeakingOverlay(
-                color = Color(state.peakingColor.hexColor),
-                sensitivity = state.peakingSensitivity
-            )
+            // 4. Focus Peaking Overlay
+            if (state.showFocusPeaking) {
+                FocusPeakingOverlay(
+                    color = Color(state.peakingColor.hexColor),
+                    sensitivity = state.peakingSensitivity
+                )
+            }
         }
 
         // 5. Real-Time Movable RGB / Luma Histogram (Top Right HUD, safe from Dynamic Island & Side Deck)
-        val isPortrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
-            android.content.res.Configuration.ORIENTATION_PORTRAIT
         if (state.showHistogram) {
             MovableHistogramHUD(
                 data = state.histogramData,

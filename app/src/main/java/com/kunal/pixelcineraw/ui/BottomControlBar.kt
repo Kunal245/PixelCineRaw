@@ -424,6 +424,7 @@ fun GlassCircleActionButton(
     Box(
         modifier = modifier
             .size(size)
+            .graphicsLayer { alpha = if (enabled) 1f else 0.38f }
             .clip(CircleShape)
             .drawBehind {
                 drawCircle(color = CinemaCapsuleBg)

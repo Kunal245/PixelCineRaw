@@ -317,21 +317,23 @@ fun FormatColorQuickSheet(
         else -> "1080p"
     }
     val currentAspect = when {
-        kotlin.math.abs(state.videoResolution.aspectRatio - (4f / 3f)) < 0.05f -> "4:3 Open Gate"
-        kotlin.math.abs(state.videoResolution.aspectRatio - 2.39f) < 0.08f -> "2.39:1"
+        kotlin.math.abs(state.videoResolution.aspectRatio - (4f / 3f)) < 0.05f -> "4:3"
+        kotlin.math.abs(state.videoResolution.aspectRatio - 2.00f) < 0.06f -> "2.00:1"
+        kotlin.math.abs(state.videoResolution.aspectRatio - 1.00f) < 0.05f -> "1:1"
+        kotlin.math.abs(state.videoResolution.aspectRatio - 1.50f) < 0.05f -> "3:2"
         else -> "16:9"
     }
 
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val maxSheetHeight = if (configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
-        340.dp
+        500.dp
     } else {
-        235.dp
+        250.dp
     }
 
     Column(
         modifier = modifier
-            .widthIn(max = 352.dp)
+            .widthIn(max = 368.dp)
             .fillMaxWidth()
             .heightIn(max = maxSheetHeight)
             .clip(RoundedCornerShape(24.dp))
@@ -345,7 +347,7 @@ fun FormatColorQuickSheet(
                 )
             }
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         // Header telemetry line
@@ -380,6 +382,16 @@ fun FormatColorQuickSheet(
             selectedIndex = resTiers.indexOf(currentTier).coerceAtLeast(0)
         ) { idx ->
             onResolutionSelected(resolveCinemaResolution(resTiers[idx], currentAspect, state.supportedResolutions))
+        }
+
+        // 2. Aspect Ratio
+        val aspectOptions = listOf("16:9", "4:3", "2.00:1", "1:1", "3:2")
+        QuickSheetSegmentedRow(
+            title = "ASPECT RATIO",
+            items = aspectOptions,
+            selectedIndex = aspectOptions.indexOf(currentAspect).coerceAtLeast(0)
+        ) { idx ->
+            onResolutionSelected(resolveCinemaResolution(currentTier, aspectOptions[idx], state.supportedResolutions))
         }
 
         // 2. Frame Rate
@@ -573,11 +585,12 @@ private fun QuickSheetSegmentedRow(
                     Text(
                         text = item,
                         color = if (isSelected) CinemaObsidian else CinemaWhite,
-                        fontSize = 10.sp,
+                        fontSize = 9.5.sp,
                         fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
                         fontFamily = FontFamily.Monospace,
                         style = TabularTextStyle,
-                        maxLines = 1
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -624,17 +637,20 @@ private fun QuickChip(
 
 fun resolveCinemaResolution(tier: String, aspect: String, supported: List<CustomResolution>): CustomResolution {
     val targetRatio = when (aspect) {
-        "4:3 Open Gate" -> 4f / 3f
+        "4:3", "4:3 Open Gate" -> 4f / 3f
+        "2.00:1" -> 2.00f
+        "1:1" -> 1.00f
+        "3:2" -> 1.50f
         "2.39:1" -> 2.39f
         else -> 16f / 9f
     }
     val matchingAspect = supported.filter { kotlin.math.abs(it.aspectRatio - targetRatio) < 0.05f }
     if (matchingAspect.isNotEmpty()) {
         val match = when (tier) {
-            "4K" -> matchingAspect.filter { it.width >= 3800 || it.height >= 2160 }.maxByOrNull { it.width * it.height } ?: matchingAspect.maxByOrNull { it.width * it.height }
-            "2.5K" -> matchingAspect.filter { it.width in 2400..3200 || it.height in 1400..1800 }.minByOrNull { kotlin.math.abs(it.width - 2560) } ?: matchingAspect.minByOrNull { kotlin.math.abs(it.width - 2560) }
-            "1080p" -> matchingAspect.filter { it.width in 1800..2048 || it.height in 1000..1200 }.minByOrNull { kotlin.math.abs(it.width - 1920) } ?: matchingAspect.minByOrNull { kotlin.math.abs(it.width - 1920) }
-            else -> matchingAspect.firstOrNull()
+            "4K" -> matchingAspect.filter { it.width >= 3800 || it.height >= 2160 }.maxByOrNull { it.width * it.height }
+            "2.5K" -> matchingAspect.filter { it.width in 2400..3200 || it.height in 1400..1800 }.minByOrNull { kotlin.math.abs(it.width - 2560) }
+            "1080p" -> matchingAspect.filter { it.width in 1200..2160 && it.height in 960..1440 }.minByOrNull { kotlin.math.abs(it.height - 1080) }
+            else -> null
         }
         if (match != null) return match
     }
@@ -644,10 +660,26 @@ fun resolveCinemaResolution(tier: String, aspect: String, supported: List<Custom
             "2.5K" -> CustomResolution.fromSize(2560, 1072)
             else -> CustomResolution.fromSize(1920, 804)
         }
-        "4:3 Open Gate" -> when (tier) {
-            "4K" -> supported.filter { kotlin.math.abs(it.aspectRatio - (4f / 3f)) < 0.05f }.maxByOrNull { it.width * it.height } ?: CustomResolution.fromSize(4032, 3024)
+        "2.00:1" -> when (tier) {
+            "4K" -> CustomResolution.fromSize(3840, 1920)
+            "2.5K" -> CustomResolution.fromSize(2880, 1440)
+            else -> CustomResolution.fromSize(2160, 1080)
+        }
+        "1:1" -> when (tier) {
+            "4K" -> CustomResolution.fromSize(2160, 2160)
+            "2.5K" -> CustomResolution.fromSize(1440, 1440)
+            else -> CustomResolution.fromSize(1080, 1080)
+        }
+        "3:2" -> when (tier) {
+            "4K" -> CustomResolution.fromSize(3240, 2160)
+            "2.5K" -> CustomResolution.fromSize(2400, 1600)
+            else -> CustomResolution.fromSize(1920, 1280)
+        }
+        "4:3", "4:3 Open Gate" -> when (tier) {
+            "4K" -> supported.filter { kotlin.math.abs(it.aspectRatio - (4f / 3f)) < 0.05f && (it.width >= 3000 || it.height >= 2160) }
+                .maxByOrNull { it.width * it.height } ?: CustomResolution.fromSize(4032, 3024)
             "2.5K" -> CustomResolution.fromSize(2560, 1920)
-            else -> CustomResolution.fromSize(1920, 1440)
+            else -> CustomResolution.fromSize(1440, 1080)
         }
         else -> when (tier) {
             "4K" -> CustomResolution.UHD_4K

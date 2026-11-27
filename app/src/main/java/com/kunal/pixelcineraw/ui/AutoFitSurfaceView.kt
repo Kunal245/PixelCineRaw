@@ -33,7 +33,7 @@ class AutoFitSurfaceView @JvmOverloads constructor(
 
     private var aspectRatioWidth = 0
     private var aspectRatioHeight = 0
-    private var fullBleedMode = true
+    private var fullBleedMode = false
     private var isHdrEnabled = false
     private var activeProfile: ColorProfile = ColorProfile.REC709
     private var appliedProfile: ColorProfile? = null

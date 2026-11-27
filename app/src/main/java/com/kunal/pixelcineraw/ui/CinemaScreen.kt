@@ -310,12 +310,30 @@ fun CinemaScreen(
 
                         Row(
                             modifier = Modifier.align(Alignment.CenterEnd),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            val torchEnabled = !state.isFrontCamera
+                            val torchActive = state.isTorchOn && torchEnabled
+                            GlassCircleActionButton(
+                                isActive = torchActive,
+                                activeColor = CinemaAmber,
+                                enabled = torchEnabled,
+                                size = 42.dp,
+                                onClick = { viewModel.cameraController.toggleTorch() }
+                            ) {
+                                Icon(
+                                    imageVector = if (torchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                                    contentDescription = "Torch",
+                                    tint = if (torchActive) CinemaAmber else CinemaWhite,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
                             GlassCircleActionButton(
                                 isActive = state.isAeAfLocked,
                                 activeColor = CinemaCrimson,
+                                size = 44.dp,
                                 onClick = { viewModel.cameraController.toggleAeAfLock() }
                             ) {
                                 Icon(
@@ -330,6 +348,7 @@ fun CinemaScreen(
                                 GlassCircleActionButton(
                                     isActive = state.isRecordingPaused,
                                     activeColor = CinemaAmber,
+                                    size = 44.dp,
                                     onClick = { viewModel.cameraController.setRecordingPaused(!state.isRecordingPaused) }
                                 ) {
                                     Icon(
@@ -343,6 +362,7 @@ fun CinemaScreen(
                                 GlassCircleActionButton(
                                     isActive = state.isFrontCamera,
                                     activeColor = CinemaAmber,
+                                    size = 44.dp,
                                     onClick = { viewModel.cameraController.flipCamera() }
                                 ) {
                                     Icon(
@@ -492,10 +512,32 @@ fun CinemaScreen(
                         innerSquareSize = 26.dp
                     )
 
-                    LastClipGalleryButton(
-                        state = state,
-                        size = 48.dp
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val torchEnabled = !state.isFrontCamera
+                        val torchActive = state.isTorchOn && torchEnabled
+                        GlassCircleActionButton(
+                            isActive = torchActive,
+                            activeColor = CinemaAmber,
+                            enabled = torchEnabled,
+                            size = 42.dp,
+                            onClick = { viewModel.cameraController.toggleTorch() }
+                        ) {
+                            Icon(
+                                imageVector = if (torchActive) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                                contentDescription = "Torch",
+                                tint = if (torchActive) CinemaAmber else CinemaWhite,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        LastClipGalleryButton(
+                            state = state,
+                            size = 46.dp
+                        )
+                    }
                 }
 
                 // Active Vernier Scrubber / LUT / Monitor Popover (Landscape, directly above Row 2)

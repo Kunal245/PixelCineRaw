@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
@@ -62,10 +63,9 @@ private val TabularViewfinderStyle = TextStyle(fontFeatureSettings = TABULAR_NUM
 /**
  * Cinema Viewfinder powered by AutoFitSurfaceView.
  *
- * v2.0.0: 100% Edge-to-Edge Full-Bleed viewfinder (`Modifier.fillMaxSize()`) with zero
- * letterbox bars. HlgGlRenderer handles 1:1 square-pixel center-crop onto the full SurfaceView.
- * Focus reticle runs its spring snap (`1.28f -> 1.0f`, `dampingRatio = 0.82f`) strictly
- * in `graphicsLayer`, paired with a sleek glass micro-EV slider and AE/AF lock badge.
+ * v2.0.1: Keeps the root screen 100% edge-to-edge behind transparent system bars while
+ * fitting the active capture surface accurately to the selected recording aspect ratio
+ * (`16:9`, `4:3`, `2.00:1`, `1:1`, `3:2`) with a subtle `0.5dp` `#FFFFFF` `18%` frame border.
  */
 @Composable
 fun Viewfinder(
@@ -120,126 +120,139 @@ fun Viewfinder(
     var pinchAutoHideJob by remember { mutableStateOf<Job?>(null) }
 
     val vRes = state.videoResolution
+    val frameW = if (isPortrait) minOf(vRes.width, vRes.height).coerceAtLeast(1) else maxOf(vRes.width, vRes.height).coerceAtLeast(1)
+    val frameH = if (isPortrait) maxOf(vRes.width, vRes.height).coerceAtLeast(1) else minOf(vRes.width, vRes.height).coerceAtLeast(1)
+    val targetAspect = frameW.toFloat() / frameH.toFloat()
+    val onDismissOverlaysState = rememberUpdatedState(onDismissOverlays)
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectTapGestures {
+                    onDismissOverlaysState.value()
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                AutoFitSurfaceView(ctx).apply {
-                    surfaceViewRef = this
-                    setFullBleed(true)
+        // Active aspect-accurate capture container
+        Box(
+            modifier = Modifier.aspectRatio(targetAspect),
+            contentAlignment = Alignment.Center
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    AutoFitSurfaceView(ctx).apply {
+                        surfaceViewRef = this
+                        setFullBleed(false)
+                        val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
+                        val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
+                        setAspectRatio(curW, curH)
+                        applyColorProfileSurfaceState(
+                            profile = state.colorProfile,
+                            isRecording = state.isRecording,
+                            targetFps = state.targetFps
+                        )
+
+                        holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                surfaceViewRef = this@apply
+                                val curState = viewModel.state.value
+                                applyColorProfileSurfaceState(
+                                    profile = curState.colorProfile,
+                                    force = true,
+                                    isRecording = curState.isRecording,
+                                    targetFps = curState.targetFps
+                                )
+                                display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
+                                val surface = holder.surface
+                                if (surface.isValid) {
+                                    viewModel.attachPreviewSurface(surface)
+                                }
+                            }
+
+                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                val curState = viewModel.state.value
+                                val curRes = curState.videoResolution
+                                val isPort = display?.rotation == android.view.Surface.ROTATION_0 || display?.rotation == android.view.Surface.ROTATION_180 ||
+                                        curState.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
+                                val cW = if (isPort) minOf(curRes.width, curRes.height) else maxOf(curRes.width, curRes.height)
+                                val cH = if (isPort) maxOf(curRes.width, curRes.height) else minOf(curRes.width, curRes.height)
+                                setAspectRatio(cW, cH)
+                                applyColorProfileSurfaceState(
+                                    profile = curState.colorProfile,
+                                    force = false,
+                                    isRecording = curState.isRecording,
+                                    targetFps = curState.targetFps
+                                )
+                                display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
+                            }
+
+                            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                viewModel.detachPreviewSurface()
+                            }
+                        })
+                    }
+                },
+                update = { view ->
+                    surfaceViewRef = view
+                    view.setFullBleed(false)
                     val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
                     val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
-                    setAspectRatio(curW, curH)
-                    applyColorProfileSurfaceState(
+                    view.setAspectRatio(curW, curH)
+                    view.applyColorProfileSurfaceState(
                         profile = state.colorProfile,
                         isRecording = state.isRecording,
                         targetFps = state.targetFps
                     )
-
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                            surfaceViewRef = this@apply
-                            val curState = viewModel.state.value
-                            applyColorProfileSurfaceState(
-                                profile = curState.colorProfile,
-                                force = true,
-                                isRecording = curState.isRecording,
-                                targetFps = curState.targetFps
-                            )
-                            display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
-                            val surface = holder.surface
-                            if (surface.isValid) {
-                                viewModel.attachPreviewSurface(surface)
-                            }
-                        }
-
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                            val curState = viewModel.state.value
-                            val curRes = curState.videoResolution
-                            val isPort = display?.rotation == android.view.Surface.ROTATION_0 || display?.rotation == android.view.Surface.ROTATION_180 ||
-                                    curState.orientationLockMode == com.kunal.pixelcineraw.camera.OrientationLockMode.LOCK_PORTRAIT
-                            val cW = if (isPort) minOf(curRes.width, curRes.height) else maxOf(curRes.width, curRes.height)
-                            val cH = if (isPort) maxOf(curRes.width, curRes.height) else minOf(curRes.width, curRes.height)
-                            setAspectRatio(cW, cH)
-                            applyColorProfileSurfaceState(
-                                profile = curState.colorProfile,
-                                force = false,
-                                isRecording = curState.isRecording,
-                                targetFps = curState.targetFps
-                            )
-                            display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
-                        }
-
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            viewModel.detachPreviewSurface()
-                        }
-                    })
+                    view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
                 }
-            },
-            update = { view ->
-                surfaceViewRef = view
-                view.setFullBleed(true)
-                val curW = if (isPortrait) minOf(vRes.width, vRes.height) else maxOf(vRes.width, vRes.height)
-                val curH = if (isPortrait) maxOf(vRes.width, vRes.height) else minOf(vRes.width, vRes.height)
-                view.setAspectRatio(curW, curH)
-                view.applyColorProfileSurfaceState(
-                    profile = state.colorProfile,
-                    isRecording = state.isRecording,
-                    targetFps = state.targetFps
-                )
-                view.display?.rotation?.let { viewModel.cameraController.setDisplayRotation(it) }
-            }
-        )
+            )
 
-        // Seamless Lens Transition Crossfade
-        val transitionScaleAnim by animateFloatAsState(
-            targetValue = if (state.isTransitioningLens) state.transitionScale else 1.0f,
-            animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
-            label = "LensTransitionScale"
-        )
+            // Seamless Lens Transition Crossfade
+            val transitionScaleAnim by animateFloatAsState(
+                targetValue = if (state.isTransitioningLens) state.transitionScale else 1.0f,
+                animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+                label = "LensTransitionScale"
+            )
 
-        AnimatedVisibility(
-            visible = state.isTransitioningLens,
-            enter = fadeIn(animationSpec = tween(durationMillis = 40)),
-            exit = fadeOut(animationSpec = tween(durationMillis = 140)),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = transitionScaleAnim
-                        scaleY = transitionScaleAnim
-                    },
-                contentAlignment = Alignment.Center
+            AnimatedVisibility(
+                visible = state.isTransitioningLens,
+                enter = fadeIn(animationSpec = tween(durationMillis = 40)),
+                exit = fadeOut(animationSpec = tween(durationMillis = 140)),
+                modifier = Modifier.fillMaxSize()
             ) {
-                state.transitionBitmap?.let { bmp ->
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } ?: Box(
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f))
-                )
+                        .graphicsLayer {
+                            scaleX = transitionScaleAnim
+                            scaleY = transitionScaleAnim
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    state.transitionBitmap?.let { bmp ->
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } ?: Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.5f))
+                    )
+                }
             }
-        }
 
-        // Unified Touch & Reticle Overlay Box
-        val onDismissOverlaysState = rememberUpdatedState(onDismissOverlays)
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(state.minZoomRatio, state.maxZoomRatio) {
+            // Unified Touch & Reticle Overlay Box (aligned to exact capture area)
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(state.minZoomRatio, state.maxZoomRatio) {
                     detectTransformGestures { _, _, zoom, _ ->
                         if (zoom != 1.0f) {
                             val scaleFactor = 1.0f + (zoom - 1.0f) * 0.75f
@@ -423,6 +436,23 @@ fun Viewfinder(
                     }
                 }
             }
+            }
+
+            // Subtle 0.5dp #FFFFFF 18% frame border marking exact capture boundaries
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .drawBehind {
+                        val strokeW = 0.5.dp.toPx()
+                        val half = strokeW / 2f
+                        drawRect(
+                            color = CinemaSpecularTop,
+                            topLeft = Offset(half, half),
+                            size = Size(size.width - strokeW, size.height - strokeW),
+                            style = Stroke(width = strokeW)
+                        )
+                    }
+            )
         }
     }
 }
